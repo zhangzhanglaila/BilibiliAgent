@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>B站全自动运营多Agent操作台</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="topbar__inner">
+        <div class="brand">
+          <div class="brand__badge">B</div>
+          <div>
+            <h1>B站全自动运营多Agent操作台</h1>
+            <p>现代化可视化工作台，覆盖选题、文案、运营、优化与全流程。</p>
+          </div>
+        </div>
+        <div class="topbar__status-wrap">
+          <div class="status-pill" id="globalStatusPill">
+            <span class="status-dot"></span>
+            <span id="statusText">等待执行</span>
+          </div>
+          <button class="ghost-btn" id="clearResultsBtn" type="button">清空结果</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero-card">
+        <div>
+          <span class="hero-card__tag">BiliBili Multi-Agent Workspace</span>
+          <h2>一个页面管理 4 大 Agent 与全流程</h2>
+          <p>
+            保留原有后端能力，升级为更清晰、更年轻化、更适合演示与实际使用的 B 站风格操作台。
+          </p>
+        </div>
+        <div class="hero-metrics">
+          <div class="metric-box">
+            <span class="metric-box__label">Agent 数量</span>
+            <strong>4</strong>
+          </div>
+          <div class="metric-box">
+            <span class="metric-box__label">运行模式</span>
+            <strong>单 Agent / 全流程</strong>
+          </div>
+          <div class="metric-box">
+            <span class="metric-box__label">当前模式</span>
+            <strong id="currentModeText">空闲</strong>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace-grid">
+        <div class="panel control-panel">
+          <div class="panel__header">
+            <div>
+              <h3>操作区</h3>
+              <p>填写参数后，单独运行某个 Agent 或一键执行全流程。</p>
+            </div>
+          </div>
+
+          <label class="field field--full">
+            <span class="field__label">B站视频链接</span>
+            <input id="biliLink" value="" placeholder="粘贴完整 B 站视频链接，例如 https://www.bilibili.com/video/BV1xx411c7mD" />
+            <span class="field__hint">粘贴后会自动解析并智能填充 BV号、UP主ID 与分区</span>
+          </label>
+
+          <div class="form-grid">
+            <label class="field">
+              <span class="field__label">分区</span>
+              <input id="partition" value="knowledge" placeholder="knowledge / tech / life / game / ent" />
+            </label>
+
+            <label class="field">
+              <span class="field__label">同类 UP 主 ID</span>
+              <input id="upIds" value="546195,15263701,777536" placeholder="多个 ID 用英文逗号分隔" />
+            </label>
+
+            <label class="field">
+              <span class="field__label">文案风格</span>
+              <select id="style">
+                <option value="干货">干货</option>
+                <option value="教学">教学</option>
+                <option value="搞笑">搞笑</option>
+                <option value="混剪">混剪</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span class="field__label">视频 BV 号</span>
+              <input id="bvId" value="BV1xx411c7mD" placeholder="输入目标视频 BV 号" />
+            </label>
+          </div>
+
+          <label class="field field--full">
+            <span class="field__label">手动选题</span>
+            <input id="topic" value="AI 视频剪辑提效" placeholder="文案 Agent 可直接使用该主题" />
+          </label>
+
+          <div class="action-grid">
+            <button class="action-btn" data-action="topic" type="button">
+              <span class="action-btn__title">运行选题 Agent</span>
+              <span class="action-btn__desc">获取 3 个高潜力选题</span>
+            </button>
+            <button class="action-btn" data-action="copy" type="button">
+              <span class="action-btn__title">运行文案 Agent</span>
+              <span class="action-btn__desc">生成标题、脚本、简介与标签</span>
+            </button>
+            <button class="action-btn" data-action="operate" type="button">
+              <span class="action-btn__title">运行运营 Agent</span>
+              <span class="action-btn__desc">查看回复、删除、点赞与关注建议</span>
+            </button>
+            <button class="action-btn" data-action="optimize" type="button">
+              <span class="action-btn__title">运行优化 Agent</span>
+              <span class="action-btn__desc">输出标题、封面与内容优化建议</span>
+            </button>
+            <button class="action-btn action-btn--primary" data-action="pipeline" type="button">
+              <span class="action-btn__title">一键运行全流程</span>
+              <span class="action-btn__desc">按顺序执行选题 → 文案 → 运营 → 优化</span>
+            </button>
+          </div>
+        </div>
+
+        <aside class="panel side-panel">
+          <div class="panel__header">
+            <div>
+              <h3>操作提示</h3>
+              <p>推荐使用顺序：选题 → 文案 → 优化 → 全流程。</p>
+            </div>
+          </div>
+
+          <div class="tips-list">
+            <div class="tip-card">
+              <span class="tip-card__index">01</span>
+              <div>
+                <h4>先跑选题 Agent</h4>
+                <p>适合找方向，看看当前内容热点与同类账号爆款。</p>
+              </div>
+            </div>
+            <div class="tip-card">
+              <span class="tip-card__index">02</span>
+              <div>
+                <h4>再跑文案 Agent</h4>
+                <p>确定主题后，快速生成标题、脚本、简介、标签和置顶评论。</p>
+              </div>
+            </div>
+            <div class="tip-card">
+              <span class="tip-card__index">03</span>
+              <div>
+                <h4>运营 / 优化更适合带 BV 号</h4>
+                <p>这两个模块会基于目标视频给出更具体的互动与流量改进建议。</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="mode-note">
+            <h4>兼容说明</h4>
+            <ul>
+              <li>保留原有 4 大 Agent 和全流程接口。</li>
+              <li>仍支持手动选题与 dry_run。</li>
+              <li>仅升级 UI 与前端交互，不改后端逻辑。</li>
+            </ul>
+          </div>
+        </aside>
+      </section>
+
+      <section class="panel results-panel">
+        <div class="panel__header panel__header--results">
+          <div>
+            <h3>结果区</h3>
+            <p>每个 Agent 单独一个标签页，结果结构化、卡片化展示。</p>
+          </div>
+          <div class="results-tools">
+            <span class="result-badge" id="resultMetaText">暂无结果</span>
+          </div>
+        </div>
+
+        <div class="tabs" role="tablist">
+          <button class="tab-btn is-active" data-tab="topic" type="button">选题</button>
+          <button class="tab-btn" data-tab="copy" type="button">文案</button>
+          <button class="tab-btn" data-tab="operate" type="button">运营</button>
+          <button class="tab-btn" data-tab="optimize" type="button">优化</button>
+          <button class="tab-btn" data-tab="pipeline" type="button">全流程</button>
+        </div>
+
+        <div class="tab-panels">
+          <section class="tab-panel is-active" data-panel="topic">
+            <div class="empty-state" data-empty="topic">
+              <h4>还没有选题结果</h4>
+              <p>点击“运行选题 Agent”后，这里会显示 3 个高潜力选题卡片。</p>
+            </div>
+            <div class="panel-content" id="topicPanel"></div>
+          </section>
+
+          <section class="tab-panel" data-panel="copy">
+            <div class="empty-state" data-empty="copy">
+              <h4>还没有文案结果</h4>
+              <p>点击“运行文案 Agent”后，这里会显示标题、脚本、简介、标签和置顶评论。</p>
+            </div>
+            <div class="panel-content" id="copyPanel"></div>
+          </section>
+
+          <section class="tab-panel" data-panel="operate">
+            <div class="empty-state" data-empty="operate">
+              <h4>还没有运营结果</h4>
+              <p>点击“运行运营 Agent”后，这里会显示互动动作、评论处理与 dry_run 标识。</p>
+            </div>
+            <div class="panel-content" id="operatePanel"></div>
+          </section>
+
+          <section class="tab-panel" data-panel="optimize">
+            <div class="empty-state" data-empty="optimize">
+              <h4>还没有优化结果</h4>
+              <p>点击“运行优化 Agent”后，这里会显示优化标题、封面建议和内容调整方案。</p>
+            </div>
+            <div class="panel-content" id="optimizePanel"></div>
+          </section>
+
+          <section class="tab-panel" data-panel="pipeline">
+            <div class="empty-state" data-empty="pipeline">
+              <h4>还没有全流程结果</h4>
+              <p>点击“一键运行全流程”后，这里会按步骤展示完整结果，并支持折叠查看。</p>
+            </div>
+            <div class="panel-content" id="pipelinePanel"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast-stack" id="toastStack"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+langgraph>=0.2.40
+langchain>=0.3.0
+langchain-openai>=0.2.0
+bilibili-api-python>=17.1.0
+python-dotenv>=1.0.1
+requests>=2.32.0
+flask>=3.0.0
