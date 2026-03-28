@@ -17,7 +17,10 @@ if str(ROOT_DIR) not in sys.path:
 
 from bilibili_api import sync, video
 
+from agents.llm_workspace_agent import AgentTool, LLMWorkspaceAgent
+from agents.topic_agent import TopicAgent
 from config import CONFIG
+from llm_client import LLMClient
 from main import run_copy, run_operate, run_optimize, run_pipeline, run_topic
 
 app = Flask(
@@ -65,6 +68,13 @@ CREATOR_STOPWORDS = {
     "账号",
 }
 QUESTION_TOKENS = ("怎么", "如何", "为什么", "应该", "什么", "哪种", "哪类", "能不能")
+RUNTIME_MODE_LABELS = {
+    "rules": "无 Key 规则模式",
+    "llm_agent": "LLM Agent 模式",
+}
+
+RAW_TOPIC_AGENT = TopicAgent()
+LLM_WORKSPACE_AGENT: LLMWorkspaceAgent | None = None
 
 
 def safe_int(value: object) -> int:
@@ -556,6 +566,23 @@ def resolve_video_payload(url: str) -> dict:
     return build_resolved_payload(info, bvid)
 
 
+def is_resolved_payload_usable(payload: object, url: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    bv_id = str(payload.get("bv_id") or "").strip()
+    title = str(payload.get("title") or "").strip()
+    stats = payload.get("stats")
+    if not bv_id or not title or not isinstance(stats, dict):
+        return False
+
+    try:
+        expected_bv = extract_bvid(url)
+    except Exception:
+        expected_bv = ""
+
+    return not expected_bv or bv_id.upper() == expected_bv.upper()
+
+
 def inspect_title_strength(title: str) -> list[str]:
     points: list[str] = []
     if re.search(r"\d", title):
@@ -644,6 +671,372 @@ def build_low_performance_analysis(resolved: dict, performance: dict, optimize_r
     }
 
 
+def build_runtime_payload() -> dict:
+    mode = CONFIG.runtime_mode()
+    llm_enabled = CONFIG.llm_enabled()
+    return {
+        "mode": mode,
+        "mode_label": RUNTIME_MODE_LABELS.get(mode, mode),
+        "llm_enabled": llm_enabled,
+        "chat_available": llm_enabled,
+        "mode_title": "当前运行中：LLM Agent 模式" if llm_enabled else "当前运行中：无 Key 逻辑模式",
+        "mode_description": "已切换到 LLM Agent 中枢，分析、决策和生成全部由大模型实时完成。"
+        if llm_enabled
+        else "当前未配置 LLM_API_KEY，系统运行在纯代码规则模式，不会消耗 token。",
+        "token_policy": "会消耗 token，聊天助手已启用。" if llm_enabled else "不会消耗 token，聊天助手当前关闭。",
+        "switch_hint": "如果要切回逻辑模式，清空 .env 里的 LLM_API_KEY 后重启服务。"
+        if llm_enabled
+        else "如果要切到 LLM 模式，填写 .env 里的 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL 后重启服务。",
+    }
+
+
+def serialize_video_metric(video_metric: object) -> dict:
+    payload = video_metric.to_dict() if hasattr(video_metric, "to_dict") else dict(video_metric)
+    return {
+        "bvid": payload.get("bvid", ""),
+        "title": payload.get("title", ""),
+        "author": payload.get("author", ""),
+        "mid": safe_int(payload.get("mid")),
+        "view": safe_int(payload.get("view")),
+        "like": safe_int(payload.get("like")),
+        "coin": safe_int(payload.get("coin")),
+        "favorite": safe_int(payload.get("favorite")),
+        "reply": safe_int(payload.get("reply")),
+        "share": safe_int(payload.get("share")),
+        "duration": safe_int(payload.get("duration")),
+        "avg_view_duration": float(payload.get("avg_view_duration") or 0.0),
+        "like_rate": float(payload.get("like_rate") or 0.0),
+        "completion_rate": float(payload.get("completion_rate") or 0.0),
+        "competition_score": float(payload.get("competition_score") or 0.0),
+        "source": payload.get("source", ""),
+        "url": payload.get("url", ""),
+    }
+
+
+def build_market_snapshot(partition_name: str, up_ids: list[int] | None = None) -> dict:
+    normalized_partition = CONFIG.normalize_partition(partition_name)
+
+    try:
+        hot_board = [serialize_video_metric(item) for item in RAW_TOPIC_AGENT.fetch_hot_videos()[:6]]
+    except Exception:
+        hot_board = []
+
+    try:
+        partition_samples = [
+            serialize_video_metric(item)
+            for item in RAW_TOPIC_AGENT.fetch_partition_videos(normalized_partition)[:6]
+        ]
+    except Exception:
+        partition_samples = []
+
+    try:
+        peer_samples = [
+            serialize_video_metric(item)
+            for item in RAW_TOPIC_AGENT.fetch_peer_up_videos(up_ids)[:6]
+        ]
+    except Exception:
+        peer_samples = []
+
+    return {
+        "partition": normalized_partition,
+        "partition_label": PARTITION_LABELS.get(normalized_partition, normalized_partition),
+        "source_count": len(hot_board) + len(partition_samples) + len(peer_samples),
+        "hot_board": hot_board,
+        "partition_samples": partition_samples,
+        "peer_samples": peer_samples,
+    }
+
+
+def select_reference_videos(sources: list[dict], exclude_bvid: str = "", limit: int = 6) -> list[dict]:
+    ranked = sorted(
+        [item for item in sources if item.get("url")],
+        key=lambda item: (
+            -safe_int(item.get("view")),
+            -float(item.get("like_rate") or 0.0),
+            item.get("title", ""),
+        ),
+    )
+    result: list[dict] = []
+    seen: set[str] = set()
+    for item in ranked:
+        bvid = (item.get("bvid") or "").strip()
+        url = (item.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        if exclude_bvid and bvid.lower() == exclude_bvid.lower():
+            continue
+        seen.add(url)
+        result.append(
+            {
+                "title": item.get("title", ""),
+                "url": url,
+                "author": item.get("author", ""),
+                "view": safe_int(item.get("view")),
+                "like_rate": float(item.get("like_rate") or 0.0),
+                "source": item.get("source", ""),
+            }
+        )
+        if len(result) >= limit:
+            break
+    return result
+
+
+def build_reference_videos_from_market_snapshot(market_snapshot: dict, exclude_bvid: str = "") -> list[dict]:
+    sources = (
+        (market_snapshot.get("hot_board") or [])
+        + (market_snapshot.get("peer_samples") or [])
+        + (market_snapshot.get("partition_samples") or [])
+    )
+    return select_reference_videos(sources, exclude_bvid=exclude_bvid, limit=6)
+
+
+def extract_reference_links_from_tool_observations(observations: list[dict], exclude_bvid: str = "") -> list[dict]:
+    sources: list[dict] = []
+    for item in observations or []:
+        observation = item.get("observation") if isinstance(item, dict) else {}
+        if not isinstance(observation, dict):
+            continue
+        if isinstance(observation.get("market_snapshot"), dict):
+            sources.extend(build_reference_videos_from_market_snapshot(observation.get("market_snapshot"), exclude_bvid))
+        for key in ("hot_board", "peer_samples", "partition_samples"):
+            value = observation.get(key)
+            if isinstance(value, list):
+                sources.extend(select_reference_videos(value, exclude_bvid=exclude_bvid, limit=6))
+    return select_reference_videos(sources, exclude_bvid=exclude_bvid, limit=6)
+
+
+def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
+    owner = info.get("owner", {})
+    mid = safe_int(owner.get("mid"))
+    up_name = owner.get("name") or owner.get("uname") or ""
+    title = info.get("title", "")
+    tid = safe_int(info.get("tid"))
+    tname = info.get("tname", "")
+    retrieval_partition = map_partition(tname, tid)
+
+    return {
+        "bv_id": bvid,
+        "url": url.strip(),
+        "title": title,
+        "up_name": up_name,
+        "mid": mid,
+        "up_ids": [mid] if mid else [],
+        "tid": tid,
+        "tname": tname,
+        "duration": safe_int(info.get("duration")),
+        "stats": extract_video_stats(info),
+        "retrieval_partition": retrieval_partition,
+        "retrieval_partition_label": PARTITION_LABELS.get(retrieval_partition, retrieval_partition),
+    }
+
+
+def build_creator_briefing(field_name: str, direction: str, idea: str, partition_name: str) -> dict:
+    normalized_partition = CONFIG.normalize_partition(partition_name)
+    return {
+        "user_input": {
+            "field": field_name.strip(),
+            "direction": direction.strip(),
+            "idea": idea.strip(),
+            "partition": partition_name,
+            "normalized_partition": normalized_partition,
+        },
+        "market_snapshot": build_market_snapshot(normalized_partition),
+    }
+
+
+def build_video_briefing(url: str) -> dict:
+    bvid = extract_bvid(url)
+    info = fetch_video_info(url, bvid)
+    video_payload = build_llm_video_payload(info, bvid, url)
+    market_snapshot = build_market_snapshot(video_payload.get("retrieval_partition", "knowledge"), video_payload.get("up_ids"))
+    return {
+        "video": video_payload,
+        "market_snapshot": market_snapshot,
+    }
+
+
+def build_hot_board_snapshot(partition_name: str) -> dict:
+    market_snapshot = build_market_snapshot(partition_name)
+    return {
+        "partition": market_snapshot.get("partition"),
+        "partition_label": market_snapshot.get("partition_label"),
+        "hot_board": market_snapshot.get("hot_board", []),
+        "partition_samples": market_snapshot.get("partition_samples", []),
+    }
+
+
+def extract_first_bili_url(text: str) -> str:
+    match = re.search(r"https?://[^\s]+", text or "", flags=re.IGNORECASE)
+    return match.group(0).strip() if match else ""
+
+
+def get_llm_workspace_agent() -> LLMWorkspaceAgent:
+    global LLM_WORKSPACE_AGENT
+    if not CONFIG.llm_enabled():
+        raise RuntimeError("当前未配置 LLM_API_KEY，LLM Agent 模式不可用。")
+
+    if LLM_WORKSPACE_AGENT is None:
+        LLM_WORKSPACE_AGENT = LLMWorkspaceAgent(
+            tools=[
+                AgentTool(
+                    name="creator_briefing",
+                    description="根据领域、方向、想法和分区，抓取热点榜、分区样本、同类样本原始数据。输入: {field, direction, idea, partition}",
+                    handler=lambda payload: build_creator_briefing(
+                        payload.get("field", ""),
+                        payload.get("direction", ""),
+                        payload.get("idea", ""),
+                        payload.get("partition", "knowledge"),
+                    ),
+                ),
+                AgentTool(
+                    name="video_briefing",
+                    description="解析 B 站视频链接，返回视频公开数据，并抓取相同分区与同类 UP 的原始样本。输入: {url}",
+                    handler=lambda payload: build_video_briefing(payload.get("url", "")),
+                ),
+                AgentTool(
+                    name="hot_board_snapshot",
+                    description="获取指定分区的热点榜和分区样本原始数据，适合回答趋势、热点、近期什么内容火。输入: {partition}",
+                    handler=lambda payload: build_hot_board_snapshot(payload.get("partition", "knowledge")),
+                ),
+            ]
+        )
+    return LLM_WORKSPACE_AGENT
+
+
+def run_llm_module_create(data: dict) -> dict:
+    agent = get_llm_workspace_agent()
+    response_contract = (
+        "返回一个 JSON 对象，字段必须包含：\n"
+        "- normalized_profile: 字符串，整理后的创作方向\n"
+        "- seed_topic: 字符串，当前要解决的核心问题\n"
+        "- partition: 字符串，分区名\n"
+        "- style: 字符串，文案风格\n"
+        "- chosen_topic: 字符串，最终主选题\n"
+        "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords\n"
+        "- copy_result: 对象，包含 topic, style, titles(3个), script(至少4段，含 section/duration/content), description, tags, pinned_comment\n"
+    )
+    return agent.run_structured(
+        task_name="module_create",
+        task_goal="基于用户输入和实时市场样本，为创作者输出更容易起量的 3 个选题，并生成完整可发布文案。",
+        user_payload={
+            "field": (data.get("field") or "").strip(),
+            "direction": (data.get("direction") or "").strip(),
+            "idea": (data.get("idea") or "").strip(),
+            "partition": (data.get("partition") or "knowledge").strip() or "knowledge",
+            "style": (data.get("style") or "干货").strip() or "干货",
+        },
+        response_contract=response_contract,
+        allowed_tools=["creator_briefing"],
+        required_tools=["creator_briefing"],
+        required_final_keys=["normalized_profile", "seed_topic", "partition", "style", "chosen_topic", "topic_result", "copy_result"],
+    )
+
+
+def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) -> dict:
+    agent = get_llm_workspace_agent()
+    response_contract = (
+        "返回一个 JSON 对象，字段必须包含：\n"
+        "- resolved: 对象，包含 bv_id, title, up_name, tname, partition, partition_label, stats\n"
+        "- performance: 对象，包含 label, is_hot, score, reasons, summary\n"
+        "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords\n"
+        "- optimize_result: 对象，包含 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions\n"
+        "- copy_result: 对象或 null；如果你判断视频表现偏低，则必须返回一套新的标题/脚本/简介/标签/置顶评论\n"
+        "- analysis: 对象，包含 analysis_points，并根据判断补充 followup_topics 或 next_topics、title_suggestions、cover_suggestion、content_suggestions\n"
+    )
+    result = agent.run_structured(
+        task_name="module_analyze",
+        task_goal="基于后端已经解析出的当前视频真实信息，以及同类市场样本，判断它更接近爆款还是低表现，并解释原因，同时给出后续选题和优化方案。",
+        user_payload={
+            "url": (data.get("url") or "").strip(),
+            "parsed_video": resolved,
+            "market_snapshot": market_snapshot,
+        },
+        response_contract=response_contract,
+        allowed_tools=["hot_board_snapshot"],
+        required_final_keys=["resolved", "performance", "topic_result", "optimize_result", "analysis", "copy_result"],
+    )
+    result["resolved"] = resolved
+    result["reference_videos"] = build_reference_videos_from_market_snapshot(market_snapshot, resolved.get("bv_id", ""))
+    return result
+
+
+def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot: dict) -> dict:
+    llm = LLMClient()
+    llm.require_available()
+    system_prompt = (
+        "你是 B 站视频分析助手。"
+        "当前已经拿到后端解析出的真实视频信息和同类样本，请直接完成爆款/低表现判断、原因拆解、优化建议和后续选题。"
+        "不要输出解释性废话，只返回 JSON。"
+    )
+    user_prompt = (
+        "请根据下面的数据直接输出 JSON，对象字段必须包含："
+        "resolved, performance, topic_result, optimize_result, copy_result, analysis。\n\n"
+        f"当前视频真实信息：{json.dumps(resolved, ensure_ascii=False)}\n\n"
+        f"市场样本：{json.dumps(market_snapshot, ensure_ascii=False)}\n\n"
+        "要求：\n"
+        "1. resolved 直接复用当前视频真实信息，不要改 BV、标题、播放等字段。\n"
+        "2. performance 必须包含 label, is_hot, score, reasons, summary。\n"
+        "3. topic_result.ideas 输出 3 个后续选题，每项包含 topic, reason, video_type, keywords。\n"
+        "4. optimize_result 输出 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions。\n"
+        "5. 如果你判断 is_hot=true，则 copy_result 返回 null，analysis 重点输出 analysis_points 和 followup_topics。\n"
+        "6. 如果你判断 is_hot=false，则 copy_result 必须输出一版新文案，analysis 重点输出 analysis_points, next_topics, title_suggestions, cover_suggestion, content_suggestions。"
+    )
+    result = llm.invoke_json_required(system_prompt, user_prompt)
+    if not isinstance(result, dict):
+        raise ValueError("LLM fallback 返回格式无效")
+    result["resolved"] = resolved
+    result.setdefault("reference_videos", build_reference_videos_from_market_snapshot(market_snapshot, resolved.get("bv_id", "")))
+    result.setdefault("runtime_mode", "llm_agent")
+    result.setdefault("agent_trace", ["llm_direct_fallback"])
+    return result
+
+
+def run_llm_chat(data: dict) -> dict:
+    agent = get_llm_workspace_agent()
+    message = (data.get("message") or "").strip()
+    history = data.get("history") if isinstance(data.get("history"), list) else []
+    context = data.get("context") if isinstance(data.get("context"), dict) else {}
+
+    creator_context = {
+        "field": (context.get("field") or "").strip(),
+        "direction": (context.get("direction") or "").strip(),
+        "idea": (context.get("idea") or "").strip(),
+        "partition": (context.get("partition") or "").strip(),
+        "style": (context.get("style") or "").strip(),
+    }
+    video_url = (context.get("videoLink") or "").strip() or extract_first_bili_url(message)
+
+    response_contract = (
+        "返回一个 JSON 对象，字段必须包含：\n"
+        "- reply: 字符串，直接回答用户问题；如果信息不足，要明确指出还缺什么\n"
+        "- suggested_next_actions: 字符串数组，可为空\n"
+        "- mode: 固定返回 llm_agent\n"
+    )
+    result = agent.run_structured(
+        task_name="workspace_chat",
+        task_goal="理解用户自然语言意图，自主决定是否调用工具来完成选题、视频分析、热点判断、文案建议等问题，并用中文直接回复。",
+        user_payload={
+            "message": message,
+            "history": history[-8:],
+            "creator_context": creator_context,
+            "video_url": video_url,
+        },
+        response_contract=response_contract,
+        allowed_tools=["creator_briefing", "video_briefing", "hot_board_snapshot"],
+        required_final_keys=["reply", "suggested_next_actions", "mode"],
+    )
+    result["reference_links"] = extract_reference_links_from_tool_observations(
+        result.get("tool_observations", []),
+        exclude_bvid="",
+    )
+    return result
+
+
+@app.get("/api/runtime-info")
+def api_runtime_info():
+    return jsonify({"success": True, "data": build_runtime_payload()})
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
@@ -672,10 +1065,16 @@ def api_module_create():
     field_name = (data.get("field") or "").strip()
     direction = (data.get("direction") or "").strip()
     idea = (data.get("idea") or "").strip()
-    seed_topic = build_seed_topic(field_name, direction, idea)
-    if not seed_topic:
+    if not field_name and not direction and not idea:
         return jsonify({"success": False, "error": "请至少输入领域、方向、想法中的一项"}), 400
 
+    if CONFIG.llm_enabled():
+        try:
+            return jsonify({"success": True, "data": run_llm_module_create(data)})
+        except Exception as exc:
+            return jsonify({"success": False, "error": f"LLM Agent 生成失败：{exc}"}), 500
+
+    seed_topic = build_seed_topic(field_name, direction, idea)
     partition_name = CONFIG.normalize_partition((data.get("partition") or "knowledge").strip() or "knowledge")
     style = (data.get("style") or "干货").strip() or "干货"
 
@@ -718,7 +1117,24 @@ def api_module_analyze():
     if not url:
         return jsonify({"success": False, "error": "请先输入 B 站视频链接"}), 400
 
-    resolved = resolve_video_payload(url)
+    try:
+        resolved = data.get("resolved") if is_resolved_payload_usable(data.get("resolved"), url) else resolve_video_payload(url)
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"链接解析失败：{exc}"}), 400
+
+    if CONFIG.llm_enabled():
+        try:
+            market_snapshot = build_market_snapshot(resolved.get("partition"), resolved.get("up_ids"))
+            return jsonify({"success": True, "data": run_llm_module_analyze(data, resolved, market_snapshot)})
+        except Exception as exc:
+            try:
+                market_snapshot = build_market_snapshot(resolved.get("partition"), resolved.get("up_ids"))
+                fallback_result = run_llm_module_analyze_fallback(data, resolved, market_snapshot)
+                fallback_result["llm_warning"] = f"Agent 中枢执行失败，已切换到 LLM 直出分析：{exc}"
+                return jsonify({"success": True, "data": fallback_result})
+            except Exception as fallback_exc:
+                return jsonify({"success": False, "error": f"LLM Agent 分析失败：{exc}；LLM fallback 也失败：{fallback_exc}"}), 500
+
     topic_result = run_topic(
         partition_name=resolved.get("partition"),
         up_ids=resolved.get("up_ids"),
@@ -735,6 +1151,8 @@ def api_module_analyze():
         copy_result = run_copy(topic=resolved.get("topic") or resolved.get("title") or "视频优化", style=resolved.get("style", "干货"))
         analysis = build_low_performance_analysis(resolved, performance, optimize_result, topic_result)
 
+    reference_videos = select_reference_videos(topic_result.get("videos", []), exclude_bvid=resolved.get("bv_id", ""), limit=6)
+
     return jsonify(
         {
             "success": True,
@@ -745,9 +1163,27 @@ def api_module_analyze():
                 "optimize_result": optimize_result,
                 "copy_result": copy_result,
                 "analysis": analysis,
+                "reference_videos": reference_videos,
             },
         }
     )
+
+
+@app.post("/api/chat")
+def api_chat():
+    if not CONFIG.llm_enabled():
+        return jsonify({"success": False, "error": "当前是无 Key 规则模式，智能对话助手仅在配置 LLM_API_KEY 后可用。"}), 400
+
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"success": False, "error": "请输入对话内容"}), 400
+
+    try:
+        result = run_llm_chat(data)
+        return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"智能对话失败：{exc}"}), 500
 
 
 @app.post("/api/topic")

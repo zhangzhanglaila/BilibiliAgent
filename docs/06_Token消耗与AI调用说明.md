@@ -1,159 +1,232 @@
-# Token 消耗与 AI 调用说明
+# Token 消耗与双链路说明
 
 ## 1. 先说结论
 
-这套项目不是“所有 Agent 都必须调用 AI 才能运行”。
+这个项目现在是明确的双模式架构，不再是“部分地方可选调模型”的混合写法。
 
-它是两层结构：
+### 逻辑链路（无 Key）
 
-1. 底层先用纯代码规则完成数据抓取、链接解析、指标计算、逻辑判断和基础生成
-2. 只有部分“生成型”环节在配置了 `LLM_API_KEY` 之后，才会额外调用大模型做增强
+- 条件：没有配置 `LLM_API_KEY`
+- 结果：模块一和模块二都走现有纯代码逻辑
+- 特点：不消耗 token，聊天助手关闭
 
-所以：
+### LLM 链路（有 Key）
 
-- 如果没有配置 `LLM_API_KEY`，项目可以正常运行，而且不会消耗 token
-- 如果配置了 `LLM_API_KEY`，只有文案生成、评论回复、优化建议这些环节可能消耗 token
+- 条件：已经配置 `LLM_API_KEY`
+- 结果：Web 端切换到 `LLMWorkspaceAgent`
+- 特点：模块一、模块二、聊天助手都由 LLM Agent 主导，会消耗 token
 
-## 2. 当前这个项目现在会不会消耗 token
+## 2. 一般用户怎么判断当前会不会消耗 token
 
-按当前目录的实际情况看：
+判断原则很简单：
 
-- `D:\\agent\\.env` 文件目前不存在
-- 当前运行环境里的 `LLM_API_KEY` 也是空的
-- `.env.example` 里默认也是空值
+- 当前是 `逻辑链路（无 Key）` -> 不会消耗 token
+- 当前是 `LLM 链路（有 Key）` -> 会消耗 token
 
-这意味着当前项目直接运行时，默认不会发起大模型请求，因此不会消耗 token。
+最直接的判断方式有 3 种：
+
+### 方式 1：看页面顶部的运行模式
+
+页面会显示：
+
+- `运行模式：无 Key 规则模式`
+- 或 `运行模式：LLM Agent 模式`
+
+### 方式 2：看 `.env` 里的 `LLM_API_KEY`
+
+如果 `.env` 中：
+
+- `LLM_API_KEY=` 为空 -> 逻辑链路
+- `LLM_API_KEY=` 有值 -> LLM 链路
+
+### 方式 3：看运行时接口
+
+访问：
+
+- `/api/runtime-info`
+
+如果返回：
+
+- `mode=rules` -> 逻辑链路
+- `mode=llm_agent` -> LLM 链路
+
+如果你想看一步一步怎么切换，见：
+
+- [07_运行模式切换说明.md](D:/agent/docs/07_运行模式切换说明.md)
+
+## 3. 模式是怎么判断的
 
 相关代码：
 
-- [llm_client.py](D:/agent/llm_client.py#L17) 里 `LLMClient` 会先判断 `CONFIG.llm_api_key` 是否存在
-- [llm_client.py](D:/agent/llm_client.py#L33) 的 `invoke_json()` 在模型不可用时直接返回本地 fallback
-- [llm_client.py](D:/agent/llm_client.py#L50) 的 `invoke_text()` 也是同样逻辑
-- [.env.example](D:/agent/.env.example#L4) 里 `LLM_API_KEY` 默认是空的
-- [config.py](D:/agent/config.py#L47) 里 `llm_api_key` 就是从环境变量里读取
+- [config.py](D:/agent/config.py#L58) 的 `llm_enabled()`
+- [config.py](D:/agent/config.py#L61) 的 `runtime_mode()`
+- [web/app.py](D:/agent/web/app.py#L645) 的 `/api/runtime-info`
 
-## 3. 哪些部分是纯代码逻辑
+判断规则非常直接：
 
-下面这些核心流程，不依赖大模型也能跑：
+- 有 `LLM_API_KEY` -> `llm_agent`
+- 没有 `LLM_API_KEY` -> `rules`
 
-- B 站链接解析、BV 提取、公开接口兜底、HTML 兜底解析
-  - 见 [web/app.py](D:/agent/web/app.py#L553)
-- 模块一里用户输入的整理、方向归一化、选题结果组装
-  - 见 [web/app.py](D:/agent/web/app.py#L159)
-  - 见 [web/app.py](D:/agent/web/app.py#L275)
-- 视频表现判断，比如热门爆款还是播放偏低
-  - 见 [web/app.py](D:/agent/web/app.py#L574)
-- 热门视频抓取、同类视频抓取、关键词提取、竞争度估算、选题打分
-  - 见 [agents/topic_agent.py](D:/agent/agents/topic_agent.py#L17)
-  - 见 [agents/topic_agent.py](D:/agent/agents/topic_agent.py#L390)
-- 数据优化里的规则诊断部分
-  - 见 [agents/optimization_agent.py](D:/agent/agents/optimization_agent.py#L76)
+## 4. 逻辑链路（无 Key）到底走什么
 
-简单说，系统最核心的“判断流程”本身并不是靠 AI 自己思考出来的，而是你项目里写死的规则、阈值、模板和数据处理逻辑。
+### 模块一
 
-## 4. 哪些部分会在有 Key 时调用 AI
+入口：
 
-只有下面这些生成型环节，会在配置了 `LLM_API_KEY` 时调用大模型：
+- [web/app.py](D:/agent/web/app.py#L839)
 
-### 4.1 文案生成
+链路：
 
-- 见 [agents/copywriting_agent.py](D:/agent/agents/copywriting_agent.py#L369)
+1. `api_module_create`
+2. `build_seed_topic`
+3. `run_topic`
+4. `build_creator_topic_result`
+5. `run_copy`
 
-这里会把选题、风格传给 `LLMClient.invoke_json()`。
+这条链路本质上还是：
 
-如果没有 Key，就直接走本地 fallback 文案模板，不会调用 AI。
+- 纯代码整理输入
+- 纯代码抓取样本
+- 纯代码规则组装选题
+- 文案 Agent 在无 Key 时走 fallback
 
-### 4.2 评论回复
+### 模块二
 
-- 见 [agents/operation_agent.py](D:/agent/agents/operation_agent.py#L41)
+入口：
 
-这里只在生成回复文案时可能调 AI。
+- [web/app.py](D:/agent/web/app.py#L882)
 
-如果没有 Key，就直接使用本地回复模板：
+链路：
 
-- 感谢类
-- 问答类
-- 互动类
+1. `api_module_analyze`
+2. `resolve_video_payload`
+3. `run_topic`
+4. `run_optimize`
+5. `classify_video_performance`
+6. `build_hot_analysis` 或 `build_low_performance_analysis`
 
-### 4.3 优化建议润色
+这条链路本质上还是：
 
-- 见 [agents/optimization_agent.py](D:/agent/agents/optimization_agent.py#L103)
+- 纯代码解析视频
+- 纯代码判断数据表现
+- 纯代码生成优化建议
 
-这里会先跑一套本地规则诊断，再把结果交给大模型增强表达。
+### 聊天助手
 
-如果没有 Key，就直接返回规则生成的 fallback 建议。
+逻辑链路下不可用：
 
-## 5. 两个业务模块各自会不会消耗 token
+- [web/app.py](D:/agent/web/app.py#L926)
 
-### 模块一：还没发布视频，不知道做什么内容
+如果没有 Key，`/api/chat` 会直接返回不可用提示。
 
-调用链：
+## 5. LLM 链路（有 Key）到底走什么
 
-1. 前端提交到 [web/app.py](D:/agent/web/app.py#L670)
-2. 后端先做输入整理和方向归一化
-3. 再调用 [main.py](D:/agent/main.py#L17) 的 `run_topic()`
-4. `run_topic()` 进入 [agents/topic_agent.py](D:/agent/agents/topic_agent.py#L390)
-5. 最后调用 [main.py](D:/agent/main.py#L34) 的 `run_copy()`
+### LLM Agent 中枢
 
-这里面：
+核心文件：
 
-- `run_topic()` 主要是纯代码 + B 站数据抓取，不消耗 token
-- `run_copy()` 只有在配置了 `LLM_API_KEY` 时才可能消耗 token
+- [agents/llm_workspace_agent.py](D:/agent/agents/llm_workspace_agent.py)
 
-所以模块一是否消耗 token，关键只看文案生成那一步有没有启用大模型。
+它负责：
 
-### 模块二：已经发布了视频，想分析和优化
+- 决定先调用哪个工具
+- 读取工具返回数据
+- 再决定是否继续调用工具
+- 最终输出模块结果或聊天回复
 
-调用链：
+### 模块一
 
-1. 前端提交到 [web/app.py](D:/agent/web/app.py#L715)
-2. 先解析 B 站链接和公开数据
-3. 再做视频表现判断
-4. 再调用 `run_topic()`
-5. 再调用 `run_optimize()`
-6. 如果视频表现偏低，还会额外调用 `run_copy()`
+入口：
 
-这里面：
+- [web/app.py](D:/agent/web/app.py#L839)
+- [web/app.py](D:/agent/web/app.py#L752) 的 `run_llm_module_create`
 
-- 链接解析、数据解析、表现判断、选题分析，本质上是纯代码逻辑
-- `run_optimize()` 在有 Key 时可能消耗 token
-- 低表现视频额外生成新文案时，`run_copy()` 在有 Key 时也可能消耗 token
+链路：
 
-所以模块二不一定消耗 token，是否消耗取决于你有没有启用 LLM。
+1. `api_module_create`
+2. `run_llm_module_create`
+3. `LLMWorkspaceAgent`
+4. `creator_briefing` 工具
+5. LLM 输出选题和整套文案
 
-## 6. 你可以把它理解成什么架构
+### 模块二
 
-可以把这套系统理解成：
+入口：
 
-`规则引擎 / 数据处理` + `可选的大模型润色和增强`
+- [web/app.py](D:/agent/web/app.py#L882)
+- [web/app.py](D:/agent/web/app.py#L781) 的 `run_llm_module_analyze`
 
-不是：
+链路：
 
-`所有判断都交给 AI 黑盒完成`
+1. `api_module_analyze`
+2. `run_llm_module_analyze`
+3. `LLMWorkspaceAgent`
+4. `video_briefing` / `hot_board_snapshot` 工具
+5. LLM 输出判断、拆解、优化建议和新文案
 
-这也是为什么即使不配 Key，这个项目仍然能跑起来。
+### 聊天助手
 
-## 7. 如果以后你配置了 Key，会发生什么
+入口：
 
-当你后面补上这些配置时：
+- [web/app.py](D:/agent/web/app.py#L926)
+- [web/app.py](D:/agent/web/app.py#L810) 的 `run_llm_chat`
+
+链路：
+
+1. 前端发送自然语言问题
+2. `LLMWorkspaceAgent` 判断意图
+3. 自主调用工具
+4. 组织最终回答
+
+## 6. LLM 链路下哪些地方会消耗 token
+
+只要已经配置 `LLM_API_KEY`，下面这些 Web 端入口都会走模型：
+
+- `/api/module-create`
+- `/api/module-analyze`
+- `/api/chat`
+
+调用模型的底层封装在：
+
+- [llm_client.py](D:/agent/llm_client.py)
+
+严格调用方法是：
+
+- [llm_client.py](D:/agent/llm_client.py#L73) 的 `invoke_json_required`
+- [llm_client.py](D:/agent/llm_client.py#L88) 的 `invoke_text_required`
+
+## 7. 逻辑链路和 LLM 链路的边界
+
+### 逻辑链路
+
+负责：
+
+- 固定规则
+- 固定判断
+- 固定模板
+- 无 token 运行
+
+### LLM 链路
+
+负责：
+
+- 任务理解
+- 工具选择
+- 结果分析
+- 判断结论
+- 文案生成
+- 聊天回复
+
+工具层只负责提供数据，不负责最终结论。
+
+## 8. 最后一句
+
+如果你只是想本地跑通项目，不配 Key 也完全可以。
+
+如果你想启用真正的 LLM Agent 工作流，再配置：
 
 - `LLM_API_KEY`
 - `LLM_BASE_URL`
 - `LLM_MODEL`
 
-系统就会开始在文案生成、回复生成、优化建议这些环节调用模型。
-
-这时候才会产生 token 消耗。
-
-注意：
-
-- 是否计费，最终取决于你接入的模型服务商
-- 如果请求已经发出但对方接口报错，是否计费也由服务商决定，不由本项目代码决定
-
-## 8. 最后一句
-
-按你现在这个仓库的当前状态，答案是：
-
-当前默认不会消耗 token。
-
-因为现在没有配置 `LLM_API_KEY`，系统运行时会自动走本地 fallback 逻辑。
+配置后，Web 端就会从逻辑链路切到 LLM 链路，并开始消耗 token。

@@ -63,6 +63,12 @@ class AppConfig:
         name = PARTITION_ALIASES.get(name, name)
         return name if name in PARTITION_TIDS else "knowledge"
 
+    def llm_enabled(self) -> bool:
+        return bool((self.llm_api_key or "").strip())
+
+    def runtime_mode(self) -> str:
+        return "llm_agent" if self.llm_enabled() else "rules"
+
     def partition_tid(self, partition_name: str | None = None) -> int:
         return PARTITION_TIDS[self.normalize_partition(partition_name)]
 
