@@ -17,6 +17,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from bilibili_api import sync, video
 
+from agents.copywriting_agent import CopywritingAgent
 from agents.llm_workspace_agent import AgentTool, LLMWorkspaceAgent
 from agents.topic_agent import TopicAgent
 from config import CONFIG
@@ -67,6 +68,30 @@ CREATOR_STOPWORDS = {
     "自己",
     "账号",
 }
+REFERENCE_STOPWORDS = CREATOR_STOPWORDS | {
+    "这个",
+    "那个",
+    "这条",
+    "本期",
+    "今天",
+    "最近",
+    "系列",
+    "合集",
+    "完整版",
+    "原创",
+    "更新",
+    "日常",
+    "记录",
+    "分享",
+    "推荐",
+    "实拍",
+    "作品",
+    "内容",
+    "视频",
+    "高表现",
+    "爆款",
+    "参考",
+}
 QUESTION_TOKENS = ("怎么", "如何", "为什么", "应该", "什么", "哪种", "哪类", "能不能")
 RUNTIME_MODE_LABELS = {
     "rules": "无 Key 规则模式",
@@ -74,6 +99,7 @@ RUNTIME_MODE_LABELS = {
 }
 
 RAW_TOPIC_AGENT = TopicAgent()
+RAW_COPY_AGENT = CopywritingAgent()
 LLM_WORKSPACE_AGENT: LLMWorkspaceAgent | None = None
 
 
@@ -82,6 +108,99 @@ def safe_int(value: object) -> int:
         return int(value or 0)
     except Exception:
         return 0
+
+
+def safe_metric_int(value: object) -> int:
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    text = str(value or "").strip().lower()
+    if not text:
+        return 0
+
+    multiplier = 1
+    if text.endswith("万"):
+        multiplier = 10000
+        text = text[:-1]
+    elif text.endswith("亿"):
+        multiplier = 100000000
+        text = text[:-1]
+
+    text = text.replace(",", "")
+    try:
+        return int(float(text) * multiplier)
+    except Exception:
+        return 0
+
+
+def clean_copy_text(value: object) -> str:
+    return RAW_COPY_AGENT._clean_text(str(value or ""))
+
+
+def build_fallback_copy_payload(topic: str, style: str) -> dict:
+    fallback = RAW_COPY_AGENT._fallback(topic, style)
+    return {
+        "topic": topic,
+        "style": style,
+        "titles": fallback.titles,
+        "script": fallback.script,
+        "description": fallback.description,
+        "tags": fallback.tags,
+        "pinned_comment": fallback.pinned_comment,
+    }
+
+
+def normalize_copy_result_payload(copy_result: object, topic: str, style: str) -> dict:
+    clean_topic = clean_copy_text(topic) or "B站内容策划"
+    clean_style = clean_copy_text(style) or "干货"
+    fallback = build_fallback_copy_payload(clean_topic, clean_style)
+
+    if not isinstance(copy_result, dict):
+        return fallback
+
+    titles_raw = copy_result.get("titles")
+    titles = [clean_copy_text(item) for item in titles_raw] if isinstance(titles_raw, list) else []
+    titles = [item for item in titles if item][:3] or fallback["titles"]
+
+    script_raw = copy_result.get("script")
+    script: list[dict] = []
+    if isinstance(script_raw, list):
+        for item in script_raw:
+            if not isinstance(item, dict):
+                continue
+            content = clean_copy_text(item.get("content", ""))
+            if not content:
+                continue
+            script.append(
+                {
+                    "section": clean_copy_text(item.get("section", "")) or "片段",
+                    "duration": clean_copy_text(item.get("duration", "")),
+                    "content": content,
+                }
+            )
+    if len(script) < 4:
+        script = fallback["script"]
+
+    tags_raw = copy_result.get("tags")
+    tags: list[str] = []
+    if isinstance(tags_raw, list):
+        for item in tags_raw:
+            clean = clean_copy_text(item)
+            if len(clean) < 2 or clean in tags:
+                continue
+            tags.append(clean)
+    if not tags:
+        tags = fallback["tags"]
+
+    return {
+        "topic": clean_copy_text(copy_result.get("topic", "")) or clean_topic,
+        "style": clean_copy_text(copy_result.get("style", "")) or clean_style,
+        "titles": titles,
+        "script": script,
+        "description": clean_copy_text(copy_result.get("description", "")) or fallback["description"],
+        "tags": tags,
+        "pinned_comment": clean_copy_text(copy_result.get("pinned_comment", "")) or fallback["pinned_comment"],
+    }
 
 
 def fetch_text(url: str, timeout: int = 10) -> str:
@@ -718,6 +837,7 @@ def serialize_video_metric(video_metric: object) -> dict:
         "competition_score": float(payload.get("competition_score") or 0.0),
         "source": payload.get("source", ""),
         "url": payload.get("url", ""),
+        "estimated": bool((payload.get("extra") or {}).get("estimated")),
     }
 
 
@@ -787,63 +907,363 @@ def compact_market_snapshot_for_llm(market_snapshot: dict, limit: int = 4) -> di
     }
 
 
-def select_reference_videos(sources: list[dict], exclude_bvid: str = "", limit: int = 6) -> list[dict]:
-    ranked = sorted(
-        [item for item in sources if item.get("url")],
-        key=lambda item: (
-            -safe_int(item.get("view")),
-            -float(item.get("like_rate") or 0.0),
-            item.get("title", ""),
-        ),
-    )
-    result: list[dict] = []
-    seen: set[str] = set()
-    for item in ranked:
-        bvid = (item.get("bvid") or "").strip()
-        url = (item.get("url") or "").strip()
-        if not url or url in seen:
+def is_real_reference_video(item: dict) -> bool:
+    bvid = (item.get("bvid") or "").strip()
+    url = (item.get("url") or "").strip()
+    if not url or item.get("estimated"):
+        return False
+    return bool(re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE))
+
+
+def normalize_reference_text(text: str) -> str:
+    value = re.sub(r"[【】\[\]（）()<>《》\"'`~!@#$%^&*_+=|\\/:;,.?？！，。、“”·-]+", " ", text or "")
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def append_reference_term(terms: list[str], term: str) -> None:
+    value = (term or "").strip().lower()
+    if len(value) < 2 or value.isdigit() or value in REFERENCE_STOPWORDS or value in terms:
+        return
+    terms.append(value)
+
+
+def extract_reference_terms(text: str) -> list[str]:
+    clean = normalize_reference_text(text)
+    chunks = re.findall(r"[\u4e00-\u9fff]+|[A-Za-z0-9]+", clean)
+    terms: list[str] = []
+
+    for chunk in chunks:
+        append_reference_term(terms, chunk)
+        if re.fullmatch(r"[A-Za-z0-9]+", chunk):
             continue
-        if exclude_bvid and bvid.lower() == exclude_bvid.lower():
-            continue
-        seen.add(url)
-        result.append(
+
+        max_size = min(5, len(chunk))
+        min_size = 2 if len(chunk) <= 5 else 3
+        for size in range(max_size, min_size - 1, -1):
+            for index in range(0, len(chunk) - size + 1):
+                append_reference_term(terms, chunk[index : index + size])
+    return terms[:32]
+
+
+def build_reference_query_text(resolved: dict | None = None, extra_text: str = "") -> str:
+    parts: list[str] = []
+    if isinstance(resolved, dict):
+        for key in ("title", "topic", "tname", "partition_label", "up_name"):
+            value = (resolved.get(key) or "").strip()
+            if value and value not in parts:
+                parts.append(value)
+
+    extra_clean = (extra_text or "").strip()
+    if extra_clean:
+        parts.append(extra_clean)
+    return " ".join(parts)
+
+
+def build_reference_view_floor(resolved: dict | None = None) -> int:
+    if not isinstance(resolved, dict):
+        return 200000
+
+    stats = resolved.get("stats") if isinstance(resolved.get("stats"), dict) else {}
+    current_view = safe_int(stats.get("view"))
+    if current_view >= 1_000_000:
+        return current_view
+    if current_view >= 200_000:
+        return int(current_view * 1.2)
+    return 200000
+
+
+def extract_reference_query_from_observation(observation: dict) -> str:
+    if not isinstance(observation, dict):
+        return ""
+
+    if isinstance(observation.get("video"), dict):
+        return build_reference_query_text(
             {
-                "title": item.get("title", ""),
-                "url": url,
-                "author": item.get("author", ""),
-                "cover": item.get("cover", ""),
-                "view": safe_int(item.get("view")),
-                "like_rate": float(item.get("like_rate") or 0.0),
-                "source": item.get("source", ""),
+                "title": observation["video"].get("title", ""),
+                "topic": observation["video"].get("title", ""),
+                "tname": observation["video"].get("tname", ""),
+                "partition_label": observation["video"].get("retrieval_partition_label", ""),
+                "up_name": observation["video"].get("up_name", ""),
             }
         )
-        if len(result) >= limit:
-            break
+
+    if isinstance(observation.get("user_input"), dict):
+        user_input = observation["user_input"]
+        return build_reference_query_text(
+            {
+                "title": "",
+                "topic": "",
+                "tname": "",
+                "partition_label": user_input.get("partition", ""),
+                "up_name": "",
+            },
+            extra_text=" ".join(
+                [
+                    (user_input.get("field") or "").strip(),
+                    (user_input.get("direction") or "").strip(),
+                    (user_input.get("idea") or "").strip(),
+                ]
+            ),
+        )
+
+    return ""
+
+
+def strip_reference_html(text: str) -> str:
+    return re.sub(r"<[^>]+>", "", unescape(text or "")).strip()
+
+
+def build_reference_search_queries(query_text: str = "", resolved: dict | None = None) -> list[str]:
+    queries: list[str] = []
+
+    if isinstance(resolved, dict):
+        base_topic = (resolved.get("topic") or resolved.get("title") or "").strip()
+        partition_label = (resolved.get("partition_label") or resolved.get("tname") or "").strip()
+        if base_topic:
+            queries.append(base_topic[:50])
+            if partition_label and partition_label not in base_topic:
+                queries.append(f"{base_topic[:40]} {partition_label}")
+
+    compact_query = " ".join(extract_reference_terms(query_text))[:60].strip()
+    if compact_query:
+        queries.append(compact_query)
+
+    deduped: list[str] = []
+    for item in queries:
+        value = (item or "").strip()
+        if len(value) < 2 or value in deduped:
+            continue
+        deduped.append(value)
+    return deduped[:3]
+
+
+def fetch_search_reference_videos(query: str, limit: int = 8) -> list[dict]:
+    if not query:
+        return []
+
+    params = {
+        "search_type": "video",
+        "keyword": query,
+        "order": "click",
+        "page": 1,
+        "page_size": max(1, min(limit, 20)),
+    }
+    url = f"https://api.bilibili.com/x/web-interface/search/type?{urlencode(params)}"
+    payload = fetch_json(url)
+    if safe_int(payload.get("code")) != 0:
+        raise ValueError(payload.get("message") or "B站搜索接口失败")
+
+    data = payload.get("data") or {}
+    items = data.get("result") or []
+    results: list[dict] = []
+
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+        bvid = (item.get("bvid") or "").strip()
+        if not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE):
+            continue
+
+        results.append(
+            {
+                "bvid": bvid,
+                "title": strip_reference_html(item.get("title", "")),
+                "author": strip_reference_html(item.get("author", "")),
+                "cover": item.get("pic") or item.get("cover") or "",
+                "mid": safe_int(item.get("mid")),
+                "view": safe_metric_int(item.get("play")),
+                "like": 0,
+                "coin": 0,
+                "favorite": safe_metric_int(item.get("favorites")),
+                "reply": safe_metric_int(item.get("review")),
+                "share": 0,
+                "duration": safe_int(item.get("duration")),
+                "avg_view_duration": 0.0,
+                "like_rate": 0.0,
+                "completion_rate": 0.0,
+                "competition_score": 0.0,
+                "source": f"相关搜索:{query}",
+                "url": item.get("arcurl") or f"https://www.bilibili.com/video/{bvid}",
+                "estimated": False,
+            }
+        )
+    return results
+
+
+def enrich_reference_sources_with_search(
+    sources: list[dict],
+    query_text: str = "",
+    resolved: dict | None = None,
+) -> list[dict]:
+    combined = list(sources or [])
+    for query in build_reference_search_queries(query_text=query_text, resolved=resolved):
+        try:
+            combined.extend(fetch_search_reference_videos(query))
+        except Exception:
+            continue
+    return combined
+
+
+def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict | None = None) -> tuple[tuple, dict]:
+    normalized_title = normalize_reference_text(item.get("title", ""))
+    title_terms = set(extract_reference_terms(item.get("title", "")))
+    query_terms = extract_reference_terms(query_text)
+    matched_terms: list[str] = []
+
+    for term in query_terms:
+        if term in title_terms or term in normalized_title:
+            matched_terms.append(term)
+
+    overlap_score = sum(len(term) * len(term) for term in matched_terms)
+    strong_match_count = sum(1 for term in matched_terms if len(term) >= 4)
+    same_up = 1 if resolved and safe_int(item.get("mid")) and safe_int(item.get("mid")) == safe_int(resolved.get("mid")) else 0
+    same_author = 1 if resolved and (item.get("author") or "").strip() == (resolved.get("up_name") or "").strip() else 0
+    source = item.get("source", "")
+    source_priority = 0
+    if same_up or same_author:
+        source_priority = 3
+    elif "相关搜索" in source:
+        source_priority = 2
+    elif "同类UP" in source:
+        source_priority = 1
+    elif "分区" in source:
+        source_priority = 0
+    elif "热榜" in source:
+        source_priority = -1
+
+    is_related = bool(matched_terms) or bool(same_up) or bool(same_author)
+    rank_key = (
+        1 if is_related else 0,
+        strong_match_count,
+        overlap_score,
+        same_up,
+        same_author,
+        source_priority,
+        float(item.get("like_rate") or 0.0),
+        safe_int(item.get("view")),
+        -(float(item.get("competition_score") or 0.0)),
+        item.get("title", ""),
+    )
+    return rank_key, {
+        "is_related": is_related,
+        "matched_terms": matched_terms,
+        "source_priority": source_priority,
+    }
+
+
+def select_reference_videos(
+    sources: list[dict],
+    exclude_bvid: str = "",
+    limit: int = 6,
+    query_text: str = "",
+    resolved: dict | None = None,
+) -> list[dict]:
+    sources = enrich_reference_sources_with_search(sources, query_text=query_text, resolved=resolved)
+    entries = []
+    view_floor = build_reference_view_floor(resolved)
+    for item in sources:
+        if not is_real_reference_video(item):
+            continue
+        rank_key, meta = build_reference_rank_entry(item, query_text=query_text, resolved=resolved)
+        entries.append((rank_key, meta, item))
+
+    ranked = sorted(entries, key=lambda entry: entry[0], reverse=True)
+    result: list[dict] = []
+    seen: set[str] = set()
+    strong_related_pool = [
+        item for _, meta, item in ranked if meta.get("is_related") and safe_int(item.get("view")) >= view_floor
+    ]
+    related_pool = [
+        item for _, meta, item in ranked if meta.get("is_related") and safe_int(item.get("view")) < view_floor
+    ]
+    fallback_high_pool = [
+        item for _, meta, item in ranked if not meta.get("is_related") and safe_int(item.get("view")) >= view_floor
+    ]
+    fallback_pool = [
+        item for _, meta, item in ranked if not meta.get("is_related") and safe_int(item.get("view")) < view_floor
+    ]
+
+    for pool in (strong_related_pool, related_pool, fallback_high_pool, fallback_pool):
+        for item in pool:
+            bvid = (item.get("bvid") or "").strip()
+            url = (item.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            if exclude_bvid and bvid.lower() == exclude_bvid.lower():
+                continue
+            seen.add(url)
+            result.append(
+                {
+                    "title": item.get("title", ""),
+                    "url": url,
+                    "author": item.get("author", ""),
+                    "cover": item.get("cover", ""),
+                    "view": safe_int(item.get("view")),
+                    "like_rate": float(item.get("like_rate") or 0.0),
+                    "source": item.get("source", ""),
+                }
+            )
+            if len(result) >= limit:
+                return result
     return result
 
 
-def build_reference_videos_from_market_snapshot(market_snapshot: dict, exclude_bvid: str = "") -> list[dict]:
+def build_reference_videos_from_market_snapshot(
+    market_snapshot: dict,
+    exclude_bvid: str = "",
+    query_text: str = "",
+    resolved: dict | None = None,
+) -> list[dict]:
     sources = (
         (market_snapshot.get("hot_board") or [])
         + (market_snapshot.get("peer_samples") or [])
         + (market_snapshot.get("partition_samples") or [])
     )
-    return select_reference_videos(sources, exclude_bvid=exclude_bvid, limit=6)
+    return select_reference_videos(
+        sources,
+        exclude_bvid=exclude_bvid,
+        limit=6,
+        query_text=query_text,
+        resolved=resolved,
+    )
 
 
-def extract_reference_links_from_tool_observations(observations: list[dict], exclude_bvid: str = "") -> list[dict]:
+def extract_reference_links_from_tool_observations(
+    observations: list[dict],
+    exclude_bvid: str = "",
+    query_text: str = "",
+    resolved: dict | None = None,
+) -> list[dict]:
     sources: list[dict] = []
+    query_parts = [query_text]
     for item in observations or []:
         observation = item.get("observation") if isinstance(item, dict) else {}
         if not isinstance(observation, dict):
             continue
+        query_parts.append(extract_reference_query_from_observation(observation))
         if isinstance(observation.get("market_snapshot"), dict):
-            sources.extend(build_reference_videos_from_market_snapshot(observation.get("market_snapshot"), exclude_bvid))
+            sources.extend(
+                (
+                    observation.get("market_snapshot", {}).get("peer_samples") or []
+                )
+                + (
+                    observation.get("market_snapshot", {}).get("partition_samples") or []
+                )
+                + (
+                    observation.get("market_snapshot", {}).get("hot_board") or []
+                )
+            )
         for key in ("hot_board", "peer_samples", "partition_samples"):
             value = observation.get(key)
             if isinstance(value, list):
-                sources.extend(select_reference_videos(value, exclude_bvid=exclude_bvid, limit=6))
-    return select_reference_videos(sources, exclude_bvid=exclude_bvid, limit=6)
+                sources.extend(value)
+    return select_reference_videos(
+        sources,
+        exclude_bvid=exclude_bvid,
+        limit=6,
+        query_text=" ".join(part for part in query_parts if part),
+        resolved=resolved,
+    )
 
 
 def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
@@ -953,6 +1373,7 @@ def get_llm_workspace_agent() -> LLMWorkspaceAgent:
 
 def run_llm_module_create(data: dict) -> dict:
     agent = get_llm_workspace_agent()
+    default_style = (data.get("style") or "干货").strip() or "干货"
     response_contract = (
         "返回一个 JSON 对象，字段必须包含：\n"
         "- normalized_profile: 字符串，整理后的创作方向\n"
@@ -964,7 +1385,7 @@ def run_llm_module_create(data: dict) -> dict:
         "- copy_result: 对象，包含 topic, style, titles(3个), script(至少4段，含 section/duration/content), description, tags, pinned_comment\n"
     )
     try:
-        return agent.run_structured(
+        result = agent.run_structured(
         task_name="module_create",
         task_goal="基于用户输入和实时市场样本，为创作者输出更容易起量的 3 个选题，并生成完整可发布文案。",
         user_payload={
@@ -980,6 +1401,21 @@ def run_llm_module_create(data: dict) -> dict:
         required_final_keys=["normalized_profile", "seed_topic", "partition", "style", "chosen_topic", "topic_result", "copy_result"],
             max_steps=2,
         )
+        copy_topic = (
+            clean_copy_text(result.get("chosen_topic", ""))
+            or clean_copy_text(result.get("seed_topic", ""))
+            or build_seed_topic(
+                (data.get("field") or "").strip(),
+                (data.get("direction") or "").strip(),
+                (data.get("idea") or "").strip(),
+            )
+        )
+        result["copy_result"] = normalize_copy_result_payload(
+            result.get("copy_result"),
+            copy_topic,
+            clean_copy_text(result.get("style", "")) or default_style,
+        )
+        return result
     except Exception as exc:
         if should_skip_same_provider_fallback(exc):
             raise RuntimeError(
@@ -1026,6 +1462,12 @@ def run_llm_module_create_fallback(data: dict) -> dict:
     result = llm.invoke_json_required(system_prompt, user_prompt)
     if not isinstance(result, dict):
         raise ValueError("LLM module create fallback returned invalid format")
+    copy_topic = (
+        clean_copy_text(result.get("chosen_topic", ""))
+        or clean_copy_text(result.get("seed_topic", ""))
+        or build_seed_topic(field_name, direction, idea)
+    )
+    result["copy_result"] = normalize_copy_result_payload(result.get("copy_result"), copy_topic, style)
     result.setdefault("runtime_mode", "llm_agent")
     result.setdefault("agent_trace", ["creator_briefing", "llm_direct_fallback"])
     return result
@@ -1033,6 +1475,7 @@ def run_llm_module_create_fallback(data: dict) -> dict:
 
 def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     agent = get_llm_workspace_agent()
+    reference_query = build_reference_query_text(resolved)
     response_contract = (
         "返回一个 JSON 对象，字段必须包含：\n"
         "- resolved: 对象，包含 bv_id, title, up_name, tname, partition, partition_label, stats\n"
@@ -1055,13 +1498,32 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
         required_final_keys=["resolved", "performance", "topic_result", "optimize_result", "analysis", "copy_result"],
     )
     result["resolved"] = resolved
-    result["reference_videos"] = build_reference_videos_from_market_snapshot(market_snapshot, resolved.get("bv_id", ""))
+    if result.get("copy_result") is not None:
+        copy_topic = (
+            clean_copy_text((result.get("copy_result") or {}).get("topic", ""))
+            or clean_copy_text(((result.get("topic_result") or {}).get("ideas") or [{}])[0].get("topic", ""))
+            or resolved.get("topic")
+            or resolved.get("title")
+            or "视频优化"
+        )
+        result["copy_result"] = normalize_copy_result_payload(
+            result.get("copy_result"),
+            copy_topic,
+            resolved.get("style", "干货"),
+        )
+    result["reference_videos"] = build_reference_videos_from_market_snapshot(
+        market_snapshot,
+        exclude_bvid=resolved.get("bv_id", ""),
+        query_text=reference_query,
+        resolved=resolved,
+    )
     return result
 
 
 def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     llm = LLMClient()
     llm.require_available()
+    reference_query = build_reference_query_text(resolved)
     compact_snapshot = compact_market_snapshot_for_llm(market_snapshot)
     system_prompt = (
         "你是 B 站视频分析助手。"
@@ -1085,7 +1547,28 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
     if not isinstance(result, dict):
         raise ValueError("LLM fallback 返回格式无效")
     result["resolved"] = resolved
-    result.setdefault("reference_videos", build_reference_videos_from_market_snapshot(market_snapshot, resolved.get("bv_id", "")))
+    if result.get("copy_result") is not None:
+        copy_topic = (
+            clean_copy_text((result.get("copy_result") or {}).get("topic", ""))
+            or clean_copy_text(((result.get("topic_result") or {}).get("ideas") or [{}])[0].get("topic", ""))
+            or resolved.get("topic")
+            or resolved.get("title")
+            or "视频优化"
+        )
+        result["copy_result"] = normalize_copy_result_payload(
+            result.get("copy_result"),
+            copy_topic,
+            resolved.get("style", "干货"),
+        )
+    result.setdefault(
+        "reference_videos",
+        build_reference_videos_from_market_snapshot(
+            market_snapshot,
+            exclude_bvid=resolved.get("bv_id", ""),
+            query_text=reference_query,
+            resolved=resolved,
+        ),
+    )
     result.setdefault("runtime_mode", "llm_agent")
     result.setdefault("agent_trace", ["llm_direct_fallback"])
     return result
@@ -1125,9 +1608,21 @@ def run_llm_chat(data: dict) -> dict:
         allowed_tools=["creator_briefing", "video_briefing", "hot_board_snapshot"],
         required_final_keys=["reply", "suggested_next_actions", "mode"],
     )
+    chat_query_text = " ".join(
+        value
+        for value in [
+            message,
+            creator_context.get("field", ""),
+            creator_context.get("direction", ""),
+            creator_context.get("idea", ""),
+            creator_context.get("partition", ""),
+        ]
+        if value
+    )
     result["reference_links"] = extract_reference_links_from_tool_observations(
         result.get("tool_observations", []),
         exclude_bvid="",
+        query_text=chat_query_text,
     )
     return result
 
@@ -1275,7 +1770,13 @@ def api_module_analyze():
         copy_result = run_copy(topic=resolved.get("topic") or resolved.get("title") or "视频优化", style=resolved.get("style", "干货"))
         analysis = build_low_performance_analysis(resolved, performance, optimize_result, topic_result)
 
-    reference_videos = select_reference_videos(topic_result.get("videos", []), exclude_bvid=resolved.get("bv_id", ""), limit=6)
+    reference_videos = select_reference_videos(
+        topic_result.get("videos", []),
+        exclude_bvid=resolved.get("bv_id", ""),
+        limit=6,
+        query_text=build_reference_query_text(resolved),
+        resolved=resolved,
+    )
 
     return jsonify(
         {

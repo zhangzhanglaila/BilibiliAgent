@@ -12,7 +12,6 @@ const state = {
   sceneTicking: false,
   progressJobs: {},
   activeModule: 'analyze',
-  activeOutlineId: 'workspaceOverview',
   chatPending: false,
   chatTyping: false,
   chatHistory: [],
@@ -58,7 +57,9 @@ function pct(value) {
 function coverUrl(url) {
   const v = String(url || '').trim();
   if (!v) return '';
-  return v.startsWith('//') ? `https:${v}` : v;
+  if (v.startsWith('//')) return `https:${v}`;
+  if (v.startsWith('http://')) return `https://${v.slice('http://'.length)}`;
+  return v;
 }
 
 function setStatus(text, type = 'idle') {
@@ -265,7 +266,7 @@ function referenceGrid(items = [], compact = false) {
     const title = item.title || '未命名视频';
     return `
       <a class="reference-card ${compact ? 'reference-card--chat' : ''}" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">
-        <div class="reference-card__thumb">${cover ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(title)}" loading="lazy" />` : '<div class="reference-card__thumb-placeholder">B站</div>'}</div>
+        <div class="reference-card__thumb">${cover ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" />` : '<div class="reference-card__thumb-placeholder">B站</div>'}</div>
         <div class="reference-card__body">
           <h4>${escapeHtml(title)}</h4>
           <p>${escapeHtml(item.author || '未知 UP')}</p>
@@ -278,8 +279,12 @@ function referenceGrid(items = [], compact = false) {
 
 function referenceSection(items = [], title = '可直接参考的高表现视频', desc = '点击卡片可直接打开当前做得好的视频页面。') {
   const grid = referenceGrid(items, false);
-  if (!grid) return '';
-  return `<section class="copy-block" id="videoReferenceSection"><div class="block-title"><div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div></div>${grid}</section>`;
+  return `
+    <section class="copy-block" id="videoReferenceSection">
+      <div class="block-title"><div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div></div>
+      ${grid || '<div class="info-card"><h4>暂未找到强相关参考视频</h4><p>当前已优先按视频标题和主题检索同题材高表现视频；如果这一区块为空，通常是公开搜索结果过少或题材过窄。</p></div>'}
+    </section>
+  `;
 }
 
 function copyResult(copy) {
@@ -393,7 +398,7 @@ function videoPreview(data, options = {}) {
         <span class="type-badge ${error ? 'type-badge--danger' : ''}">${loading ? '自动解析中' : data ? '已解析' : '待解析'}</span>
       </div>
       ${loading ? '<div class="bili-progress"><div class="bili-progress__bar bili-progress__bar--indeterminate"></div></div>' : ''}
-      ${cover ? `<div class="video-cover-strip"><div class="video-cover-strip__thumb"><img src="${escapeHtml(cover)}" alt="${escapeHtml(resolved.title || '视频封面')}" loading="lazy" /></div><div class="video-cover-strip__body"><strong>${escapeHtml(resolved.title || '当前视频')}</strong><span>${escapeHtml(resolved.up_name || '自动解析结果')}</span></div></div>` : ''}
+      ${cover ? `<div class="video-cover-strip"><div class="video-cover-strip__thumb"><img src="${escapeHtml(cover)}" alt="${escapeHtml(resolved.title || '视频封面')}" loading="lazy" decoding="async" referrerpolicy="no-referrer" /></div><div class="video-cover-strip__body"><strong>${escapeHtml(resolved.title || '当前视频')}</strong><span>${escapeHtml(resolved.up_name || '自动解析结果')}</span></div></div>` : ''}
       <div class="summary-strip">
         ${previewCard('视频标题', resolved.title || '', '根据视频链接自动解析当前视频标题')}
         ${previewCard('视频类型', resolved.partition_label || resolved.partition || '', '根据视频链接自动解析分区和视频类型')}
@@ -706,6 +711,7 @@ function scheduleVideoResolve() {
 }
 
 function getOutlineItems(module = state.activeModule) {
+  return [];
   const common = [
     { id: 'workspaceOverview', title: '工作台概览' },
     { id: 'runtimeModePanel', title: '运行模式' },
@@ -740,6 +746,8 @@ function getOutlineItems(module = state.activeModule) {
 }
 
 function updateOutlineActiveState() {
+  return;
+  if (!$('#workspaceOutline')) return;
   const items = getOutlineItems();
   if (!items.length) return;
   const topLine = 156;
@@ -757,6 +765,7 @@ function updateOutlineActiveState() {
 }
 
 function renderWorkspaceOutline() {
+  return;
   const box = $('#workspaceOutline');
   if (!box) return;
   const items = getOutlineItems();
@@ -963,7 +972,6 @@ function initEvents() {
   $('#videoAnalyzeBtn').addEventListener('click', runAnalyzeModule);
   $('#clearResultsBtn').addEventListener('click', clearResults);
   $('#videoLink').addEventListener('input', scheduleVideoResolve);
-  window.addEventListener('scroll', updateOutlineActiveState, { passive: true });
   $$('[data-module-tab]').forEach(button => {
     button.addEventListener('click', () => {
       setActiveModule(button.dataset.moduleTab || 'analyze', { focus: true });

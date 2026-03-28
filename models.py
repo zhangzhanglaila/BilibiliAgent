@@ -10,6 +10,7 @@ class VideoMetrics:
     bvid: str
     title: str
     author: str = ""
+    cover: str = ""
     mid: int = 0
     view: int = 0
     like: int = 0

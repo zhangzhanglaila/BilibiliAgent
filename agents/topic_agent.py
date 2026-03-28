@@ -52,6 +52,7 @@ class TopicAgent:
             bvid=bvid,
             title=item.get("title", "未知标题"),
             author=owner.get("name") or item.get("author", "未知UP"),
+            cover=item.get("pic") or item.get("cover") or item.get("thumbnail") or "",
             mid=int(owner.get("mid") or item.get("mid") or 0),
             view=view,
             like=like,
