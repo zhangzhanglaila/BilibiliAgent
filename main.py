@@ -1,4 +1,4 @@
-"""命令行入口与可复用调用函数。"""
+"""CLI entrypoint and reusable wrappers for the Bilibili agent graph."""
 from __future__ import annotations
 
 import argparse
@@ -11,12 +11,23 @@ from models import to_plain_data
 def parse_up_ids(value: str | None) -> List[int] | None:
     if not value:
         return None
-    return [int(x.strip()) for x in value.split(",") if x.strip().isdigit()]
+    return [int(item.strip()) for item in value.split(",") if item.strip().isdigit()]
 
 
-def run_topic(partition_name: str = "knowledge", up_ids: List[int] | None = None) -> Dict[str, Any]:
+def run_topic(
+    partition_name: str = "knowledge",
+    up_ids: List[int] | None = None,
+    seed_topic: str | None = None,
+) -> Dict[str, Any]:
     graph = BilibiliAgentGraph()
-    result = graph.run_single_agent("topic", {"partition_name": partition_name, "up_ids": up_ids})
+    result = graph.run_single_agent(
+        "topic",
+        {
+            "partition_name": partition_name,
+            "up_ids": up_ids,
+            "seed_topic": seed_topic,
+        },
+    )
     return to_plain_data(result["topic_result"])
 
 
@@ -38,7 +49,13 @@ def run_optimize(bv_id: str) -> Dict[str, Any]:
     return to_plain_data(result["optimization_result"])
 
 
-def run_pipeline(bv_id: str, partition_name: str = "knowledge", up_ids: List[int] | None = None, style: str = "干货") -> Dict[str, Any]:
+def run_pipeline(
+    bv_id: str,
+    partition_name: str = "knowledge",
+    up_ids: List[int] | None = None,
+    style: str = "干货",
+    seed_topic: str | None = None,
+) -> Dict[str, Any]:
     graph = BilibiliAgentGraph()
     result = graph.run_full_pipeline(
         {
@@ -46,6 +63,7 @@ def run_pipeline(bv_id: str, partition_name: str = "knowledge", up_ids: List[int
             "partition_name": partition_name,
             "up_ids": up_ids,
             "style": style,
+            "seed_topic": seed_topic,
         }
     )
     return to_plain_data(result)
@@ -102,12 +120,13 @@ def print_optimization_result(result: dict) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="B 站全自动运营多 Agent 系统")
+    parser = argparse.ArgumentParser(description="B站全自动运营多 Agent 系统")
     sub = parser.add_subparsers(dest="command", required=True)
 
     topic = sub.add_parser("topic", help="运行选题 Agent")
     topic.add_argument("--partition", default="knowledge", help="分区名称，默认 knowledge")
     topic.add_argument("--up-ids", default="", help="同类 UP 主 ID，逗号分隔")
+    topic.add_argument("--topic", default="", help="当前输入链接对应的主题种子")
 
     copy = sub.add_parser("copy", help="运行文案 Agent")
     copy.add_argument("--topic", required=True, help="手动输入选题")
@@ -125,6 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--partition", default="knowledge", help="分区名称")
     pipeline.add_argument("--up-ids", default="", help="同类 UP 主 ID，逗号分隔")
     pipeline.add_argument("--style", default="干货", help="文案风格")
+    pipeline.add_argument("--topic", default="", help="当前输入链接对应的主题种子")
     return parser
 
 
@@ -133,7 +153,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "topic":
-        result = run_topic(partition_name=args.partition, up_ids=parse_up_ids(args.up_ids))
+        result = run_topic(
+            partition_name=args.partition,
+            up_ids=parse_up_ids(args.up_ids),
+            seed_topic=args.topic or None,
+        )
         print_topic_result(result)
         return
 
@@ -158,6 +182,7 @@ def main() -> None:
             partition_name=args.partition,
             up_ids=parse_up_ids(args.up_ids),
             style=args.style,
+            seed_topic=args.topic or None,
         )
         print_topic_result(result["topic_result"])
         print_copy_result(result["copywriting_result"])

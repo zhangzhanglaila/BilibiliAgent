@@ -1,4 +1,4 @@
-"""项目默认配置。"""
+"""Project configuration."""
 from __future__ import annotations
 
 import os
@@ -18,6 +18,26 @@ PARTITION_TIDS = {
     "ent": 5,
 }
 
+PARTITION_ALIASES = {
+    "business": "knowledge",
+    "career": "knowledge",
+    "study": "knowledge",
+    "ai": "tech",
+    "digital": "tech",
+    "auto": "tech",
+    "food": "life",
+    "vlog": "life",
+    "emotion": "life",
+    "fashion": "life",
+    "pet": "life",
+    "sports": "life",
+    "beauty": "ent",
+    "dance": "ent",
+    "music": "ent",
+    "film": "ent",
+    "anime": "ent",
+}
+
 
 @dataclass
 class AppConfig:
@@ -32,13 +52,19 @@ class AppConfig:
     default_partition: str = os.getenv("DEFAULT_PARTITION", "knowledge")
     default_peer_ups: List[int] = field(
         default_factory=lambda: [
-            int(x) for x in os.getenv("DEFAULT_PEER_UPS", "546195,15263701,777536").split(",") if x.strip()
+            int(item)
+            for item in os.getenv("DEFAULT_PEER_UPS", "546195,15263701,777536").split(",")
+            if item.strip()
         ]
     )
 
+    def normalize_partition(self, partition_name: str | None = None) -> str:
+        name = (partition_name or self.default_partition).strip().lower()
+        name = PARTITION_ALIASES.get(name, name)
+        return name if name in PARTITION_TIDS else "knowledge"
+
     def partition_tid(self, partition_name: str | None = None) -> int:
-        name = (partition_name or self.default_partition).lower()
-        return PARTITION_TIDS.get(name, PARTITION_TIDS["knowledge"])
+        return PARTITION_TIDS[self.normalize_partition(partition_name)]
 
 
 CONFIG = AppConfig()

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>B站全自动运营多Agent操作台</title>
+  <title>B站内容策划与视频分析工作台</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -13,14 +13,14 @@
         <div class="brand">
           <div class="brand__badge">B</div>
           <div>
-            <h1>B站全自动运营多Agent操作台</h1>
-            <p>现代化可视化工作台，覆盖选题、文案、运营、优化与全流程。</p>
+            <h1>B站内容策划与视频分析工作台</h1>
+            <p>两个模块，分别解决“还没发什么内容”和“已经发了怎么优化”这两类实际问题。</p>
           </div>
         </div>
         <div class="topbar__status-wrap">
           <div class="status-pill" id="globalStatusPill">
             <span class="status-dot"></span>
-            <span id="statusText">等待执行</span>
+            <span id="statusText">等待操作</span>
           </div>
           <button class="ghost-btn" id="clearResultsBtn" type="button">清空结果</button>
         </div>
@@ -30,202 +30,128 @@
     <main class="page">
       <section class="hero-card">
         <div>
-          <span class="hero-card__tag">BiliBili Multi-Agent Workspace</span>
-          <h2>一个页面管理 4 大 Agent 与全流程</h2>
+          <span class="hero-card__tag">BiliBili Creator Workspace</span>
+          <h2>把创作前的选题难题，和发布后的数据分析，拆成两条独立流程</h2>
           <p>
-            保留原有后端能力，升级为更清晰、更年轻化、更适合演示与实际使用的 B 站风格操作台。
+            模块一面向还没发布内容的创作者，输入领域、方向和想法后，一键生成选题与文案。
+            模块二面向已经发布视频的创作者，输入视频链接后，一键解析数据并给出爆款拆解或优化建议。
           </p>
+          <div class="hero-points">
+            <span class="result-badge">模块一：选题 + 文案</span>
+            <span class="result-badge">模块二：解析 + 优化</span>
+          </div>
         </div>
         <div class="hero-metrics">
           <div class="metric-box">
-            <span class="metric-box__label">Agent 数量</span>
-            <strong>4</strong>
+            <span class="metric-box__label">功能模块</span>
+            <strong>2</strong>
           </div>
           <div class="metric-box">
-            <span class="metric-box__label">运行模式</span>
-            <strong>单 Agent / 全流程</strong>
+            <span class="metric-box__label">核心能力</span>
+            <strong>选题 / 文案 / 分析 / 优化</strong>
           </div>
           <div class="metric-box">
-            <span class="metric-box__label">当前模式</span>
+            <span class="metric-box__label">当前状态</span>
             <strong id="currentModeText">空闲</strong>
           </div>
         </div>
       </section>
 
-      <section class="workspace-grid">
-        <div class="panel control-panel">
+      <section class="module-grid">
+        <section class="panel module-panel">
           <div class="panel__header">
             <div>
-              <h3>操作区</h3>
-              <p>填写参数后，单独运行某个 Agent 或一键执行全流程。</p>
+              <span class="module-kicker">模块一</span>
+              <h3>还没发布视频，不知道做什么内容</h3>
+              <p>输入你的领域、方向和想法，系统会结合当前热门结构生成更容易起量的选题和可直接用的文案。</p>
             </div>
           </div>
 
-          <label class="field field--full">
-            <span class="field__label">B站视频链接</span>
-            <input id="biliLink" value="" placeholder="粘贴完整 B 站视频链接，例如 https://www.bilibili.com/video/BV1xx411c7mD" />
-            <span class="field__hint">粘贴后会自动解析并智能填充 BV号、UP主ID 与分区</span>
-          </label>
-
           <div class="form-grid">
             <label class="field">
-              <span class="field__label">分区</span>
-              <input id="partition" value="knowledge" placeholder="knowledge / tech / life / game / ent" />
+              <span class="field__label">你的领域</span>
+              <input id="creatorField" placeholder="例如：AI 效率、数码测评、职场成长、美食" />
             </label>
 
             <label class="field">
-              <span class="field__label">同类 UP 主 ID</span>
-              <input id="upIds" value="546195,15263701,777536" placeholder="多个 ID 用英文逗号分隔" />
+              <span class="field__label">你想做的方向</span>
+              <input id="creatorDirection" placeholder="例如：教程、测评、案例拆解、观点表达" />
+            </label>
+
+            <label class="field field--full">
+              <span class="field__label">你已有的想法</span>
+              <input id="creatorIdea" placeholder="例如：想做一条关于 AI 自动剪辑提高效率的实战视频" />
+              <span class="field__hint">哪怕只是一个模糊想法也可以，系统会先帮你整理成可执行主题。</span>
+            </label>
+          </div>
+
+          <div class="form-grid form-grid--compact">
+            <label class="field">
+              <span class="field__label">内容分区</span>
+              <select id="creatorPartition">
+                <option value="knowledge">知识</option>
+                <option value="tech">科技</option>
+                <option value="life">生活</option>
+                <option value="game">游戏</option>
+                <option value="ent">娱乐</option>
+              </select>
             </label>
 
             <label class="field">
               <span class="field__label">文案风格</span>
-              <select id="style">
+              <select id="creatorStyle">
                 <option value="干货">干货</option>
                 <option value="教学">教学</option>
                 <option value="搞笑">搞笑</option>
                 <option value="混剪">混剪</option>
               </select>
             </label>
+          </div>
 
-            <label class="field">
-              <span class="field__label">视频 BV 号</span>
-              <input id="bvId" value="BV1xx411c7mD" placeholder="输入目标视频 BV 号" />
-            </label>
+          <div class="module-actions">
+            <button class="action-btn action-btn--primary module-run-btn" id="creatorRunBtn" type="button">
+              <span class="action-btn__title">一键生成选题与文案</span>
+              <span class="action-btn__desc">基于你的方向和热门结构，自动生成更适合起量的内容方案</span>
+            </button>
+          </div>
+
+          <div class="module-result" id="creatorResult">
+            <div class="empty-state">
+              <h4>还没有生成结果</h4>
+              <p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel module-panel">
+          <div class="panel__header">
+            <div>
+              <span class="module-kicker">模块二</span>
+              <h3>已经发布了视频，想分析和优化</h3>
+              <p>输入 B 站视频链接，后台自动解析视频信息，判断它更像爆款还是播放偏低，并给出对应分析结果。</p>
+            </div>
           </div>
 
           <label class="field field--full">
-            <span class="field__label">手动选题</span>
-            <input id="topic" value="AI 视频剪辑提效" placeholder="文案 Agent 可直接使用该主题" />
+            <span class="field__label">B站视频链接</span>
+            <input id="videoLink" placeholder="粘贴完整 B 站视频链接，支持常规链接和 b23.tv 短链" />
+            <span class="field__hint">点击下面按钮后，会自动解析播放、点赞、投币、收藏、UP 主 ID、分区等信息。</span>
           </label>
 
-          <div class="action-grid">
-            <button class="action-btn" data-action="topic" type="button">
-              <span class="action-btn__title">运行选题 Agent</span>
-              <span class="action-btn__desc">获取 3 个高潜力选题</span>
-            </button>
-            <button class="action-btn" data-action="copy" type="button">
-              <span class="action-btn__title">运行文案 Agent</span>
-              <span class="action-btn__desc">生成标题、脚本、简介与标签</span>
-            </button>
-            <button class="action-btn" data-action="operate" type="button">
-              <span class="action-btn__title">运行运营 Agent</span>
-              <span class="action-btn__desc">查看回复、删除、点赞与关注建议</span>
-            </button>
-            <button class="action-btn" data-action="optimize" type="button">
-              <span class="action-btn__title">运行优化 Agent</span>
-              <span class="action-btn__desc">输出标题、封面与内容优化建议</span>
-            </button>
-            <button class="action-btn action-btn--primary" data-action="pipeline" type="button">
-              <span class="action-btn__title">一键运行全流程</span>
-              <span class="action-btn__desc">按顺序执行选题 → 文案 → 运营 → 优化</span>
+          <div class="module-actions">
+            <button class="action-btn action-btn--primary module-run-btn" id="videoAnalyzeBtn" type="button">
+              <span class="action-btn__title">一键解析并分析视频</span>
+              <span class="action-btn__desc">自动识别视频是爆款还是待优化，并输出对应拆解或优化建议</span>
             </button>
           </div>
-        </div>
 
-        <aside class="panel side-panel">
-          <div class="panel__header">
-            <div>
-              <h3>操作提示</h3>
-              <p>推荐使用顺序：选题 → 文案 → 优化 → 全流程。</p>
+          <div class="module-result" id="videoResult">
+            <div class="empty-state">
+              <h4>还没有分析结果</h4>
+              <p>输入视频链接后，点击“一键解析并分析视频”。</p>
             </div>
           </div>
-
-          <div class="tips-list">
-            <div class="tip-card">
-              <span class="tip-card__index">01</span>
-              <div>
-                <h4>先跑选题 Agent</h4>
-                <p>适合找方向，看看当前内容热点与同类账号爆款。</p>
-              </div>
-            </div>
-            <div class="tip-card">
-              <span class="tip-card__index">02</span>
-              <div>
-                <h4>再跑文案 Agent</h4>
-                <p>确定主题后，快速生成标题、脚本、简介、标签和置顶评论。</p>
-              </div>
-            </div>
-            <div class="tip-card">
-              <span class="tip-card__index">03</span>
-              <div>
-                <h4>运营 / 优化更适合带 BV 号</h4>
-                <p>这两个模块会基于目标视频给出更具体的互动与流量改进建议。</p>
-              </div>
-            </div>
-          </div>
-
-          <div class="mode-note">
-            <h4>兼容说明</h4>
-            <ul>
-              <li>保留原有 4 大 Agent 和全流程接口。</li>
-              <li>仍支持手动选题与 dry_run。</li>
-              <li>仅升级 UI 与前端交互，不改后端逻辑。</li>
-            </ul>
-          </div>
-        </aside>
-      </section>
-
-      <section class="panel results-panel">
-        <div class="panel__header panel__header--results">
-          <div>
-            <h3>结果区</h3>
-            <p>每个 Agent 单独一个标签页，结果结构化、卡片化展示。</p>
-          </div>
-          <div class="results-tools">
-            <span class="result-badge" id="resultMetaText">暂无结果</span>
-          </div>
-        </div>
-
-        <div class="tabs" role="tablist">
-          <button class="tab-btn is-active" data-tab="topic" type="button">选题</button>
-          <button class="tab-btn" data-tab="copy" type="button">文案</button>
-          <button class="tab-btn" data-tab="operate" type="button">运营</button>
-          <button class="tab-btn" data-tab="optimize" type="button">优化</button>
-          <button class="tab-btn" data-tab="pipeline" type="button">全流程</button>
-        </div>
-
-        <div class="tab-panels">
-          <section class="tab-panel is-active" data-panel="topic">
-            <div class="empty-state" data-empty="topic">
-              <h4>还没有选题结果</h4>
-              <p>点击“运行选题 Agent”后，这里会显示 3 个高潜力选题卡片。</p>
-            </div>
-            <div class="panel-content" id="topicPanel"></div>
-          </section>
-
-          <section class="tab-panel" data-panel="copy">
-            <div class="empty-state" data-empty="copy">
-              <h4>还没有文案结果</h4>
-              <p>点击“运行文案 Agent”后，这里会显示标题、脚本、简介、标签和置顶评论。</p>
-            </div>
-            <div class="panel-content" id="copyPanel"></div>
-          </section>
-
-          <section class="tab-panel" data-panel="operate">
-            <div class="empty-state" data-empty="operate">
-              <h4>还没有运营结果</h4>
-              <p>点击“运行运营 Agent”后，这里会显示互动动作、评论处理与 dry_run 标识。</p>
-            </div>
-            <div class="panel-content" id="operatePanel"></div>
-          </section>
-
-          <section class="tab-panel" data-panel="optimize">
-            <div class="empty-state" data-empty="optimize">
-              <h4>还没有优化结果</h4>
-              <p>点击“运行优化 Agent”后，这里会显示优化标题、封面建议和内容调整方案。</p>
-            </div>
-            <div class="panel-content" id="optimizePanel"></div>
-          </section>
-
-          <section class="tab-panel" data-panel="pipeline">
-            <div class="empty-state" data-empty="pipeline">
-              <h4>还没有全流程结果</h4>
-              <p>点击“一键运行全流程”后，这里会按步骤展示完整结果，并支持折叠查看。</p>
-            </div>
-            <div class="panel-content" id="pipelinePanel"></div>
-          </section>
-        </div>
+        </section>
       </section>
     </main>
   </div>

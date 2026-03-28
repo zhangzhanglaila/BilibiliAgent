@@ -1,10 +1,11 @@
-"""选题 Agent：抓取 B 站公开数据并生成选题建议。"""
+"""Topic agent: fetch public Bilibili signals and produce topic ideas."""
 from __future__ import annotations
 
 import math
 import re
 import time
 from collections import defaultdict
+from statistics import mean
 from typing import Any, Dict, Iterable, List
 
 from bilibili_api import hot, sync, user, video_zone
@@ -70,8 +71,12 @@ class TopicAgent:
 
     def _extract_keywords(self, title: str) -> List[str]:
         clean = re.sub(r"[^\w\u4e00-\u9fff]", " ", title.lower())
-        words = [w for w in clean.split() if len(w) >= 2]
-        return words[:5]
+        words = [word for word in clean.split() if len(word) >= 2]
+        unique_words: List[str] = []
+        for word in words:
+            if word not in unique_words:
+                unique_words.append(word)
+        return unique_words[:6]
 
     def _competition_scores(self, videos: List[VideoMetrics]) -> None:
         bucket: Dict[str, List[VideoMetrics]] = defaultdict(list)
@@ -79,11 +84,11 @@ class TopicAgent:
             tags = self._extract_keywords(video.title)
             key = tags[0] if tags else "通用"
             bucket[key].append(video)
-        for _, group in bucket.items():
-            total_view = sum(v.view for v in group) or 1
+        for group in bucket.values():
+            total_view = sum(video.view for video in group) or 1
             competition = len(group) / total_view
-            for v in group:
-                v.competition_score = competition
+            for video in group:
+                video.competition_score = competition
 
     def _pick_video_type(self, title: str) -> str:
         mapping = {
@@ -95,11 +100,19 @@ class TopicAgent:
             "整活": "搞笑",
             "混剪": "混剪",
             "盘点": "混剪",
+            "复盘": "干货",
+            "测评": "干货",
         }
         for keyword, style in mapping.items():
             if keyword in title:
                 return style
         return "干货"
+
+    def _score_video(self, video: VideoMetrics) -> float:
+        traffic = math.log10(max(video.view, 1))
+        interaction = video.like_rate * 100 + video.completion_rate * 10
+        competition_penalty = 1 / max(video.competition_score * 100000 + 1, 1)
+        return traffic + interaction + competition_penalty
 
     def fetch_hot_videos(self) -> List[VideoMetrics]:
         data = self._safe_sync(hot.get_hot_videos(), [])
@@ -120,17 +133,19 @@ class TopicAgent:
                 search_data = self._safe_sync(video_zone.get_zone_videos_count_today(tid), {})
                 self._sleep()
                 if isinstance(search_data, dict):
+                    archive_view = int(search_data.get("archive_view", 0))
+                    archive_count = int(search_data.get("archive", 0))
                     pseudo_item = {
                         "bvid": f"tag-{name}",
                         "title": f"{name} 教程/趋势",
-                        "owner": {"name": "知识分区热点", "mid": 0},
+                        "owner": {"name": "分区热点", "mid": 0},
                         "stat": {
-                            "view": int(search_data.get("archive_view", 0) / max(len(data), 1)),
-                            "like": int(search_data.get("archive_view", 0) * 0.04 / max(len(data), 1)),
-                            "coin": int(search_data.get("archive_view", 0) * 0.01 / max(len(data), 1)),
-                            "favorite": int(search_data.get("archive_view", 0) * 0.02 / max(len(data), 1)),
-                            "reply": int(search_data.get("archive", 0) * 3),
-                            "share": int(search_data.get("archive", 0)),
+                            "view": int(archive_view / max(len(data), 1)),
+                            "like": int(archive_view * 0.04 / max(len(data), 1)),
+                            "coin": int(archive_view * 0.01 / max(len(data), 1)),
+                            "favorite": int(archive_view * 0.02 / max(len(data), 1)),
+                            "reply": archive_count * 3,
+                            "share": archive_count,
                         },
                         "duration": 300,
                     }
@@ -138,9 +153,9 @@ class TopicAgent:
         return results[:10]
 
     def fetch_peer_up_videos(self, up_ids: Iterable[int] | None = None) -> List[VideoMetrics]:
-        up_ids = list(up_ids or CONFIG.default_peer_ups)
+        target_up_ids = list(up_ids or CONFIG.default_peer_ups)
         videos: List[VideoMetrics] = []
-        for up_id in up_ids:
+        for up_id in target_up_ids:
             try:
                 up = user.User(up_id)
                 data = self._safe_sync(up.get_videos(ps=5), {})
@@ -159,7 +174,7 @@ class TopicAgent:
                         "title": item.get("title", ""),
                         "owner": {"name": item.get("author", "同类UP"), "mid": up_id},
                         "stat": stat,
-                        "duration": int(item.get("length", "0:00").split(":")[-1]) if item.get("length") else 0,
+                        "duration": self._parse_duration(item.get("length", "")),
                     }
                     videos.append(self._build_metrics(payload, f"同类UP:{up_id}"))
             except Exception:
@@ -168,13 +183,19 @@ class TopicAgent:
                 self._sleep()
         return videos
 
-    def _score_video(self, video: VideoMetrics) -> float:
-        traffic = math.log10(max(video.view, 1))
-        interaction = video.like_rate * 100 + video.completion_rate * 10
-        competition_penalty = 1 / max(video.competition_score * 100000 + 1, 1)
-        return traffic + interaction + competition_penalty
+    def _parse_duration(self, raw: str) -> int:
+        if not raw:
+            return 0
+        parts = [int(part) for part in raw.split(":") if part.isdigit()]
+        if not parts:
+            return 0
+        if len(parts) == 1:
+            return parts[0]
+        if len(parts) == 2:
+            return parts[0] * 60 + parts[1]
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
 
-    def _generate_topics(self, videos: List[VideoMetrics]) -> List[TopicIdea]:
+    def _generate_trending_topics(self, videos: List[VideoMetrics]) -> List[TopicIdea]:
         self._competition_scores(videos)
         enriched = sorted(videos, key=self._score_video, reverse=True)
         ideas: List[TopicIdea] = []
@@ -200,18 +221,126 @@ class TopicAgent:
                     score=self._score_video(video),
                 )
             )
-            if len(ideas) >= 3:
+            if len(ideas) >= 6:
                 break
         return ideas
 
-    def run(self, partition_name: str | None = None, up_ids: Iterable[int] | None = None) -> Dict[str, Any]:
+    def _clean_seed_topic(self, seed_topic: str) -> str:
+        cleaned = re.sub(r"[【\[].*?[】\]]", "", seed_topic or "")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_|")
+        return cleaned[:60]
+
+    def _find_related_videos(self, seed_topic: str, videos: List[VideoMetrics]) -> List[VideoMetrics]:
+        keywords = self._extract_keywords(seed_topic)
+        if not keywords:
+            return []
+        related = []
+        for video in videos:
+            title = video.title.lower()
+            if any(keyword in title for keyword in keywords[:4]):
+                related.append(video)
+        return sorted(related, key=self._score_video, reverse=True)
+
+    def _build_seed_reason(
+        self,
+        seed_topic: str,
+        variant: str,
+        related_videos: List[VideoMetrics],
+        partition_name: str | None,
+        up_ids: Iterable[int] | None,
+    ) -> str:
+        if related_videos:
+            sample_count = len(related_videos)
+            avg_views = int(mean(video.view for video in related_videos))
+            avg_like_rate = mean(video.like_rate for video in related_videos)
+            avg_completion_rate = mean(video.completion_rate for video in related_videos)
+            return (
+                f"围绕当前链接主题《{seed_topic}》做 {variant}，命中 {sample_count} 条相关样本；"
+                f"样本平均播放 {avg_views:,}、平均点赞率 {avg_like_rate:.2%}、"
+                f"估算完播率 {avg_completion_rate:.2%}，适合继续做延展内容。"
+            )
+
+        partition_text = partition_name or CONFIG.default_partition
+        peer_count = len(list(up_ids or CONFIG.default_peer_ups))
+        return (
+            f"围绕当前链接主题《{seed_topic}》做 {variant}，优先结合分区 {partition_text} "
+            f"和 {peer_count} 个同类 UP 样本做延展，避免直接跟全站热榜撞题。"
+        )
+
+    def _generate_seed_topics(
+        self,
+        seed_topic: str | None,
+        videos: List[VideoMetrics],
+        partition_name: str | None,
+        up_ids: Iterable[int] | None,
+    ) -> List[TopicIdea]:
+        if not seed_topic:
+            return []
+
+        cleaned = self._clean_seed_topic(seed_topic)
+        if not cleaned:
+            return []
+
+        related_videos = self._find_related_videos(cleaned, videos)
+        keywords = self._extract_keywords(cleaned) or [cleaned[:12]]
+        base_style = self._pick_video_type(cleaned)
+        if related_videos:
+            related_style = self._pick_video_type(related_videos[0].title)
+            if related_style:
+                base_style = related_style
+
+        candidates = [
+            ("高效做法", f"{cleaned} 的高效做法"),
+            ("爆点切口", f"别再硬做 {cleaned}：最容易起量的切口"),
+            ("系列延展", f"{cleaned} 做成系列内容时，下一条拍什么"),
+        ]
+
+        ideas: List[TopicIdea] = []
+        for index, (variant, topic) in enumerate(candidates):
+            idea_keywords = list(dict.fromkeys(keywords + [variant]))[:6]
+            score = 100 - index * 3
+            ideas.append(
+                TopicIdea(
+                    topic=topic,
+                    reason=self._build_seed_reason(cleaned, variant, related_videos, partition_name, up_ids),
+                    video_type=base_style,
+                    keywords=idea_keywords,
+                    score=score,
+                )
+            )
+        return ideas
+
+    def _merge_ideas(self, preferred: List[TopicIdea], fallback: List[TopicIdea], limit: int = 3) -> List[TopicIdea]:
+        result: List[TopicIdea] = []
+        seen = set()
+        for idea in preferred + fallback:
+            key = idea.topic.strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(idea)
+            if len(result) >= limit:
+                break
+        return result
+
+    def run(
+        self,
+        partition_name: str | None = None,
+        up_ids: Iterable[int] | None = None,
+        seed_topic: str | None = None,
+    ) -> Dict[str, Any]:
         hot_videos = self.fetch_hot_videos()
         partition_videos = self.fetch_partition_videos(partition_name)
         peer_videos = self.fetch_peer_up_videos(up_ids)
         all_videos = hot_videos + partition_videos + peer_videos
-        ideas = self._generate_topics(all_videos)
+
+        preferred = self._generate_seed_topics(seed_topic, all_videos, partition_name, up_ids)
+        trending = self._generate_trending_topics(all_videos)
+        ideas = self._merge_ideas(preferred, trending, limit=3)
+
         return {
             "ideas": ideas,
             "source_count": len(all_videos),
             "videos": all_videos,
+            "seed_topic": seed_topic or "",
         }

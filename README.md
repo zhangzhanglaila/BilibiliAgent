@@ -1,126 +1,148 @@
-# B 站全自动运营多 Agent 系统
+# B站内容策划与视频分析工作台
 
-基于 Python + LangGraph + LangChain + bilibili-api-python 的多 Agent 项目，现已同时提供：
-- 命令行运行方式
-- 轻量级前端页面
-- 面向 Java 开发者的完整文档
+这是一个基于 Python、LangGraph、LangChain 和 `bilibili-api-python` 的 B 站创作辅助项目。
 
----
+当前 Web 端已经按实际业务拆成两个独立模块：
 
-## 1. 核心能力
+1. 模块一：还没发布视频，不知道做什么内容
+   - 输入你的领域、方向、想法
+   - 结合当前热门结构生成更容易起量的选题
+   - 自动生成标题、脚本、简介、标签、置顶评论
 
-项目包含 4 个核心 Agent：
-- 选题 Agent
-- 文案 Agent
-- 运营 Agent
-- 数据优化 Agent
+2. 模块二：已经发布了视频，想分析和优化
+   - 输入 B 站视频链接
+   - 后台自动解析视频信息和公开数据
+   - 判断更像热门爆款还是播放偏低
+   - 给出爆款拆解或优化建议
 
-支持两种使用方式：
-- CLI：适合开发调试
-- Web 页面：适合可视化操作和演示
+项目底层仍然保留 4 个 Agent：
 
----
+- `TopicAgent`：选题分析
+- `CopywritingAgent`：文案生成
+- `OperationAgent`：互动运营建议
+- `OptimizationAgent`：数据优化建议
 
-## 2. 安装依赖
+Web 层是在这些 Agent 之上封装了两个更贴近使用场景的业务模块。
+
+## 安装
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
+## 配置
 
-## 3. 配置环境变量
-
-复制模板：
+复制环境变量模板：
 
 ### Windows
+
 ```bash
 copy .env.example .env
 ```
 
 ### macOS / Linux
+
 ```bash
 cp .env.example .env
 ```
 
-如果你有 DeepSeek / Qwen 的 OpenAI 兼容接口，可填写：
+可选配置：
+
 - `LLM_API_KEY`
 - `LLM_BASE_URL`
 - `LLM_MODEL`
+- `DEFAULT_PARTITION`
+- `DEFAULT_PEER_UPS`
 
-如果不填，也能运行，系统会自动进入本地降级模式。
+如果没有填写 LLM Key，系统仍可运行，会自动使用本地降级逻辑。
 
----
+## 启动
 
-## 4. CLI 启动方式
-
-### 选题 Agent
-```bash
-python main.py topic --partition knowledge
-```
-
-### 文案 Agent
-```bash
-python main.py copy --topic "AI 视频剪辑提效" --style 干货
-```
-
-### 运营 Agent
-```bash
-python main.py operate --bv BV1xx411c7mD --dry-run
-```
-
-### 数据优化 Agent
-```bash
-python main.py optimize --bv BV1xx411c7mD
-```
-
-### 全流程
-```bash
-python main.py pipeline --bv BV1xx411c7mD --partition knowledge --style 干货
-```
-
----
-
-## 5. 前端启动方式
+### Web 页面
 
 ```bash
 python web/app.py
 ```
 
-浏览器打开：
+浏览器访问：
 
 ```text
 http://127.0.0.1:8000
 ```
 
-页面支持：
-- 单独运行 4 大 Agent
-- 一键运行全流程
-- 直接查看结构化结果
+### CLI
 
----
+```bash
+python main.py topic --partition knowledge --topic "AI 剪辑效率"
+python main.py copy --topic "AI 剪辑效率的高效做法" --style 干货
+python main.py optimize --bv BV1xx411c7mD
+python main.py pipeline --bv BV1xx411c7mD --partition knowledge --style 干货 --topic "AI 剪辑效率"
+```
 
-## 6. 文档目录
+## Web 模块说明
 
-详细文档请看 `docs/`：
+### 模块一：选题与文案
 
-- `docs/01_项目说明.md`
-- `docs/02_完整部署文档.md`
-- `docs/03_Java开发者学习教程.md`
-- `docs/04_前端说明.md`
-- `docs/05_前端使用手册.md`
+输入：
 
----
+- 领域
+- 方向
+- 想法
+- 可选分区
+- 文案风格
 
-## 7. 说明
+输出：
 
-- 默认使用 SQLite，本地自动生成 `bilibili_agents.db`
-- 默认对敏感互动动作用 `dry-run`
-- 完播率、平均观看时长为估算值
-- 若 B 站接口访问失败，会自动使用演示数据保证流程可跑通
+- 3 个更适合做的选题方向
+- 自动生成的标题
+- 视频脚本
+- 简介、标签、置顶评论
 
-如果你是 Java / SpringBoot 开发者，建议先看：
+### 模块二：视频解析与优化
+
+输入：
+
+- B 站视频链接
+
+输出：
+
+- BV 号、UP 主、分区、播放、点赞、投币、收藏等解析结果
+- 热门爆款 / 播放偏低 判断
+- 爆款拆解或优化建议
+- 可继续延展的选题方向
+- 对于低表现视频，额外生成一版新的文案参考
+
+## 项目结构
 
 ```text
-docs/03_Java开发者学习教程.md
+D:\agent
+├─ agents/
+│  ├─ topic_agent.py
+│  ├─ copywriting_agent.py
+│  ├─ operation_agent.py
+│  └─ optimization_agent.py
+├─ web/
+│  ├─ app.py
+│  ├─ templates/
+│  │  └─ index.html
+│  └─ static/
+│     ├─ style.css
+│     └─ app.js
+├─ docs/
+├─ config.py
+├─ db.py
+├─ graph.py
+├─ llm_client.py
+├─ main.py
+├─ models.py
+└─ requirements.txt
 ```
+
+## 说明
+
+- 默认使用 SQLite，本地会生成 `bilibili_agents.db`
+- 评论互动类动作默认 `dry-run`
+- 公开数据接口失败时，会自动尝试其他解析方式
+- Web 页面已按两个业务模块重构，但底层 Agent 结构没有被打散
+
+更详细说明见 `docs/` 目录。 

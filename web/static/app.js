@@ -1,34 +1,9 @@
 const state = {
-  topic: null,
-  copy: null,
-  operate: null,
-  optimize: null,
-  pipeline: null,
-  loading: false,
-  form: {
-    bili_link: '',
-    partition_name: 'knowledge',
-    up_ids: [546195, 15263701, 777536],
-    style: '干货',
-    bv_id: 'BV1xx411c7mD',
-    manual_topic: 'AI 视频剪辑提效',
-  },
-};
-
-const ACTION_LABELS = {
-  topic: '选题 Agent',
-  copy: '文案 Agent',
-  operate: '运营 Agent',
-  optimize: '优化 Agent',
-  pipeline: '全流程',
+  loadingKey: '',
 };
 
 function $(selector) {
   return document.querySelector(selector);
-}
-
-function $all(selector) {
-  return Array.from(document.querySelectorAll(selector));
 }
 
 function escapeHtml(value) {
@@ -40,86 +15,21 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function parseUpIds(value) {
-  return value
-    .split(',')
-    .map(item => item.trim())
-    .filter(Boolean)
-    .map(item => Number(item))
-    .filter(item => !Number.isNaN(item));
+function formatNumber(value) {
+  const num = Number(value || 0);
+  return Number.isFinite(num) ? num.toLocaleString('zh-CN') : '0';
 }
 
-function payload() {
-  return {
-    partition: state.form.partition_name,
-    up_ids: state.form.up_ids,
-    style: state.form.style,
-    bv_id: state.form.bv_id,
-    topic: state.form.manual_topic,
-    dry_run: true,
-  };
-}
-
-function syncFormState() {
-  const biliLinkEl = $('#biliLink');
-  const partitionEl = $('#partition');
-  const upIdsEl = $('#upIds');
-  const styleEl = $('#style');
-  const bvIdEl = $('#bvId');
-  const topicEl = $('#topic');
-
-  state.form.bili_link = biliLinkEl ? biliLinkEl.value.trim() : state.form.bili_link;
-  state.form.partition_name = partitionEl ? partitionEl.value.trim() : state.form.partition_name;
-  state.form.up_ids = upIdsEl ? parseUpIds(upIdsEl.value) : state.form.up_ids;
-  state.form.style = styleEl ? styleEl.value : state.form.style;
-  state.form.bv_id = bvIdEl ? bvIdEl.value.trim() : state.form.bv_id;
-  state.form.manual_topic = topicEl ? topicEl.value.trim() : state.form.manual_topic;
-}
-
-async function resolveBiliLink(link) {
-  const response = await fetch('/api/resolve-bili-link', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url: link }),
-  });
-  const data = await response.json();
-  if (!response.ok || !data.success) {
-    throw new Error(data.error || '链接解析失败');
-  }
-  return data.data;
-}
-
-function applyResolvedData(resolved) {
-  state.form.bv_id = resolved.bv_id || state.form.bv_id;
-  state.form.up_ids = resolved.mid ? [resolved.mid] : state.form.up_ids;
-  state.form.partition_name = resolved.partition || state.form.partition_name;
-
-  const bvIdEl = $('#bvId');
-  const upIdsEl = $('#upIds');
-  const partitionEl = $('#partition');
-  if (bvIdEl) bvIdEl.value = state.form.bv_id;
-  if (upIdsEl) upIdsEl.value = state.form.up_ids.join(',');
-  if (partitionEl) partitionEl.value = state.form.partition_name;
-}
-
-async function handleBiliLinkInput(link) {
-  if (!link || !/BV[0-9A-Za-z]+/i.test(link)) return;
-  try {
-    setStatus('正在解析B站视频链接...', 'loading');
-    const resolved = await resolveBiliLink(link);
-    applyResolvedData(resolved);
-    setStatus('链接解析完成', 'success');
-    showToast('解析成功', '已自动填充表单', 'success');
-  } catch (error) {
-    setStatus('链接解析失败', 'error');
-    showToast('解析失败', error.message || '请检查链接是否有效', 'error');
-  }
+function formatPercent(value) {
+  const num = Number(value || 0);
+  return `${(num * 100).toFixed(2)}%`;
 }
 
 function setStatus(text, type = 'idle') {
   const pill = $('#globalStatusPill');
   const statusText = $('#statusText');
   const modeText = $('#currentModeText');
+  if (!pill || !statusText || !modeText) return;
 
   pill.classList.remove('is-loading', 'is-success', 'is-error');
   if (type === 'loading') pill.classList.add('is-loading');
@@ -130,38 +40,10 @@ function setStatus(text, type = 'idle') {
   modeText.textContent = text;
 }
 
-function setResultMeta(text) {
-  $('#resultMetaText').textContent = text;
-}
-
-function setLoading(action, isLoading) {
-  state.loading = isLoading;
-  $all('.action-btn').forEach(btn => {
-    const match = btn.dataset.action === action;
-    btn.disabled = isLoading;
-    btn.classList.toggle('is-loading', isLoading && match);
-  });
-}
-
-function switchTab(tab) {
-  $all('.tab-btn').forEach(btn => {
-    btn.classList.toggle('is-active', btn.dataset.tab === tab);
-  });
-  $all('.tab-panel').forEach(panel => {
-    panel.classList.toggle('is-active', panel.dataset.panel === tab);
-  });
-}
-
-function showEmpty(tab, visible) {
-  const empty = document.querySelector(`[data-empty="${tab}"]`);
-  const panel = document.getElementById(`${tab}Panel`);
-  if (!empty || !panel) return;
-  empty.classList.toggle('hidden', !visible);
-  panel.classList.toggle('hidden', visible);
-}
-
 function showToast(title, message, type = 'success') {
   const stack = $('#toastStack');
+  if (!stack) return;
+
   const toast = document.createElement('div');
   toast.className = `toast toast--${type}`;
   toast.innerHTML = `
@@ -169,9 +51,30 @@ function showToast(title, message, type = 'success') {
     <div>${escapeHtml(message)}</div>
   `;
   stack.appendChild(toast);
-  setTimeout(() => {
+
+  window.setTimeout(() => {
     toast.remove();
   }, 2600);
+}
+
+function setButtonLoading(buttonId, isLoading) {
+  const btn = document.getElementById(buttonId);
+  if (!btn) return;
+  btn.disabled = isLoading;
+  btn.classList.toggle('is-loading', isLoading);
+}
+
+async function requestJson(url, payload) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || '请求失败');
+  }
+  return data.data;
 }
 
 async function copyText(text, label = '内容') {
@@ -191,46 +94,18 @@ function bindCopyButtons(scope = document) {
   });
 }
 
-function bindStepToggles(scope = document) {
-  scope.querySelectorAll('.step-toggle').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const card = btn.closest('.pipeline-step');
-      if (!card) return;
-      const collapsed = card.classList.toggle('is-collapsed');
-      btn.textContent = collapsed ? '展开' : '收起';
-    });
-  });
-}
-
-function cardTags(tags = []) {
-  if (!tags.length) return '';
+function renderTags(tags = []) {
+  if (!tags.length) return '<p class="section-note">暂无关键词。</p>';
   return `<div class="tag-list">${tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}</div>`;
 }
 
-function renderTopicResult(data) {
-  const ideas = data?.ideas || [];
+function renderIdeaCards(topicResult) {
+  const ideas = topicResult?.ideas || [];
   if (!ideas.length) {
-    return `<div class="info-card"><h4>暂无选题</h4><p>当前没有可展示的选题数据。</p></div>`;
+    return '<div class="info-card"><h4>暂无选题建议</h4><p>当前没有可展示的选题结果。</p></div>';
   }
 
   return `
-    <div class="summary-strip">
-      <div class="stat-card">
-        <h4>选题数量</h4>
-        <span class="stat-card__value">${ideas.length}</span>
-        <p>已筛选出高潜力方向</p>
-      </div>
-      <div class="stat-card">
-        <h4>数据来源</h4>
-        <span class="stat-card__value">${escapeHtml(data.source_count ?? 0)}</span>
-        <p>热榜、分区与同类 UP 数据</p>
-      </div>
-      <div class="stat-card">
-        <h4>当前重点</h4>
-        <span class="stat-card__value">${escapeHtml(ideas[0]?.video_type || '干货')}</span>
-        <p>优先建议先做第 1 个选题</p>
-      </div>
-    </div>
     <div class="topic-grid">
       ${ideas.map((idea, index) => `
         <article class="topic-card">
@@ -242,32 +117,32 @@ function renderTopicResult(data) {
             <span class="type-badge">${escapeHtml(idea.video_type || '干货')}</span>
           </div>
           <p>${escapeHtml(idea.reason || '')}</p>
-          ${cardTags(idea.keywords || [])}
+          ${renderTags(idea.keywords || [])}
         </article>
       `).join('')}
     </div>
   `;
 }
 
-function renderCopyResult(data) {
-  const titles = data?.titles || [];
-  const script = data?.script || [];
-  const description = data?.description || '';
-  const tags = data?.tags || [];
-  const pinned = data?.pinned_comment || '';
+function renderCopyResult(copyResult) {
+  const titles = copyResult?.titles || [];
+  const script = copyResult?.script || [];
+  const description = copyResult?.description || '';
+  const tags = copyResult?.tags || [];
+  const pinned = copyResult?.pinned_comment || '';
 
   return `
     <div class="copy-layout">
       <section class="copy-block">
         <div class="block-title">
           <div>
-            <h4>标题区</h4>
-            <p>3 个备选标题，可直接复制使用</p>
+            <h4>高流量标题</h4>
+            <p>结合当前方向自动生成的标题备选</p>
           </div>
           <button class="copy-btn" data-copy="${escapeHtml(titles.join('\n'))}" data-copy-label="标题集合">一键复制</button>
         </div>
         <div class="copy-title-grid">
-          ${titles.map((title, index) => `
+          ${titles.length ? titles.map((title, index) => `
             <article class="copy-card">
               <div class="card-head">
                 <div>
@@ -277,20 +152,26 @@ function renderCopyResult(data) {
                 <button class="copy-btn" data-copy="${escapeHtml(title)}" data-copy-label="标题 ${index + 1}">复制</button>
               </div>
             </article>
-          `).join('')}
+          `).join('') : '<div class="info-card"><p>暂无标题结果。</p></div>'}
         </div>
       </section>
 
       <section class="copy-block">
         <div class="block-title">
           <div>
-            <h4>脚本区</h4>
-            <p>按分镜 / 段落展示，包含时长建议</p>
+            <h4>文案脚本</h4>
+            <p>可直接拆成视频段落使用</p>
           </div>
-          <button class="copy-btn" data-copy="${escapeHtml(script.map(item => `[${item.duration}] ${item.section}: ${item.content}`).join('\n'))}" data-copy-label="完整脚本">一键复制</button>
+          <button
+            class="copy-btn"
+            data-copy="${escapeHtml(script.map(item => `[${item.duration || ''}] ${item.section || ''}: ${item.content || ''}`).join('\n'))}"
+            data-copy-label="完整脚本"
+          >
+            一键复制
+          </button>
         </div>
         <div class="script-list">
-          ${script.map((item, index) => `
+          ${script.length ? script.map((item, index) => `
             <article class="script-item">
               <div class="script-item__meta">
                 <div style="display:flex;align-items:center;gap:12px;">
@@ -304,400 +185,350 @@ function renderCopyResult(data) {
                 <button class="copy-btn" data-copy="${escapeHtml(item.content || '')}" data-copy-label="脚本片段 ${index + 1}">复制片段</button>
               </div>
             </article>
-          `).join('')}
+          `).join('') : '<div class="info-card"><p>暂无脚本结果。</p></div>'}
         </div>
       </section>
 
       <section class="copy-block">
         <div class="block-title">
           <div>
-            <h4>简介区</h4>
-            <p>适合直接粘贴到视频简介</p>
+            <h4>简介与标签</h4>
+            <p>适合直接放到发布页里</p>
           </div>
-          <button class="copy-btn" data-copy="${escapeHtml(description)}" data-copy-label="视频简介">复制简介</button>
-        </div>
-        <article class="dark-card">
-          <p class="rich-text">${escapeHtml(description)}</p>
-        </article>
-      </section>
-
-      <section class="copy-block">
-        <div class="block-title">
-          <div>
-            <h4>标签区</h4>
-            <p>精准关键词、热门标签与同类标签</p>
-          </div>
-          <button class="copy-btn" data-copy="${escapeHtml(tags.join(', '))}" data-copy-label="标签">复制标签</button>
         </div>
         <article class="copy-card">
-          ${cardTags(tags)}
+          <div class="card-head">
+            <div>
+              <div class="meta-line">视频简介</div>
+              <h4>简介文案</h4>
+            </div>
+            <button class="copy-btn" data-copy="${escapeHtml(description)}" data-copy-label="视频简介">复制简介</button>
+          </div>
+          <p>${escapeHtml(description || '暂无简介结果。')}</p>
+          <div class="spacer-xs"></div>
+          ${renderTags(tags)}
         </article>
       </section>
 
       <section class="copy-block">
         <div class="block-title">
           <div>
-            <h4>置顶评论区</h4>
-            <p>用于引导互动和收集后续选题方向</p>
+            <h4>置顶评论</h4>
+            <p>用于引导互动和收集下一期方向</p>
           </div>
           <button class="copy-btn" data-copy="${escapeHtml(pinned)}" data-copy-label="置顶评论">复制评论</button>
         </div>
         <article class="dark-card">
-          <p class="rich-text">${escapeHtml(pinned)}</p>
+          <p class="rich-text">${escapeHtml(pinned || '暂无置顶评论结果。')}</p>
         </article>
       </section>
     </div>
   `;
 }
 
-function renderOperateActionCard(action, type) {
-  const isDanger = type === 'delete';
-  const titleMap = {
-    reply: '回复建议',
-    delete: '垃圾评论处理',
-    like: '点赞动作',
-    follow: '关注动作',
-  };
+function renderCreatorResult(data) {
   return `
-    <article class="comment-card ${isDanger ? 'is-danger' : ''}">
-      <div class="card-head">
-        <div>
-          <div class="meta-line">${titleMap[type] || '互动动作'}</div>
-          <h4>${escapeHtml(action.action || 'action')}</h4>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <span class="dry-badge">dry_run=${escapeHtml(action.dry_run)}</span>
-          ${isDanger ? '<span class="warn-badge">建议重点处理</span>' : ''}
-        </div>
-      </div>
-      <div class="comment-bubble">${escapeHtml(action.message || '')}</div>
-      <div class="reply-bubble">目标：${escapeHtml(action.target || '')}</div>
-    </article>
-  `;
-}
-
-function renderOperateResult(data) {
-  const replies = data?.replies || [];
-  const deletions = data?.deletions || [];
-  const likes = data?.likes || [];
-  const follows = data?.follows || [];
-
-  return `
-    <div class="operate-section">
+    <div class="result-stack">
       <div class="summary-strip">
         <div class="stat-card">
-          <h4>处理汇总</h4>
-          <p>${escapeHtml(data?.summary || '暂无汇总')}</p>
+          <h4>输入主题</h4>
+          <p>${escapeHtml(data.seed_topic || '未填写')}</p>
         </div>
         <div class="stat-card">
-          <h4>回复建议</h4>
-          <span class="stat-card__value">${replies.length}</span>
-          <p>建议优先处理高价值互动</p>
+          <h4>推荐主选题</h4>
+          <p>${escapeHtml(data.chosen_topic || '暂无')}</p>
         </div>
         <div class="stat-card">
-          <h4>垃圾评论</h4>
-          <span class="stat-card__value">${deletions.length}</span>
-          <p>已用红色高亮标识</p>
-        </div>
-        <div class="stat-card">
-          <h4>点赞 / 关注</h4>
-          <span class="stat-card__value">${likes.length} / ${follows.length}</span>
-          <p>默认保持 dry_run 安全模式</p>
+          <h4>文案风格</h4>
+          <p>${escapeHtml(data.style || '干货')}</p>
         </div>
       </div>
 
-      <div class="copy-block">
+      <section class="copy-block">
         <div class="block-title">
-          <div><h4>回复建议</h4><p>对话式卡片展示，适合直接参考回复</p></div>
-        </div>
-        <div class="comment-list">
-          ${replies.length ? replies.map(item => renderOperateActionCard(item, 'reply')).join('') : '<div class="info-card"><p>暂无回复建议。</p></div>'}
-        </div>
-      </div>
-
-      <div class="copy-block">
-        <div class="block-title">
-          <div><h4>垃圾评论过滤</h4><p>引战、辱骂、广告类内容会单独标红</p></div>
-        </div>
-        <div class="comment-list">
-          ${deletions.length ? deletions.map(item => renderOperateActionCard(item, 'delete')).join('') : '<div class="info-card"><p>未识别到垃圾评论。</p></div>'}
-        </div>
-      </div>
-
-      <div class="optimize-grid">
-        <div class="copy-card">
-          <div class="card-head"><div><h4>点赞动作</h4></div></div>
-          <div class="comment-list">
-            ${likes.length ? likes.map(item => renderOperateActionCard(item, 'like')).join('') : '<p>暂无点赞动作。</p>'}
+          <div>
+            <h4>热门选题建议</h4>
+            <p>基于你的方向和当前热门结构，自动整理出更值得做的切口。</p>
           </div>
         </div>
-        <div class="copy-card">
-          <div class="card-head"><div><h4>关注动作</h4></div></div>
-          <div class="comment-list">
-            ${follows.length ? follows.map(item => renderOperateActionCard(item, 'follow')).join('') : '<p>暂无关注动作。</p>'}
+        ${renderIdeaCards(data.topic_result)}
+      </section>
+
+      <section class="copy-block">
+        <div class="block-title">
+          <div>
+            <h4>自动生成文案</h4>
+            <p>围绕主选题生成标题、脚本、简介和置顶评论。</p>
           </div>
         </div>
-      </div>
+        ${renderCopyResult(data.copy_result)}
+      </section>
     </div>
   `;
 }
 
-function numberFromPercent(text) {
-  const match = String(text || '').match(/(\d+(?:\.\d+)?)%/);
-  return match ? Math.min(100, Number(match[1])) : 50;
+function renderMetricCard(label, value, hint = '') {
+  return `
+    <div class="stat-card">
+      <h4>${escapeHtml(label)}</h4>
+      <span class="stat-card__value">${escapeHtml(value)}</span>
+      ${hint ? `<p>${escapeHtml(hint)}</p>` : ''}
+    </div>
+  `;
 }
 
-function renderOptimizeResult(data) {
-  const summary = data?.benchmark_summary || '';
-  const completion = numberFromPercent(summary.match(/完播率\s*(\d+(?:\.\d+)?)%/)?.[0] || '50%');
-  const likeRate = numberFromPercent(summary.match(/点赞率\s*(\d+(?:\.\d+)?)%/)?.[0] || '50%');
-  const titlePower = data?.optimized_titles?.length ? 78 : 45;
-
+function renderVideoMetrics(resolved) {
+  const stats = resolved?.stats || {};
   return `
-    <div class="optimize-layout">
-      <section class="optimize-section">
-        <div class="block-title">
-          <div>
-            <h4>数据概览</h4>
-            <p>通过小卡片和进度条快速查看当前优化重点</p>
-          </div>
-        </div>
-        <div class="summary-strip">
-          <div class="stat-card">
-            <h4>诊断概览</h4>
-            <p>${escapeHtml(data?.diagnosis || '暂无诊断')}</p>
-          </div>
-          <div class="stat-card">
-            <h4>基准总结</h4>
-            <p>${escapeHtml(summary)}</p>
-          </div>
-        </div>
-        <div class="optimize-card">
-          <div class="progress-group">
-            <div class="progress-item">
-              <div class="progress-item__meta"><span>标题吸引力</span><strong>${titlePower}%</strong></div>
-              <div class="progress-track"><div class="progress-bar" style="width:${titlePower}%"></div></div>
-            </div>
-            <div class="progress-item">
-              <div class="progress-item__meta"><span>互动潜力</span><strong>${likeRate}%</strong></div>
-              <div class="progress-track"><div class="progress-bar" style="width:${likeRate}%"></div></div>
-            </div>
-            <div class="progress-item">
-              <div class="progress-item__meta"><span>内容节奏</span><strong>${completion}%</strong></div>
-              <div class="progress-track"><div class="progress-bar" style="width:${completion}%"></div></div>
-            </div>
-          </div>
-        </div>
-      </section>
+    <div class="summary-strip">
+      ${renderMetricCard('播放', formatNumber(stats.view), '当前公开播放数据')}
+      ${renderMetricCard('点赞', formatNumber(stats.like), `点赞率 ${formatPercent(stats.like_rate)}`)}
+      ${renderMetricCard('投币 / 收藏', `${formatNumber(stats.coin)} / ${formatNumber(stats.favorite)}`, '反映内容认可度和收藏价值')}
+      ${renderMetricCard('评论 / 分享', `${formatNumber(stats.reply)} / ${formatNumber(stats.share)}`, '反映讨论和传播意愿')}
+    </div>
+  `;
+}
 
-      <section class="optimize-section">
-        <div class="block-title">
-          <div>
-            <h4>标题优化</h4>
-            <p>2 个优化后标题，可直接复制做 AB 测试</p>
-          </div>
-          <button class="copy-btn" data-copy="${escapeHtml((data?.optimized_titles || []).join('\n'))}" data-copy-label="优化标题">一键复制</button>
-        </div>
-        <div class="optimize-grid">
-          ${(data?.optimized_titles || []).map((title, index) => `
-            <article class="copy-card">
-              <div class="card-head">
-                <div>
-                  <div class="meta-line">优化标题 ${index + 1}</div>
-                  <h4>${escapeHtml(title)}</h4>
-                </div>
-                <button class="copy-btn" data-copy="${escapeHtml(title)}" data-copy-label="优化标题 ${index + 1}">复制</button>
-              </div>
-            </article>
-          `).join('')}
-        </div>
-      </section>
-
-      <section class="optimize-section">
-        <div class="block-title">
-          <div>
-            <h4>封面建议</h4>
-            <p>突出核心亮点、结果感与反差感</p>
-          </div>
-          <button class="copy-btn" data-copy="${escapeHtml(data?.cover_suggestion || '')}" data-copy-label="封面建议">复制</button>
-        </div>
-        <article class="dark-card">
-          <p class="rich-text">${escapeHtml(data?.cover_suggestion || '')}</p>
+function renderBulletList(items = []) {
+  if (!items.length) {
+    return '<div class="info-card"><p>暂无内容。</p></div>';
+  }
+  return `
+    <div class="analysis-list">
+      ${items.filter(Boolean).map(item => `
+        <article class="analysis-item">
+          <span class="analysis-item__dot"></span>
+          <p>${escapeHtml(item)}</p>
         </article>
-      </section>
+      `).join('')}
+    </div>
+  `;
+}
 
-      <section class="optimize-section">
+function renderSimpleTopics(topics = [], title = '后续可做方向') {
+  return `
+    <section class="copy-block">
+      <div class="block-title">
+        <div>
+          <h4>${escapeHtml(title)}</h4>
+          <p>围绕当前视频继续做内容延展</p>
+        </div>
+      </div>
+      <div class="topic-grid">
+        ${topics.length ? topics.map((topic, index) => `
+          <article class="copy-card">
+            <div class="card-head">
+              <div>
+                <div class="meta-line">方向 ${index + 1}</div>
+                <h4>${escapeHtml(topic)}</h4>
+              </div>
+              <button class="copy-btn" data-copy="${escapeHtml(topic)}" data-copy-label="后续方向 ${index + 1}">复制</button>
+            </div>
+          </article>
+        `).join('') : '<div class="info-card"><p>暂无后续方向建议。</p></div>'}
+      </div>
+    </section>
+  `;
+}
+
+function renderVideoResult(data) {
+  const resolved = data.resolved || {};
+  const performance = data.performance || {};
+  const analysis = data.analysis || {};
+  const optimizeResult = data.optimize_result || {};
+  const copyResult = data.copy_result;
+
+  const headerSummary = `
+    <div class="summary-strip">
+      <div class="stat-card">
+        <h4>视频标题</h4>
+        <p>${escapeHtml(resolved.title || '未知标题')}</p>
+      </div>
+      <div class="stat-card">
+        <h4>UP 主 / 分区</h4>
+        <p>${escapeHtml(resolved.up_name || '未知UP')} / ${escapeHtml(resolved.partition_label || resolved.partition || '未知')}</p>
+      </div>
+      <div class="stat-card">
+        <h4>结果判断</h4>
+        <p>${escapeHtml(performance.label || '待判断')}</p>
+      </div>
+      <div class="stat-card">
+        <h4>BV 号</h4>
+        <p>${escapeHtml(resolved.bv_id || '-')}</p>
+      </div>
+    </div>
+  `;
+
+  const hotSection = performance.is_hot ? `
+    <section class="copy-block">
+      <div class="block-title">
+        <div>
+          <h4>为什么它能火</h4>
+          <p>${escapeHtml(performance.summary || '')}</p>
+        </div>
+      </div>
+      ${renderBulletList(analysis.analysis_points || [])}
+    </section>
+    ${renderSimpleTopics(analysis.followup_topics || [], '继续放大的后续选题')}
+  ` : '';
+
+  const lowSection = !performance.is_hot ? `
+    <section class="copy-block">
+      <div class="block-title">
+        <div>
+          <h4>为什么现在播放偏低</h4>
+          <p>${escapeHtml(performance.summary || '')}</p>
+        </div>
+      </div>
+      ${renderBulletList(analysis.analysis_points || [])}
+    </section>
+
+    <section class="copy-block">
+      <div class="block-title">
+        <div>
+          <h4>优化建议</h4>
+          <p>针对标题、封面和内容节奏给出可执行调整。</p>
+        </div>
+      </div>
+      <div class="summary-strip">
+        ${renderMetricCard('优化标题', (analysis.title_suggestions || []).join(' / ') || '暂无', '建议先做标题 AB 测试')}
+        ${renderMetricCard('封面方向', analysis.cover_suggestion || '暂无', '先强化结果感和反差感')}
+      </div>
+      ${renderBulletList(analysis.content_suggestions || optimizeResult.content_suggestions || [])}
+    </section>
+
+    ${renderSimpleTopics(analysis.next_topics || [], '建议尝试的新选题方向')}
+
+    ${copyResult ? `
+      <section class="copy-block">
         <div class="block-title">
           <div>
-            <h4>内容调整</h4>
-            <p>针对开头、节奏、互动点的具体可执行建议</p>
+            <h4>当前主题可直接参考的新文案</h4>
+            <p>围绕当前视频核心主题，重新生成一版更适合优化后的文案结构。</p>
           </div>
-          <button class="copy-btn" data-copy="${escapeHtml((data?.content_suggestions || []).join('\n'))}" data-copy-label="内容调整建议">复制</button>
         </div>
-        <div class="comment-list">
-          ${(data?.content_suggestions || []).map((item, index) => `
-            <article class="optimize-card">
-              <div class="card-head">
-                <div>
-                  <div class="meta-line">建议 ${index + 1}</div>
-                  <h4>内容调整项</h4>
-                </div>
-              </div>
-              <p>${escapeHtml(item)}</p>
-            </article>
-          `).join('')}
-        </div>
+        ${renderCopyResult(copyResult)}
       </section>
+    ` : ''}
+  ` : '';
+
+  return `
+    <div class="result-stack">
+      ${headerSummary}
+      ${renderVideoMetrics(resolved)}
+      ${hotSection}
+      ${lowSection}
     </div>
   `;
 }
 
-function pipelineStep(title, badge, body, collapsed = false) {
-  return `
-    <article class="pipeline-step ${collapsed ? 'is-collapsed' : ''}">
-      <div class="step-head">
-        <div>
-          <span class="agent-badge">${escapeHtml(badge)}</span>
-          <h4 style="margin-top:10px;">${escapeHtml(title)}</h4>
-        </div>
-        <button class="step-toggle" type="button">${collapsed ? '展开' : '收起'}</button>
-      </div>
-      <div class="pipeline-step__body">
-        ${body}
-      </div>
-    </article>
-  `;
-}
+async function runCreatorModule() {
+  if (state.loadingKey) return;
 
-function renderPipelineResult(data) {
-  return `
-    <div class="pipeline-steps">
-      ${pipelineStep('Step 1 · 选题分析', '选题 Agent', renderTopicResult(data?.topic_result || {}), false)}
-      ${pipelineStep('Step 2 · 文案生成', '文案 Agent', renderCopyResult(data?.copywriting_result || {}), true)}
-      ${pipelineStep('Step 3 · 互动运营', '运营 Agent', renderOperateResult(data?.operation_result || {}), true)}
-      ${pipelineStep('Step 4 · 数据优化', '优化 Agent', renderOptimizeResult(data?.optimization_result || {}), true)}
-    </div>
-  `;
-}
+  const field = $('#creatorField')?.value.trim() || '';
+  const direction = $('#creatorDirection')?.value.trim() || '';
+  const idea = $('#creatorIdea')?.value.trim() || '';
+  const partition = $('#creatorPartition')?.value || 'knowledge';
+  const style = $('#creatorStyle')?.value || '干货';
 
-function renderToPanel(tab, html) {
-  const panel = document.getElementById(`${tab}Panel`);
-  if (!panel) return;
-  panel.innerHTML = html;
-  showEmpty(tab, false);
-  bindCopyButtons(panel);
-  bindStepToggles(panel);
-}
-
-function clearAllResults() {
-  ['topic', 'copy', 'operate', 'optimize', 'pipeline'].forEach(tab => {
-    state[tab] = null;
-    const panel = document.getElementById(`${tab}Panel`);
-    if (panel) panel.innerHTML = '';
-    showEmpty(tab, true);
-  });
-  setResultMeta('暂无结果');
-  setStatus('等待执行', 'idle');
-  showToast('已清空', '结果区已重置', 'success');
-}
-
-async function runAction(action) {
-  if (state.loading) return;
-
-  syncFormState();
-  const requestPayload = payload();
-  setLoading(action, true);
-  setStatus(`正在生成 ${ACTION_LABELS[action]}...`, 'loading');
-  setResultMeta(`当前执行：${ACTION_LABELS[action]}`);
-  switchTab(action);
+  if (!field && !direction && !idea) {
+    showToast('缺少输入', '请至少填写领域、方向或想法中的一项', 'error');
+    return;
+  }
 
   try {
-    const response = await fetch(`/api/${action}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(requestPayload),
+    state.loadingKey = 'creator';
+    setButtonLoading('creatorRunBtn', true);
+    setStatus('正在生成选题与文案...', 'loading');
+
+    const data = await requestJson('/api/module-create', {
+      field,
+      direction,
+      idea,
+      partition,
+      style,
     });
 
-    const data = await response.json();
-    if (!response.ok || !data.success) {
-      throw new Error(data.error || '请求失败');
+    const container = $('#creatorResult');
+    if (container) {
+      container.innerHTML = renderCreatorResult(data);
+      bindCopyButtons(container);
     }
 
-    state[action] = data.data;
-
-    if (action === 'topic') renderToPanel('topic', renderTopicResult(data.data));
-    if (action === 'copy') renderToPanel('copy', renderCopyResult(data.data));
-    if (action === 'operate') renderToPanel('operate', renderOperateResult(data.data));
-    if (action === 'optimize') renderToPanel('optimize', renderOptimizeResult(data.data));
-    if (action === 'pipeline') renderToPanel('pipeline', renderPipelineResult(data.data));
-
-    setStatus(`${ACTION_LABELS[action]} 已完成`, 'success');
-    setResultMeta(`最近更新：${ACTION_LABELS[action]}`);
-    showToast('生成完成', `${ACTION_LABELS[action]}结果已更新`, 'success');
+    setStatus('模块一结果已更新', 'success');
+    showToast('生成完成', '已生成选题与文案结果', 'success');
   } catch (error) {
-    setStatus(`${ACTION_LABELS[action]} 执行失败`, 'error');
-    setResultMeta('执行失败，请检查输入或稍后重试');
-    showToast('执行失败', error.message || '发生未知错误', 'error');
+    setStatus('模块一执行失败', 'error');
+    showToast('生成失败', error.message || '发生未知错误', 'error');
   } finally {
-    setLoading(action, false);
+    state.loadingKey = '';
+    setButtonLoading('creatorRunBtn', false);
   }
 }
 
-function initTabs() {
-  $all('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-  });
+async function runVideoModule() {
+  if (state.loadingKey) return;
+
+  const url = $('#videoLink')?.value.trim() || '';
+  if (!url) {
+    showToast('缺少链接', '请先输入 B 站视频链接', 'error');
+    return;
+  }
+
+  try {
+    state.loadingKey = 'video';
+    setButtonLoading('videoAnalyzeBtn', true);
+    setStatus('正在解析并分析视频...', 'loading');
+
+    const data = await requestJson('/api/module-analyze', { url });
+    const container = $('#videoResult');
+    if (container) {
+      container.innerHTML = renderVideoResult(data);
+      bindCopyButtons(container);
+    }
+
+    setStatus('模块二结果已更新', 'success');
+    showToast('分析完成', '已返回视频解析和优化结果', 'success');
+  } catch (error) {
+    setStatus('模块二执行失败', 'error');
+    showToast('分析失败', error.message || '发生未知错误', 'error');
+  } finally {
+    state.loadingKey = '';
+    setButtonLoading('videoAnalyzeBtn', false);
+  }
 }
 
-function initActions() {
-  $all('.action-btn').forEach(btn => {
-    btn.addEventListener('click', () => runAction(btn.dataset.action));
-  });
+function clearAllResults() {
+  const creatorResult = $('#creatorResult');
+  const videoResult = $('#videoResult');
 
-  $('#clearResultsBtn').addEventListener('click', clearAllResults);
-}
+  if (creatorResult) {
+    creatorResult.innerHTML = `
+      <div class="empty-state">
+        <h4>还没有生成结果</h4>
+        <p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p>
+      </div>
+    `;
+  }
 
-function bindFormState() {
-  const formBindings = {
-    biliLink: value => {
-      state.form.bili_link = value.trim();
-      handleBiliLinkInput(state.form.bili_link);
-    },
-    partition: value => {
-      state.form.partition_name = value.trim();
-    },
-    upIds: value => {
-      state.form.up_ids = parseUpIds(value);
-    },
-    style: value => {
-      state.form.style = value;
-    },
-    bvId: value => {
-      state.form.bv_id = value.trim();
-    },
-    topic: value => {
-      state.form.manual_topic = value.trim();
-    },
-  };
+  if (videoResult) {
+    videoResult.innerHTML = `
+      <div class="empty-state">
+        <h4>还没有分析结果</h4>
+        <p>输入视频链接后，点击“一键解析并分析视频”。</p>
+      </div>
+    `;
+  }
 
-  Object.entries(formBindings).forEach(([id, updater]) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    const handler = event => updater(event.target.value);
-    el.addEventListener('input', handler);
-    el.addEventListener('change', handler);
-    updater(el.value);
-  });
-
-  syncFormState();
+  setStatus('等待操作', 'idle');
+  showToast('已清空', '两个模块的结果区都已重置', 'success');
 }
 
 function init() {
-  bindFormState();
-  initTabs();
-  initActions();
-  setStatus('等待执行', 'idle');
-  setResultMeta('暂无结果');
+  $('#creatorRunBtn')?.addEventListener('click', runCreatorModule);
+  $('#videoAnalyzeBtn')?.addEventListener('click', runVideoModule);
+  $('#clearResultsBtn')?.addEventListener('click', clearAllResults);
+  setStatus('等待操作', 'idle');
 }
 
 init();

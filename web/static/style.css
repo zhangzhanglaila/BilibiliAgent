@@ -242,6 +242,51 @@ button {
   gap: 24px;
 }
 
+.module-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 24px;
+}
+
+.module-panel {
+  display: grid;
+  gap: 20px;
+  align-content: start;
+}
+
+.module-kicker {
+  display: inline-flex;
+  margin-bottom: 8px;
+  padding: 7px 11px;
+  border-radius: 999px;
+  background: var(--bili-blue-light);
+  color: var(--bili-blue-dark);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.module-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.module-run-btn {
+  width: 100%;
+}
+
+.module-result,
+.result-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.hero-points {
+  margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .panel {
   padding: 24px;
 }
@@ -271,6 +316,10 @@ button {
   gap: 18px;
 }
 
+.form-grid--compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .field {
   display: flex;
   flex-direction: column;
@@ -285,6 +334,83 @@ button {
   font-size: 14px;
   color: var(--text-soft);
   font-weight: 700;
+}
+
+.field__hint {
+  font-size: 12px;
+  color: var(--text-soft);
+  line-height: 1.6;
+}
+
+.smart-fill-card {
+  margin-bottom: 20px;
+  padding: 20px;
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(232, 248, 254, 0.96), rgba(255, 255, 255, 0.98));
+  border: 1px solid rgba(0, 174, 236, 0.18);
+}
+
+.smart-fill-card__head h4 {
+  margin: 0 0 6px;
+  font-size: 20px;
+}
+
+.smart-fill-card__head p {
+  margin: 0 0 16px;
+  color: var(--text-soft);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.smart-fill-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.smart-fill-btn {
+  min-width: 160px;
+  min-height: 50px;
+  padding: 14px 18px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--bili-blue), #59cdf7);
+  color: #fff;
+  border: none;
+  font-weight: 800;
+  position: relative;
+}
+
+.smart-fill-btn.is-loading {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.smart-fill-btn.is-loading::after {
+  content: "";
+  position: absolute;
+  right: 14px;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.34);
+  border-top-color: #fff;
+  animation: spin 0.8s linear infinite;
+}
+
+.smart-fill-meta {
+  margin-top: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.smart-fill-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.smart-fill-preview {
+  border-color: rgba(0, 174, 236, 0.18);
 }
 
 input,
@@ -667,6 +793,16 @@ select:focus {
   gap: 18px;
 }
 
+.section-note {
+  color: var(--text-soft);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.spacer-xs {
+  height: 10px;
+}
+
 .copy-title-grid,
 .optimize-grid {
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -674,10 +810,10 @@ select:focus {
 
 .copy-block,
 .optimize-section,
-operate-section,
+.operate-section,
 .summary-strip,
-script-list,
-pipeline-step__body {
+.script-list,
+.pipeline-step__body {
   display: grid;
   gap: 14px;
 }
@@ -789,6 +925,38 @@ pipeline-step__body {
 .comment-list {
   display: grid;
   gap: 14px;
+}
+
+.analysis-list {
+  display: grid;
+  gap: 12px;
+}
+
+.analysis-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: #fff;
+  border: 1px solid rgba(223, 234, 242, 0.94);
+  box-shadow: 0 10px 26px rgba(15, 36, 56, 0.05);
+}
+
+.analysis-item__dot {
+  width: 10px;
+  height: 10px;
+  margin-top: 7px;
+  border-radius: 999px;
+  background: var(--bili-blue);
+}
+
+.analysis-item p {
+  margin: 0;
+  color: var(--text-soft);
+  line-height: 1.7;
+  font-size: 14px;
 }
 
 .comment-card {
@@ -954,7 +1122,8 @@ pipeline-step__body {
 
 @media (max-width: 1200px) {
   .hero-card,
-  .workspace-grid {
+  .workspace-grid,
+  .module-grid {
     grid-template-columns: 1fr;
   }
 
@@ -971,9 +1140,11 @@ pipeline-step__body {
   }
 
   .form-grid,
+  .form-grid--compact,
   .action-grid,
   .copy-title-grid,
-  .optimize-grid {
+  .optimize-grid,
+  .smart-fill-row {
     grid-template-columns: 1fr;
   }
 
