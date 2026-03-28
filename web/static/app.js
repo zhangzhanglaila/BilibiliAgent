@@ -12,6 +12,7 @@ const state = {
   sceneTicking: false,
   progressJobs: {},
   activeModule: 'analyze',
+  activeOutlineId: 'workspaceOverview',
   chatPending: false,
   chatTyping: false,
   chatHistory: [],
@@ -108,9 +109,7 @@ function clampProgressValue(value) {
 
 function formatProgressLabel(value) {
   const safe = clampProgressValue(value);
-  if (safe >= 100) return '100%';
-  if (safe >= 90) return `${safe.toFixed(1)}%`;
-  return `${Math.round(safe)}%`;
+  return `${safe >= 100 ? 100 : Math.round(safe)}%`;
 }
 
 function stopProgressJob(key, finalPercent = null) {
@@ -128,9 +127,15 @@ function stopProgressJob(key, finalPercent = null) {
 
 function startProgressJob(key, onUpdate, options = {}) {
   stopProgressJob(key);
+  const start = clampProgressValue(options.start ?? 6);
+  const max = clampProgressValue(options.max ?? 94);
+  const interval = options.interval ?? 180;
+  const durationMs = options.durationMs ?? 12000;
+  const ticks = Math.max(1, Math.round(durationMs / interval));
   const job = {
-    percent: clampProgressValue(options.start ?? 6),
-    max: clampProgressValue(options.max ?? 99.4),
+    percent: start,
+    max,
+    increment: Math.max(options.minStep ?? 0.35, (max - start) / ticks),
     onUpdate,
     timer: null,
   };
@@ -141,14 +146,12 @@ function startProgressJob(key, onUpdate, options = {}) {
   }
 
   job.timer = window.setInterval(() => {
-    const remaining = Math.max(0, job.max - job.percent);
-    if (remaining <= 0.02) return;
-    const step = Math.max(options.minStep ?? 0.18, remaining * (options.easeFactor ?? 0.085));
-    job.percent = Math.min(job.max, job.percent + step);
+    if (job.percent >= job.max) return;
+    job.percent = Math.min(job.max, job.percent + job.increment);
     if (typeof onUpdate === 'function') {
       onUpdate(job.percent);
     }
-  }, options.interval ?? 160);
+  }, interval);
 
   return job;
 }
@@ -276,7 +279,7 @@ function referenceGrid(items = [], compact = false) {
 function referenceSection(items = [], title = '可直接参考的高表现视频', desc = '点击卡片可直接打开当前做得好的视频页面。') {
   const grid = referenceGrid(items, false);
   if (!grid) return '';
-  return `<section class="copy-block"><div class="block-title"><div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div></div>${grid}</section>`;
+  return `<section class="copy-block" id="videoReferenceSection"><div class="block-title"><div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div></div>${grid}</section>`;
 }
 
 function copyResult(copy) {
@@ -357,11 +360,11 @@ function creatorResult(data) {
         <div class="stat-card"><h4>推荐主选题</h4><span class="stat-card__value">${escapeHtml(data.chosen_topic || '暂无')}</span></div>
         <div class="stat-card"><h4>文案风格</h4><span class="stat-card__value">${escapeHtml(data.style || '干货')}</span></div>
       </div>
-      <section class="copy-block">
+      <section class="copy-block" id="creatorTopicsSection">
         <div class="block-title"><div><h4>热门选题建议</h4><p>基于你的方向和当前热门结构，自动整理出更值得做的切口。</p></div></div>
         ${renderIdeas(data.topic_result)}
       </section>
-      <section class="copy-block">
+      <section class="copy-block" id="creatorCopySection">
         <div class="block-title"><div><h4>自动生成文案</h4><p>围绕主选题生成标题、脚本、简介和置顶评论。</p></div></div>
         ${copyResult(data.copy_result)}
       </section>
@@ -384,7 +387,7 @@ function videoPreview(data, options = {}) {
         : '粘贴视频链接后，这里会自动显示标题、类型、播放、点赞、投币、收藏、评论和分享。';
   const cover = coverUrl(resolved.cover);
   return `
-    <section class="copy-block">
+    <section class="copy-block" id="videoPreviewSection">
       <div class="block-title">
         <div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(note)}</p></div>
         <span class="type-badge ${error ? 'type-badge--danger' : ''}">${loading ? '自动解析中' : data ? '已解析' : '待解析'}</span>
@@ -433,7 +436,7 @@ function topicSection(items = [], title = '后续可做方向', desc = '') {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   if (!list.length) return '';
   return `
-    <section class="copy-block">
+    <section class="copy-block" id="videoTopicSection">
       <div class="block-title"><div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div></div>
       <div class="topic-grid">${list.map((item, index) => `<article class="topic-card topic-card--simple"><div class="meta-line">方向 ${index + 1}</div><h4>${escapeHtml(item)}</h4></article>`).join('')}</div>
     </section>
@@ -445,7 +448,7 @@ function optimizeSection(titleSuggestions = [], coverSuggestion = '', contentSug
   const content = Array.isArray(contentSuggestions) ? contentSuggestions.filter(Boolean) : [];
   if (!titles.length && !coverSuggestion && !content.length) return '';
   return `
-    <section class="copy-block">
+    <section class="copy-block" id="videoOptimizeSection">
       <div class="block-title"><div><h4>具体优化建议</h4><p>从标题、封面和内容结构三个层面给出可执行调整。</p></div></div>
       ${titles.length ? `<article class="copy-card"><div class="card-head"><div><div class="meta-line">标题优化</div><h4>建议替换标题</h4></div><button class="copy-btn" data-copy="${escapeHtml(titles.join('\n'))}" data-copy-label="优化标题">复制标题</button></div>${bulletList(titles)}</article>` : ''}
       ${coverSuggestion ? `<article class="copy-card"><div class="card-head"><div><div class="meta-line">封面优化</div><h4>封面建议</h4></div></div><p>${escapeHtml(coverSuggestion)}</p></article>` : ''}
@@ -467,18 +470,18 @@ function videoResult(data) {
   return `
     <div class="result-stack">
       ${data.llm_warning ? `<div class="inline-notice">${escapeHtml(data.llm_warning)}</div>` : ''}
-      <section class="performance-hero ${perf.is_hot ? 'performance-hero--hot' : 'performance-hero--low'}">
+      <section class="performance-hero ${perf.is_hot ? 'performance-hero--hot' : 'performance-hero--low'}" id="videoPerformanceSection">
         <div><div class="meta-line">当前判断</div><h3>${escapeHtml(perf.label || '待判断')}</h3><p>${escapeHtml(perf.summary || '')}</p></div>
         <div class="performance-hero__side"><span class="performance-badge">${perf.is_hot ? '更像爆款' : '播放偏低'}</span><span class="performance-score">得分 ${escapeHtml(String(perf.score ?? 0))}</span></div>
       </section>
-      <section class="copy-block"><div class="block-title"><div><h4>当前视频核心信息</h4><p>以下数据来自当前视频链接自动解析结果。</p></div></div>${videoMetrics(resolved)}</section>
-      <section class="copy-block">
+      <section class="copy-block" id="videoCoreInfoSection"><div class="block-title"><div><h4>当前视频核心信息</h4><p>以下数据来自当前视频链接自动解析结果。</p></div></div>${videoMetrics(resolved)}</section>
+      <section class="copy-block" id="videoReasonSection">
         <div class="block-title"><div><h4>${perf.is_hot ? '为什么这条视频容易火' : '为什么这条视频目前表现偏弱'}</h4><p>${perf.is_hot ? '从标题、互动率和赛道匹配度拆解原因。' : '先找出当前短板，再决定后续优化动作。'}</p></div></div>
         ${bulletList(points)}
       </section>
       ${topicSection(topics, perf.is_hot ? '建议继续延展的后续题材' : '建议下一批优先尝试的题材', perf.is_hot ? '可以沿着这条视频的表现结构继续放大。' : '优先从更容易起量的切口重新测试。')}
       ${!perf.is_hot ? optimizeSection(titleSuggestions, coverSuggestion, contentSuggestions) : ''}
-      ${data.copy_result ? `<section class="copy-block"><div class="block-title"><div><h4>优化后可直接使用的文案</h4><p>当视频当前表现偏弱时，可直接拿下面这版标题和脚本做新一轮测试。</p></div></div>${copyResult(data.copy_result)}</section>` : ''}
+      ${data.copy_result ? `<section class="copy-block" id="videoCopySection"><div class="block-title"><div><h4>优化后可直接使用的文案</h4><p>当视频当前表现偏弱时，可直接拿下面这版标题和脚本做新一轮测试。</p></div></div>${copyResult(data.copy_result)}</section>` : ''}
       ${referenceSection(data.reference_videos || [], perf.is_hot ? '同赛道高表现参考视频' : '建议直接对标的参考视频', '点击卡片可直接跳转到当前表现更好的视频页面。')}
     </div>
   `;
@@ -656,9 +659,11 @@ async function resolveVideoLink(url, seq = ++state.videoResolveSeq, options = {}
     state.videoResolved = null;
     state.videoResolvedUrl = '';
     $('#videoPreview').innerHTML = videoPreview(null);
+    renderWorkspaceOutline();
     return null;
   }
   $('#videoPreview').innerHTML = videoPreview(isResolvedForUrl(currentUrl) ? state.videoResolved : null, { loading: true });
+  renderWorkspaceOutline();
   if (!options.silent) setStatus('正在解析视频链接', 'loading');
   try {
     const data = await requestJson('/api/resolve-bili-link', { url: currentUrl });
@@ -666,6 +671,7 @@ async function resolveVideoLink(url, seq = ++state.videoResolveSeq, options = {}
     state.videoResolved = data;
     state.videoResolvedUrl = currentUrl;
     $('#videoPreview').innerHTML = videoPreview(data);
+    renderWorkspaceOutline();
     if (!options.silent) setStatus('视频信息已解析', 'success');
     return data;
   } catch (error) {
@@ -673,6 +679,7 @@ async function resolveVideoLink(url, seq = ++state.videoResolveSeq, options = {}
     state.videoResolved = null;
     state.videoResolvedUrl = '';
     $('#videoPreview').innerHTML = videoPreview(null, { error: error.message });
+    renderWorkspaceOutline();
     if (!options.silent) {
       setStatus('视频链接解析失败', 'error');
       showToast('解析失败', error.message, 'error');
@@ -689,12 +696,94 @@ function scheduleVideoResolve() {
     state.videoResolved = null;
     state.videoResolvedUrl = '';
     $('#videoPreview').innerHTML = videoPreview(null);
+    renderWorkspaceOutline();
     return;
   }
   const seq = state.videoResolveSeq;
   state.videoResolveTimer = setTimeout(() => {
     resolveVideoLink(url, seq, { silent: true }).catch(() => {});
   }, 550);
+}
+
+function getOutlineItems(module = state.activeModule) {
+  const common = [
+    { id: 'workspaceOverview', title: '工作台概览' },
+    { id: 'runtimeModePanel', title: '运行模式' },
+  ];
+  const moduleSpecific = module === 'create'
+    ? [
+        { id: 'draftVideoModule', title: '内容创作' },
+        { id: 'creatorTopicsSection', title: '热门选题建议' },
+        { id: 'creatorCopySection', title: '自动生成文案' },
+        { id: 'creatorResult', title: '生成结果' },
+      ]
+    : [
+        { id: 'publishedVideoModule', title: '视频分析' },
+        { id: 'videoPreviewSection', title: '视频信息预览' },
+        { id: 'videoPerformanceSection', title: '表现判断' },
+        { id: 'videoCoreInfoSection', title: '核心信息' },
+        { id: 'videoReasonSection', title: '原因分析' },
+        { id: 'videoTopicSection', title: '优先题材' },
+        { id: 'videoOptimizeSection', title: '优化建议' },
+        { id: 'videoCopySection', title: '优化文案' },
+        { id: 'videoReferenceSection', title: '参考视频' },
+        { id: 'videoResult', title: '分析结果' },
+      ];
+
+  const seen = new Set();
+  return [...common, ...moduleSpecific]
+    .filter(item => item.id && !seen.has(item.id) && document.getElementById(item.id))
+    .filter(item => {
+      seen.add(item.id);
+      return true;
+    });
+}
+
+function updateOutlineActiveState() {
+  const items = getOutlineItems();
+  if (!items.length) return;
+  const topLine = 156;
+  let activeId = items[0].id;
+  items.forEach(item => {
+    const el = document.getElementById(item.id);
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.top <= topLine) activeId = item.id;
+  });
+  state.activeOutlineId = activeId;
+  $$('#workspaceOutline [data-outline-id]').forEach(button => {
+    button.classList.toggle('is-active', button.dataset.outlineId === activeId);
+  });
+}
+
+function renderWorkspaceOutline() {
+  const box = $('#workspaceOutline');
+  if (!box) return;
+  const items = getOutlineItems();
+  box.innerHTML = `
+    <div class="workspace-outline__label">标题目录</div>
+    <div class="workspace-outline__list">
+      ${items.map(item => `
+        <button
+          class="workspace-outline__item ${state.activeOutlineId === item.id ? 'is-active' : ''}"
+          type="button"
+          data-outline-id="${escapeHtml(item.id)}"
+        >${escapeHtml(item.title)}</button>
+      `).join('')}
+    </div>
+  `;
+  box.querySelectorAll('[data-outline-id]').forEach(button => {
+    button.addEventListener('click', () => {
+      const target = document.getElementById(button.dataset.outlineId || '');
+      if (!target) return;
+      state.activeOutlineId = button.dataset.outlineId || '';
+      box.querySelectorAll('[data-outline-id]').forEach(node => {
+        node.classList.toggle('is-active', node === button);
+      });
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+  updateOutlineActiveState();
 }
 
 function setActiveModule(module, options = {}) {
@@ -707,6 +796,7 @@ function setActiveModule(module, options = {}) {
   $$('[data-module-tab]').forEach(button => {
     button.classList.toggle('is-active', button.dataset.moduleTab === next);
   });
+  renderWorkspaceOutline();
   if (options.focus) {
     const target = grid?.querySelector(`.module-panel[data-module="${next}"] input, .module-panel[data-module="${next}"] textarea, .module-panel[data-module="${next}"] select`);
     if (target) target.focus({ preventScroll: true });
@@ -873,6 +963,7 @@ function initEvents() {
   $('#videoAnalyzeBtn').addEventListener('click', runAnalyzeModule);
   $('#clearResultsBtn').addEventListener('click', clearResults);
   $('#videoLink').addEventListener('input', scheduleVideoResolve);
+  window.addEventListener('scroll', updateOutlineActiveState, { passive: true });
   $$('[data-module-tab]').forEach(button => {
     button.addEventListener('click', () => {
       setActiveModule(button.dataset.moduleTab || 'analyze', { focus: true });
@@ -1008,6 +1099,7 @@ function clearResults() {
   $('#videoResult').innerHTML = '<div class="empty-state"><h4>还没有分析结果</h4><p>输入视频链接后，点击“一键解析并分析视频”。</p></div>';
   $('#videoPreview').innerHTML = videoPreview(null);
   renderAssistant();
+  renderWorkspaceOutline();
   updateAssistantButton();
   setStatus('已清空结果', 'success');
 }
@@ -1053,18 +1145,26 @@ async function runCreatorModule() {
 
   setButtonLoading('creatorRunBtn', true);
   setStatus(title, 'loading');
-  startProgressJob('creator', percent => renderProgressInto('creatorResult', title, desc, steps, percent));
+  startProgressJob('creator', percent => renderProgressInto('creatorResult', title, desc, steps, percent), {
+    start: 6,
+    max: 92,
+    minStep: 0.45,
+    durationMs: 12000,
+    interval: 180,
+  });
 
   try {
     const data = await requestJson('/api/module-create', payload);
     stopProgressJob('creator', 100);
     $('#creatorResult').innerHTML = creatorResult(data);
+    renderWorkspaceOutline();
     bindCopyButtons($('#creatorResult'));
     if (data.llm_warning) showToast('LLM 已回退', 'Agent 中枢失败，已自动回退到直接 LLM 生成。', 'error');
     setStatus('选题与文案已生成', 'success');
   } catch (error) {
     stopProgressJob('creator', 100);
     $('#creatorResult').innerHTML = infoCard('生成失败', error.message, 'danger');
+    renderWorkspaceOutline();
     setStatus('选题与文案生成失败', 'error');
     showToast('生成失败', error.message, 'error');
   } finally {
@@ -1086,7 +1186,13 @@ async function runAnalyzeModule() {
 
   setButtonLoading('videoAnalyzeBtn', true);
   setStatus(title, 'loading');
-  startProgressJob('analyze', percent => renderProgressInto('videoResult', title, desc, steps, percent));
+  startProgressJob('analyze', percent => renderProgressInto('videoResult', title, desc, steps, percent), {
+    start: 8,
+    max: 93,
+    minStep: 0.5,
+    durationMs: 13500,
+    interval: 180,
+  });
 
   try {
     if (!isResolvedForUrl(url)) await resolveVideoLink(url, ++state.videoResolveSeq, { silent: true });
@@ -1098,12 +1204,14 @@ async function runAnalyzeModule() {
       $('#videoPreview').innerHTML = videoPreview(data.resolved);
     }
     $('#videoResult').innerHTML = videoResult(data);
+    renderWorkspaceOutline();
     bindCopyButtons($('#videoResult'));
     if (data.llm_warning) showToast('LLM 已回退', 'Agent 中枢失败，已自动回退到直接 LLM 分析。', 'error');
     setStatus('视频分析已完成', 'success');
   } catch (error) {
     stopProgressJob('analyze', 100);
     $('#videoResult').innerHTML = infoCard('分析失败', error.message, 'danger');
+    renderWorkspaceOutline();
     setStatus('视频分析失败', 'error');
     showToast('分析失败', error.message, 'error');
   } finally {
@@ -1131,7 +1239,13 @@ async function sendAssistantMessage(forced = '') {
   updateAssistantButton();
   renderAssistant();
   setStatus('智能助手正在思考', 'loading');
-  startProgressJob('assistant', () => renderAssistant(), { start: 5, max: 99.5, minStep: 0.2, easeFactor: 0.09, interval: 140 });
+  startProgressJob('assistant', () => renderAssistant(), {
+    start: 5,
+    max: 91,
+    minStep: 0.45,
+    durationMs: 9000,
+    interval: 160,
+  });
 
   try {
     const data = await requestJson('/api/chat', {
@@ -1189,7 +1303,7 @@ function videoPreview(data, options = {}) {
   const hasProgress = progress > 0;
 
   return `
-    <section class="copy-block">
+    <section class="copy-block" id="videoPreviewSection">
       <div class="block-title">
         <div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(note)}</p></div>
         <span class="type-badge ${error ? 'type-badge--danger' : ''}">${loading ? '自动解析中' : data ? '已解析' : '待解析'}</span>
@@ -1216,6 +1330,7 @@ function videoPreview(data, options = {}) {
 function init() {
   setActiveModule(state.activeModule);
   $('#videoPreview').innerHTML = videoPreview(null);
+  renderWorkspaceOutline();
   renderAssistant();
   initEvents();
   initSpeechRecognition();

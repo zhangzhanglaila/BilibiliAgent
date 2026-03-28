@@ -36,8 +36,11 @@
             <button class="workspace-tab" type="button" data-module-tab="create">内容创作</button>
           </nav>
 
+          <div class="workspace-stage">
+          <aside class="workspace-outline" id="workspaceOutline" aria-label="标题目录"></aside>
+
           <div class="workspace-main__content">
-          <section class="hero-card">
+          <section class="hero-card" id="workspaceOverview" data-outline-title="工作台概览">
             <div>
               <span class="hero-card__tag">Bilibili Creator Workspace</span>
               <h2>把发布前的选题文案，和发布后的数据分析，拆成两条独立工作流。</h2>
@@ -67,7 +70,7 @@
             </div>
           </section>
 
-          <section class="mode-banner" id="runtimeModePanel">
+          <section class="mode-banner" id="runtimeModePanel" data-outline-title="运行模式">
             <div class="mode-banner__content">
               <span class="mode-banner__kicker">运行模式</span>
               <h3 id="runtimeModeTitle">当前运行中：规则模式</h3>
@@ -80,7 +83,7 @@
           </section>
 
             <section class="module-grid" id="moduleGrid" data-active="analyze">
-            <section class="panel module-panel module-panel--analyze" data-module="analyze" id="publishedVideoModule">
+            <section class="panel module-panel module-panel--analyze" data-module="analyze" id="publishedVideoModule" data-outline-title="视频分析">
               <div class="panel__header">
                 <div>
                   <span class="module-kicker">视频分析</span>
@@ -96,7 +99,7 @@
                   <span class="field__hint">粘贴链接后会先自动解析视频信息，下面的分析按钮只负责进一步分析和优化。</span>
                 </label>
 
-                <div class="module-result" id="videoPreview"></div>
+                <div class="module-result" id="videoPreview" data-outline-title="视频信息预览"></div>
 
                 <div class="module-actions">
                   <button class="action-btn action-btn--primary module-run-btn" id="videoAnalyzeBtn" type="button">
@@ -105,7 +108,7 @@
                   </button>
                 </div>
 
-                <div class="module-result" id="videoResult">
+                <div class="module-result" id="videoResult" data-outline-title="分析结果">
                   <div class="empty-state">
                     <h4>还没有分析结果</h4>
                     <p>输入视频链接后，点击“一键解析并分析视频”。</p>
@@ -114,7 +117,7 @@
               </div>
             </section>
 
-            <section class="panel module-panel module-panel--create" data-module="create" id="draftVideoModule">
+            <section class="panel module-panel module-panel--create" data-module="create" id="draftVideoModule" data-outline-title="内容创作">
               <div class="panel__header">
                 <div>
                   <span class="module-kicker">内容创作</span>
@@ -185,7 +188,7 @@
                   </button>
                 </div>
 
-                <div class="module-result" id="creatorResult">
+                <div class="module-result" id="creatorResult" data-outline-title="生成结果">
                   <div class="empty-state">
                     <h4>还没有生成结果</h4>
                     <p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p>
@@ -193,6 +196,7 @@
                 </div>
               </div>
             </section>
+          </div>
           </div>
         </div>
 
