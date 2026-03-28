@@ -1097,6 +1097,26 @@ button {
   margin-top: 12px;
 }
 
+.assistant-action-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.assistant-action-btn {
+  padding: 10px 14px;
+  text-align: left;
+  line-height: 1.5;
+  border-color: rgba(251, 114, 153, 0.18);
+  background: rgba(251, 114, 153, 0.08);
+  color: var(--brand-deep);
+}
+
+.assistant-action-btn:hover {
+  border-color: rgba(251, 114, 153, 0.28);
+  background: rgba(251, 114, 153, 0.14);
+}
+
 .reference-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }

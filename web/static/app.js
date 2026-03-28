@@ -437,6 +437,22 @@ function bulletList(items = []) {
   return `<div class="analysis-list">${list.map(item => `<article class="analysis-item"><span class="analysis-item__dot"></span><p>${escapeHtml(item)}</p></article>`).join('')}</div>`;
 }
 
+function assistantActionButtons(items = []) {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!list.length) return '';
+  return `
+    <div class="assistant-action-grid">
+      ${list.map(item => `
+        <button
+          class="copy-btn assistant-action-btn"
+          type="button"
+          data-assistant-action="${escapeHtml(item)}"
+        >${escapeHtml(item)}</button>
+      `).join('')}
+    </div>
+  `;
+}
+
 function topicSection(items = [], title = '后续可做方向', desc = '') {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   if (!list.length) return '';
@@ -529,7 +545,7 @@ function renderAssistant() {
               ${item.role === 'assistant' ? `<button class="copy-btn" data-copy="${escapeHtml(item.content || '')}" data-copy-label="回答">复制</button>` : ''}
             </div>
             <div class="rich-text">${rich(item.content || '')}</div>
-            ${item.actions?.length ? `<div class="assistant-actions">${bulletList(item.actions)}</div>` : ''}
+            ${item.actions?.length ? `<div class="assistant-actions">${assistantActionButtons(item.actions)}</div>` : ''}
             ${item.references?.length ? `<div class="chat-links"><div class="meta-line">可直接打开的参考视频</div>${referenceGrid(item.references, true)}</div>` : ''}
           </div>
         </article>
@@ -538,6 +554,15 @@ function renderAssistant() {
     </div>
   `;
   bindCopyButtons(box);
+  box.querySelectorAll('[data-assistant-action]').forEach(button => {
+    if (button.dataset.boundClick === '1') return;
+    button.dataset.boundClick = '1';
+    button.addEventListener('click', () => {
+      const prompt = button.dataset.assistantAction || '';
+      if (!prompt || state.chatPending || state.chatTyping) return;
+      sendAssistantMessage(prompt);
+    });
+  });
   requestAnimationFrame(() => {
     box.scrollTop = box.scrollHeight;
   });

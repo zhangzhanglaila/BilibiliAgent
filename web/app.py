@@ -960,16 +960,7 @@ def build_reference_query_text(resolved: dict | None = None, extra_text: str = "
 
 
 def build_reference_view_floor(resolved: dict | None = None) -> int:
-    if not isinstance(resolved, dict):
-        return 200000
-
-    stats = resolved.get("stats") if isinstance(resolved.get("stats"), dict) else {}
-    current_view = safe_int(stats.get("view"))
-    if current_view >= 1_000_000:
-        return current_view
-    if current_view >= 200_000:
-        return int(current_view * 1.2)
-    return 200000
+    return 100000
 
 
 def extract_reference_query_from_observation(observation: dict) -> str:
@@ -1028,13 +1019,68 @@ def build_reference_search_queries(query_text: str = "", resolved: dict | None =
     if compact_query:
         queries.append(compact_query)
 
+    core_terms = sorted(
+        [term for term in extract_reference_terms(query_text) if len(term) >= 2],
+        key=lambda item: (-len(item), item),
+    )
+    if core_terms:
+        queries.append(" ".join(core_terms[:2]))
+        if len(core_terms) >= 3:
+            queries.append(" ".join(core_terms[:3]))
+
     deduped: list[str] = []
     for item in queries:
         value = (item or "").strip()
         if len(value) < 2 or value in deduped:
             continue
         deduped.append(value)
-    return deduped[:3]
+    return deduped[:5]
+
+
+def fetch_direct_related_reference_videos(bvid: str, limit: int = 10) -> list[dict]:
+    clean_bvid = (bvid or "").strip()
+    if not re.fullmatch(r"BV[0-9A-Za-z]{10}", clean_bvid, flags=re.IGNORECASE):
+        return []
+
+    payload = fetch_json(f"https://api.bilibili.com/x/web-interface/archive/related?{urlencode({'bvid': clean_bvid})}")
+    if safe_int(payload.get("code")) != 0:
+        raise ValueError(payload.get("message") or "B站相关推荐接口失败")
+
+    items = payload.get("data") or []
+    results: list[dict] = []
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+        candidate_bvid = (item.get("bvid") or "").strip()
+        if not re.fullmatch(r"BV[0-9A-Za-z]{10}", candidate_bvid, flags=re.IGNORECASE):
+            continue
+
+        stat = item.get("stat") or {}
+        owner = item.get("owner") or {}
+        results.append(
+            {
+                "bvid": candidate_bvid,
+                "title": strip_reference_html(item.get("title", "")),
+                "author": strip_reference_html(owner.get("name") or item.get("owner_name") or ""),
+                "cover": item.get("pic") or item.get("cover") or "",
+                "mid": safe_int(owner.get("mid")),
+                "view": safe_int(stat.get("view")),
+                "like": safe_int(stat.get("like")),
+                "coin": safe_int(stat.get("coin")),
+                "favorite": safe_int(stat.get("favorite")),
+                "reply": safe_int(stat.get("reply")),
+                "share": safe_int(stat.get("share")),
+                "duration": safe_int(item.get("duration")),
+                "avg_view_duration": 0.0,
+                "like_rate": safe_int(stat.get("like")) / max(safe_int(stat.get("view")), 1),
+                "completion_rate": 0.0,
+                "competition_score": 0.0,
+                "source": "当前视频相关推荐",
+                "url": f"https://www.bilibili.com/video/{candidate_bvid}",
+                "estimated": False,
+            }
+        )
+    return results
 
 
 def fetch_search_reference_videos(query: str, limit: int = 8) -> list[dict]:
@@ -1095,7 +1141,13 @@ def enrich_reference_sources_with_search(
     query_text: str = "",
     resolved: dict | None = None,
 ) -> list[dict]:
-    combined = list(sources or [])
+    combined: list[dict] = []
+    if isinstance(resolved, dict):
+        try:
+            combined.extend(fetch_direct_related_reference_videos(resolved.get("bv_id", "")))
+        except Exception:
+            pass
+    combined.extend(list(sources or []))
     for query in build_reference_search_queries(query_text=query_text, resolved=resolved):
         try:
             combined.extend(fetch_search_reference_videos(query))
@@ -1120,11 +1172,13 @@ def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict 
     same_author = 1 if resolved and (item.get("author") or "").strip() == (resolved.get("up_name") or "").strip() else 0
     source = item.get("source", "")
     source_priority = 0
-    if same_up or same_author:
-        source_priority = 3
+    if "当前视频相关推荐" in source:
+        source_priority = 4
     elif "相关搜索" in source:
-        source_priority = 2
+        source_priority = 3
     elif "同类UP" in source:
+        source_priority = 2
+    elif same_up or same_author:
         source_priority = 1
     elif "分区" in source:
         source_priority = 0
@@ -1161,6 +1215,7 @@ def select_reference_videos(
     sources = enrich_reference_sources_with_search(sources, query_text=query_text, resolved=resolved)
     entries = []
     view_floor = build_reference_view_floor(resolved)
+    soft_view_floor = 50000
     for item in sources:
         if not is_real_reference_video(item):
             continue
@@ -1173,17 +1228,22 @@ def select_reference_videos(
     strong_related_pool = [
         item for _, meta, item in ranked if meta.get("is_related") and safe_int(item.get("view")) >= view_floor
     ]
+    medium_related_pool = [
+        item
+        for _, meta, item in ranked
+        if meta.get("is_related") and soft_view_floor <= safe_int(item.get("view")) < view_floor
+    ]
     related_pool = [
-        item for _, meta, item in ranked if meta.get("is_related") and safe_int(item.get("view")) < view_floor
+        item for _, meta, item in ranked if meta.get("is_related") and safe_int(item.get("view")) < soft_view_floor
     ]
     fallback_high_pool = [
-        item for _, meta, item in ranked if not meta.get("is_related") and safe_int(item.get("view")) >= view_floor
+        item for _, meta, item in ranked if not meta.get("is_related") and safe_int(item.get("view")) >= soft_view_floor
     ]
     fallback_pool = [
-        item for _, meta, item in ranked if not meta.get("is_related") and safe_int(item.get("view")) < view_floor
+        item for _, meta, item in ranked if not meta.get("is_related") and safe_int(item.get("view")) < soft_view_floor
     ]
 
-    for pool in (strong_related_pool, related_pool, fallback_high_pool, fallback_pool):
+    for pool in (strong_related_pool, medium_related_pool, fallback_high_pool, related_pool, fallback_pool):
         for item in pool:
             bvid = (item.get("bvid") or "").strip()
             url = (item.get("url") or "").strip()
