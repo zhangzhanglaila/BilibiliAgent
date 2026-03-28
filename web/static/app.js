@@ -62,6 +62,174 @@ function coverUrl(url) {
   return v;
 }
 
+const COVER_RETRY_LIMIT = 2;
+const COVER_RETRY_BASE_DELAY_MS = 900;
+
+function renderCoverMedia(url, title, variant = 'card') {
+  const safeUrl = coverUrl(url);
+  const safeTitle = title || '视频封面';
+  const stateClass = safeUrl ? 'is-loading' : 'is-fallback';
+  return `
+    <div class="cover-frame cover-frame--${escapeHtml(variant)} ${stateClass}" data-cover-frame>
+      <div class="cover-frame__loader" data-cover-loader ${safeUrl ? '' : 'hidden'} aria-hidden="true">
+        <span class="cover-frame__loader-orbit">
+          <span class="cover-frame__loader-core"></span>
+        </span>
+        <span class="cover-frame__loader-text">封面加载中</span>
+      </div>
+      ${safeUrl ? `<img class="cover-frame__img" data-cover-image data-original-src="${escapeHtml(safeUrl)}" src="${escapeHtml(safeUrl)}" alt="${escapeHtml(safeTitle)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" />` : ''}
+      <div class="cover-frame__fallback" data-cover-fallback ${safeUrl ? 'hidden' : ''} title="${escapeHtml(safeTitle)}" aria-label="${escapeHtml(safeTitle)}">
+        <span class="cover-frame__fallback-title">b站视频</span>
+      </div>
+    </div>
+  `;
+}
+
+function coverRetrySrc(src, attempt) {
+  if (!src) return '';
+  try {
+    const next = new URL(src, window.location.href);
+    next.searchParams.set('_cover_retry', `${attempt}-${Date.now()}`);
+    return next.toString();
+  } catch (error) {
+    const separator = src.includes('?') ? '&' : '?';
+    return `${src}${separator}_cover_retry=${attempt}-${Date.now()}`;
+  }
+}
+
+function setCoverFrameState(frame, nextState) {
+  if (!frame) return;
+  const loader = frame.querySelector('[data-cover-loader]');
+  const fallback = frame.querySelector('[data-cover-fallback]');
+  const img = frame.querySelector('[data-cover-image]');
+
+  frame.dataset.coverState = nextState;
+  frame.classList.toggle('is-loading', nextState === 'loading');
+  frame.classList.toggle('is-loaded', nextState === 'loaded');
+  frame.classList.toggle('is-fallback', nextState === 'fallback');
+
+  if (loader) loader.hidden = nextState !== 'loading';
+  if (fallback) fallback.hidden = nextState !== 'fallback';
+  if (img) {
+    if (nextState === 'fallback') {
+      img.hidden = true;
+      img.style.display = 'none';
+    } else {
+      img.hidden = false;
+      img.style.display = '';
+    }
+  }
+}
+
+function finalizeCoverFallback(frame, img) {
+  if (img) {
+    img.hidden = true;
+    img.style.display = 'none';
+    img.removeAttribute('src');
+  }
+  setCoverFrameState(frame, 'fallback');
+}
+
+function scheduleCoverRetry(img, frame) {
+  const retries = Number(img?.dataset.retryCount || 0);
+  if (!img || !frame) return;
+  if (retries >= COVER_RETRY_LIMIT) {
+    finalizeCoverFallback(frame, img);
+    return;
+  }
+  img.dataset.retryCount = String(retries + 1);
+  const retryDelay = COVER_RETRY_BASE_DELAY_MS + retries * 700;
+  window.setTimeout(() => {
+    if (!img.isConnected) return;
+    const originalSrc = img.dataset.originalSrc || '';
+    if (!originalSrc) {
+      finalizeCoverFallback(frame, img);
+      return;
+    }
+    setCoverFrameState(frame, 'loading');
+    img.hidden = false;
+    img.style.display = '';
+    img.src = coverRetrySrc(originalSrc, retries + 1);
+  }, retryDelay);
+}
+
+function bindCoverImage(img) {
+  if (!img || img.dataset.coverBound === '1') return;
+  img.dataset.coverBound = '1';
+
+  const frame = img.closest('[data-cover-frame]');
+  if (!frame) return;
+  if (!img.dataset.originalSrc) {
+    img.dataset.originalSrc = img.getAttribute('data-original-src') || img.currentSrc || img.src || '';
+  }
+
+  const handleLoad = () => {
+    if (!img.naturalWidth) {
+      scheduleCoverRetry(img, frame);
+      return;
+    }
+    setCoverFrameState(frame, 'loaded');
+  };
+
+  const handleError = () => {
+    scheduleCoverRetry(img, frame);
+  };
+
+  img.addEventListener('load', handleLoad);
+  img.addEventListener('error', handleError);
+
+  if (img.complete) {
+    handleLoad();
+  } else {
+    setCoverFrameState(frame, 'loading');
+  }
+}
+
+function bindCoverMedia(scope = document) {
+  const root = scope && typeof scope.querySelectorAll === 'function' ? scope : document;
+  if (root.matches && root.matches('[data-cover-image]')) {
+    bindCoverImage(root);
+  }
+  if (root.matches && root.matches('[data-cover-frame]')) {
+    const rootImage = root.querySelector('[data-cover-image]');
+    if (!rootImage) {
+      setCoverFrameState(root, 'fallback');
+    } else {
+      bindCoverImage(rootImage);
+    }
+  }
+  root.querySelectorAll('[data-cover-frame]').forEach(frame => {
+    const img = frame.querySelector('[data-cover-image]');
+    if (!img) {
+      setCoverFrameState(frame, 'fallback');
+      return;
+    }
+    bindCoverImage(img);
+  });
+}
+
+function initCoverMedia() {
+  bindCoverMedia(document);
+  if (state.coverObserver) {
+    state.coverObserver.disconnect();
+  }
+  state.coverObserver = new MutationObserver(mutations => {
+    mutations.forEach(mutation => {
+      mutation.addedNodes.forEach(node => {
+        if (!(node instanceof Element)) return;
+        if (node.matches('[data-cover-frame], [data-cover-image]')) {
+          bindCoverMedia(node);
+          return;
+        }
+        if (node.querySelector('[data-cover-frame], [data-cover-image]')) {
+          bindCoverMedia(node);
+        }
+      });
+    });
+  });
+  state.coverObserver.observe(document.body, { childList: true, subtree: true });
+}
+
 function setStatus(text, type = 'idle') {
   const pill = $('#globalStatusPill');
   if (!pill) return;
@@ -110,7 +278,8 @@ function clampProgressValue(value) {
 
 function formatProgressLabel(value) {
   const safe = clampProgressValue(value);
-  return `${safe >= 100 ? 100 : Math.round(safe)}%`;
+  if (safe >= 100) return '100%';
+  return `${safe.toFixed(1)}%`;
 }
 
 function stopProgressJob(key, finalPercent = null) {
@@ -130,13 +299,23 @@ function startProgressJob(key, onUpdate, options = {}) {
   stopProgressJob(key);
   const start = clampProgressValue(options.start ?? 6);
   const max = clampProgressValue(options.max ?? 94);
+  const cap = Math.max(max, clampProgressValue(options.cap ?? 99.85));
+  const slowStart = Math.min(cap, clampProgressValue(options.slowStart ?? 75));
+  const tailStart = Math.min(cap, Math.max(slowStart, clampProgressValue(options.tailStart ?? 95)));
   const interval = options.interval ?? 180;
   const durationMs = options.durationMs ?? 12000;
   const ticks = Math.max(1, Math.round(durationMs / interval));
   const job = {
     percent: start,
     max,
+    cap,
+    slowStart,
+    tailStart,
     increment: Math.max(options.minStep ?? 0.35, (max - start) / ticks),
+    midMinStep: Math.max(0.04, Number(options.midMinStep ?? 0.06)),
+    midFactor: Math.max(0.003, Number(options.midFactor ?? 0.008)),
+    tailMinStep: Math.max(0.03, Number(options.tailMinStep ?? 0.05)),
+    tailFactor: Math.max(0.004, Number(options.tailFactor ?? 0.012)),
     onUpdate,
     timer: null,
   };
@@ -147,8 +326,22 @@ function startProgressJob(key, onUpdate, options = {}) {
   }
 
   job.timer = window.setInterval(() => {
-    if (job.percent >= job.max) return;
-    job.percent = Math.min(job.max, job.percent + job.increment);
+    if (job.percent >= job.cap - 0.002) return;
+    let nextPercent = job.percent;
+    if (job.percent < job.slowStart) {
+      nextPercent = Math.min(job.slowStart, job.percent + job.increment);
+    } else if (job.percent < job.tailStart) {
+      const remaining = job.tailStart - job.percent;
+      const midStep = Math.max(job.midMinStep, remaining * job.midFactor);
+      nextPercent = Math.min(job.tailStart, job.percent + midStep);
+    } else {
+      const remaining = job.cap - job.percent;
+      if (remaining <= 0) return;
+      const tailStep = Math.max(job.tailMinStep, remaining * job.tailFactor);
+      nextPercent = Math.min(job.cap, job.percent + tailStep);
+    }
+    if (nextPercent <= job.percent) return;
+    job.percent = nextPercent;
     if (typeof onUpdate === 'function') {
       onUpdate(job.percent);
     }
@@ -266,7 +459,7 @@ function referenceGrid(items = [], compact = false) {
     const title = item.title || '未命名视频';
     return `
       <a class="reference-card ${compact ? 'reference-card--chat' : ''}" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">
-        <div class="reference-card__thumb">${cover ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(title)}" loading="lazy" decoding="async" referrerpolicy="no-referrer" />` : '<div class="reference-card__thumb-placeholder">B站</div>'}</div>
+        <div class="reference-card__thumb">${renderCoverMedia(cover, title, compact ? 'reference-chat' : 'reference')}</div>
         <div class="reference-card__body">
           <h4>${escapeHtml(title)}</h4>
           <p>${escapeHtml(item.author || '未知 UP')}</p>
@@ -398,7 +591,7 @@ function videoPreview(data, options = {}) {
         <span class="type-badge ${error ? 'type-badge--danger' : ''}">${loading ? '自动解析中' : data ? '已解析' : '待解析'}</span>
       </div>
       ${loading ? '<div class="bili-progress"><div class="bili-progress__bar bili-progress__bar--indeterminate"></div></div>' : ''}
-      ${cover ? `<div class="video-cover-strip"><div class="video-cover-strip__thumb"><img src="${escapeHtml(cover)}" alt="${escapeHtml(resolved.title || '视频封面')}" loading="lazy" decoding="async" referrerpolicy="no-referrer" /></div><div class="video-cover-strip__body"><strong>${escapeHtml(resolved.title || '当前视频')}</strong><span>${escapeHtml(resolved.up_name || '自动解析结果')}</span></div></div>` : ''}
+      ${cover ? `<div class="video-cover-strip"><div class="video-cover-strip__thumb">${renderCoverMedia(cover, resolved.title || '视频封面', 'strip')}</div><div class="video-cover-strip__body"><strong>${escapeHtml(resolved.title || '当前视频')}</strong><span>${escapeHtml(resolved.up_name || '自动解析结果')}</span></div></div>` : ''}
       <div class="summary-strip">
         ${previewCard('视频标题', resolved.title || '', '根据视频链接自动解析当前视频标题')}
         ${previewCard('视频类型', resolved.partition_label || resolved.partition || '', '根据视频链接自动解析分区和视频类型')}
@@ -441,14 +634,17 @@ function assistantActionButtons(items = []) {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   if (!list.length) return '';
   return `
-    <div class="assistant-action-grid">
+    <div class="assistant-actions-card">
+      <div class="assistant-actions-title">相关问题</div>
+      <div class="assistant-action-grid">
       ${list.map(item => `
         <button
-          class="copy-btn assistant-action-btn"
+          class="copy-btn assistant-question-btn"
           type="button"
           data-assistant-action="${escapeHtml(item)}"
-        >${escapeHtml(item)}</button>
+        ><span class="assistant-question-btn__dot"></span><span>${escapeHtml(item)}</span></button>
       `).join('')}
+      </div>
     </div>
   `;
 }
@@ -1089,7 +1285,7 @@ function renderAssistant() {
               ${item.role === 'assistant' ? `<button class="copy-btn" data-copy="${escapeHtml(item.content || item.fullContent || '')}" data-copy-label="回答">复制</button>` : ''}
             </div>
             <div class="rich-text">${rich(item.content || '')}${item.typing ? '<span class="typing-caret"></span>' : ''}</div>
-            ${item.actions?.length ? `<div class="assistant-actions">${bulletList(item.actions)}</div>` : ''}
+            ${item.actions?.length ? `<div class="assistant-actions">${assistantActionButtons(item.actions)}</div>` : ''}
             ${item.references?.length ? `<div class="chat-links"><div class="meta-line">可直接打开的参考视频</div>${referenceGrid(item.references, true)}</div>` : ''}
           </div>
         </article>
@@ -1098,6 +1294,15 @@ function renderAssistant() {
     </div>
   `;
   bindCopyButtons(box);
+  box.querySelectorAll('[data-assistant-action]').forEach(button => {
+    if (button.dataset.boundClick === '1') return;
+    button.dataset.boundClick = '1';
+    button.addEventListener('click', () => {
+      const prompt = button.dataset.assistantAction || '';
+      if (!prompt || state.chatPending || state.chatTyping) return;
+      sendAssistantMessage(prompt);
+    });
+  });
   requestAnimationFrame(() => {
     box.scrollTop = box.scrollHeight;
   });
@@ -1371,6 +1576,7 @@ function init() {
   loadRuntimeInfo();
   updateAssistantButton();
   bindCopyButtons(document);
+  initCoverMedia();
 }
 
 window.addEventListener('DOMContentLoaded', init);

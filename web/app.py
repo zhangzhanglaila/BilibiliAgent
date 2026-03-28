@@ -948,7 +948,7 @@ def extract_reference_terms(text: str) -> list[str]:
 def build_reference_query_text(resolved: dict | None = None, extra_text: str = "") -> str:
     parts: list[str] = []
     if isinstance(resolved, dict):
-        for key in ("title", "topic", "tname", "partition_label", "up_name"):
+        for key in ("title", "topic", "tname", "partition_label"):
             value = (resolved.get(key) or "").strip()
             if value and value not in parts:
                 parts.append(value)
@@ -974,7 +974,6 @@ def extract_reference_query_from_observation(observation: dict) -> str:
                 "topic": observation["video"].get("title", ""),
                 "tname": observation["video"].get("tname", ""),
                 "partition_label": observation["video"].get("retrieval_partition_label", ""),
-                "up_name": observation["video"].get("up_name", ""),
             }
         )
 
