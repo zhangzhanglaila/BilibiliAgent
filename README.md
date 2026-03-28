@@ -74,7 +74,7 @@ http://127.0.0.1:8000
 
 ```bash
 python main.py topic --partition knowledge --topic "AI 剪辑效率"
-python main.py copy --topic "AI 剪辑效率的高效做法" --style 干货
+python main.py copy --topic "AI 剪辑第一条视频先拍什么更容易起量" --style 干货
 python main.py optimize --bv BV1xx411c7mD
 python main.py pipeline --bv BV1xx411c7mD --partition knowledge --style 干货 --topic "AI 剪辑效率"
 ```
@@ -88,11 +88,12 @@ python main.py pipeline --bv BV1xx411c7mD --partition knowledge --style 干货 -
 - 领域
 - 方向
 - 想法
-- 可选分区
+- 可选分区（知识、科技、生活、游戏、娱乐，以及美妆颜值、舞蹈、音乐、影视、动漫、美食、Vlog、穿搭、情感、萌宠、运动、汽车、商业职场等）
 - 文案风格
 
 输出：
 
+- 整理后的创作方向
 - 3 个更适合做的选题方向
 - 自动生成的标题
 - 视频脚本

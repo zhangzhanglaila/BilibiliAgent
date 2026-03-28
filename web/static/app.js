@@ -227,12 +227,18 @@ function renderCopyResult(copyResult) {
 }
 
 function renderCreatorResult(data) {
+  const normalizedProfile = data.normalized_profile || data.seed_topic || '未填写';
+  const userQuestion = data.seed_topic || normalizedProfile || '未填写';
   return `
     <div class="result-stack">
       <div class="summary-strip">
         <div class="stat-card">
-          <h4>输入主题</h4>
-          <p>${escapeHtml(data.seed_topic || '未填写')}</p>
+          <h4>整理后的方向</h4>
+          <p>${escapeHtml(normalizedProfile)}</p>
+        </div>
+        <div class="stat-card">
+          <h4>当前问题</h4>
+          <p>${escapeHtml(userQuestion)}</p>
         </div>
         <div class="stat-card">
           <h4>推荐主选题</h4>

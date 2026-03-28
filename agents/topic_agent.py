@@ -267,6 +267,74 @@ class TopicAgent:
             f"和 {peer_count} 个同类 UP 样本做延展，避免直接跟全站热榜撞题。"
         )
 
+    def _seed_topic_mode(self, cleaned: str) -> str:
+        if any(token in cleaned for token in ["第1条、第2条、第3条", "做系列内容时", "做成系列内容时"]):
+            return "series_plan"
+        if any(token in cleaned for token in ["开场动作", "进推荐", "别一上来就"]):
+            return "opening_hook"
+        if any(token in cleaned for token in ["第一条视频跳什么", "先跳什么", "跳什么"]):
+            return "dance_first_video"
+        if any(token in cleaned for token in ["第一条视频先做什么", "第一条视频先拍什么", "第一条该怎么做", "先拍什么"]):
+            return "first_video"
+        return "general"
+
+    def _seed_topic_subject(self, cleaned: str) -> str:
+        markers = [
+            "第一条视频",
+            "第一条",
+            "做系列内容时",
+            "做成系列内容时",
+            "别一上来就",
+            "先做什么",
+            "先拍什么",
+            "先跳什么",
+            "更容易起量",
+            "更容易进推荐",
+        ]
+        for marker in markers:
+            index = cleaned.find(marker)
+            if index > 0:
+                return cleaned[:index].strip(" ：，,。")
+
+        if "：" in cleaned:
+            return cleaned.split("：", 1)[0].replace("别直接硬拍", "").strip(" ：，,。")
+        return cleaned
+
+    def _build_seed_candidates(self, cleaned: str) -> List[tuple[str, str]]:
+        mode = self._seed_topic_mode(cleaned)
+        subject = self._seed_topic_subject(cleaned)
+        base_subject = subject or cleaned or "这类内容"
+
+        if mode == "dance_first_video":
+            return [
+                ("第一条起号", f"{base_subject}第一条视频先跳什么更容易起量"),
+                ("开场动作", f"{base_subject}别一上来就硬跳：先做哪种开场动作更容易进推荐"),
+                ("系列规划", f"{base_subject}做系列内容时，第1条、第2条、第3条分别跳什么"),
+            ]
+        if mode == "opening_hook":
+            return [
+                ("开场动作", f"{base_subject}前三秒先放什么，更容易把人留下来"),
+                ("镜头顺序", f"{base_subject}别一上来就铺满信息：镜头顺序怎么排更容易进推荐"),
+                ("系列规划", f"{base_subject}想做成系列时，哪一条最适合先发"),
+            ]
+        if mode == "series_plan":
+            return [
+                ("系列规划", f"{base_subject}做成系列内容时，第1条、第2条、第3条分别拍什么"),
+                ("起量切口", f"{base_subject}做系列别乱发，先从哪一条开始最容易起量"),
+                ("互动放大", f"{base_subject}做系列时，哪一类互动点最容易带下一条"),
+            ]
+        if mode == "first_video":
+            return [
+                ("第一条起号", f"{base_subject}第一条视频先做什么更容易起量"),
+                ("切口测试", f"别直接硬拍 {base_subject}：先做哪种切口更容易进推荐"),
+                ("系列规划", f"{base_subject}做成系列内容时，第1条、第2条、第3条分别拍什么"),
+            ]
+        return [
+            ("起量切口", f"{cleaned}先做哪种切口更容易起量"),
+            ("表达角度", f"同样是 {cleaned}，哪种表达更容易被点进来"),
+            ("系列规划", f"{cleaned}如果做成系列，下一条最适合拍什么"),
+        ]
+
     def _generate_seed_topics(
         self,
         seed_topic: str | None,
@@ -289,11 +357,7 @@ class TopicAgent:
             if related_style:
                 base_style = related_style
 
-        candidates = [
-            ("高效做法", f"{cleaned} 的高效做法"),
-            ("爆点切口", f"别再硬做 {cleaned}：最容易起量的切口"),
-            ("系列延展", f"{cleaned} 做成系列内容时，下一条拍什么"),
-        ]
+        candidates = self._build_seed_candidates(cleaned)
 
         ideas: List[TopicIdea] = []
         for index, (variant, topic) in enumerate(candidates):

@@ -17,6 +17,7 @@ if str(ROOT_DIR) not in sys.path:
 
 from bilibili_api import sync, video
 
+from config import CONFIG
 from main import run_copy, run_operate, run_optimize, run_pipeline, run_topic
 
 app = Flask(
@@ -41,6 +42,29 @@ PARTITION_LABELS = {
     "game": "游戏",
     "ent": "娱乐",
 }
+CREATOR_PARTITION_ANGLES = {
+    "knowledge": ["问题拆解", "保姆级步骤", "避坑清单", "实测对比"],
+    "tech": ["结果对比", "真实实测", "省钱替代", "新手避坑"],
+    "life": ["低成本切口", "真实体验", "前后对比", "情绪共鸣"],
+    "game": ["版本答案", "新手路线", "实战复盘", "高光片段"],
+    "ent": ["3秒反差开场", "热门动作切口", "评论区互动点", "系列人设"],
+}
+CREATOR_STOPWORDS = {
+    "视频",
+    "内容",
+    "教程",
+    "方法",
+    "什么",
+    "怎么",
+    "如何",
+    "应该",
+    "一个",
+    "我们",
+    "你们",
+    "自己",
+    "账号",
+}
+QUESTION_TOKENS = ("怎么", "如何", "为什么", "应该", "什么", "哪种", "哪类", "能不能")
 
 
 def safe_int(value: object) -> int:
@@ -133,10 +157,179 @@ def build_topic(title: str) -> str:
 
 
 def build_seed_topic(field_name: str, direction: str, idea: str) -> str:
-    parts = [part.strip() for part in [field_name, direction, idea] if part and part.strip()]
-    if not parts:
-        return ""
-    return " / ".join(parts)
+    field_name = normalize_creator_text(field_name)
+    direction = normalize_creator_direction(direction, idea)
+    idea = normalize_creator_text(idea)
+
+    profile = refine_creator_profile(field_name, direction, idea)
+    if not idea:
+        return profile
+
+    idea_tail = strip_leading_context(idea, [field_name, direction, profile])
+    if not idea_tail:
+        idea_tail = idea
+
+    if any(token in idea_tail for token in QUESTION_TOKENS):
+        if profile:
+            account_profile = profile if profile.endswith("账号") else f"{profile}账号"
+            return f"{account_profile}{idea_tail}"
+        return idea_tail
+
+    if profile and idea_tail and profile not in idea_tail:
+        return f"{profile}{idea_tail}"
+    return idea_tail or profile
+
+
+def normalize_creator_text(text: str) -> str:
+    value = re.sub(r"[/|｜]+", " ", text or "")
+    value = re.sub(r"\s+", " ", value).strip(" -_|，,。.;；:")
+    return value
+
+
+def normalize_creator_direction(direction: str, idea: str) -> str:
+    value = normalize_creator_text(direction)
+    combined = f"{value} {idea}"
+    if "擦边" in value and any(token in combined for token in ["跳", "舞", "舞蹈"]):
+        value = value.replace("美女擦边", "颜值舞蹈").replace("擦边", "颜值向")
+    elif "擦边" in value:
+        value = value.replace("美女擦边", "颜值向内容").replace("擦边", "高点击表达")
+    return normalize_creator_text(value)
+
+
+def merge_creator_profile(field_name: str, direction: str) -> str:
+    if field_name and direction:
+        if field_name in direction:
+            return direction
+        if direction in field_name:
+            return field_name
+        return f"{field_name}{direction}"
+    return field_name or direction
+
+
+def refine_creator_profile(field_name: str, direction: str, idea: str) -> str:
+    profile = merge_creator_profile(field_name, direction)
+    combined = normalize_creator_text(f"{field_name} {direction} {idea}")
+
+    if "颜值舞蹈" in profile:
+        return "颜值向舞蹈账号"
+    if "颜值向内容" in profile:
+        return "颜值向内容账号"
+    if any(token in combined for token in ["美女", "女生", "小姐姐", "颜值"]) and any(
+        token in combined for token in ["跳", "跳舞", "舞", "舞蹈"]
+    ):
+        return "颜值向舞蹈账号"
+    return profile
+
+
+def strip_leading_context(text: str, contexts: list[str]) -> str:
+    result = text
+    for context in contexts:
+        if not context:
+            continue
+        if result.startswith(context):
+            result = result[len(context):].strip(" ，,。.;；:")
+    return result
+
+
+def extract_creator_keywords(text: str) -> list[str]:
+    clean = normalize_creator_text(text).lower()
+    words = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", clean)
+    keywords: list[str] = []
+    for word in words:
+        if word in CREATOR_STOPWORDS:
+            continue
+        if word not in keywords:
+            keywords.append(word)
+    return keywords
+
+
+def collect_creator_trending_keywords(videos: list[dict], partition_name: str) -> list[str]:
+    counts: dict[str, int] = {}
+    for item in videos[:12]:
+        title = item.get("title", "")
+        for keyword in extract_creator_keywords(title):
+            counts[keyword] = counts.get(keyword, 0) + 1
+
+    if counts:
+        ranked = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+        return [keyword for keyword, _ in ranked[:4]]
+    return CREATOR_PARTITION_ANGLES.get(partition_name, CREATOR_PARTITION_ANGLES["knowledge"])[:3]
+
+
+def build_creator_reason(
+    question_topic: str,
+    partition_name: str,
+    source_count: int,
+    trending_keywords: list[str],
+    angle_label: str,
+) -> str:
+    partition_label = PARTITION_LABELS.get(partition_name, partition_name)
+    keyword_text = "、".join(trending_keywords[:3]) if trending_keywords else "开场反差、结果感、互动点"
+    return (
+        f"结合当前{partition_label}分区的 {source_count} 条热点/样本数据，近期更容易起量的结构集中在「{keyword_text}」。"
+        f"这条选题先解决“{question_topic}”这个具体问题，更适合拿来做第一轮测试；"
+        f"表达重点建议放在 {angle_label}。"
+    )
+
+
+def build_creator_topic_result(
+    field_name: str,
+    direction: str,
+    idea: str,
+    partition_name: str,
+    style: str,
+    base_topic_result: dict,
+) -> dict:
+    normalized_partition = CONFIG.normalize_partition(partition_name)
+    seed_topic = build_seed_topic(field_name, direction, idea)
+    profile = refine_creator_profile(
+        normalize_creator_text(field_name),
+        normalize_creator_direction(direction, idea),
+        normalize_creator_text(idea),
+    )
+    videos = base_topic_result.get("videos", []) or []
+    source_count = int(base_topic_result.get("source_count") or 0)
+    trending_keywords = collect_creator_trending_keywords(videos, normalized_partition)
+    angle_labels = CREATOR_PARTITION_ANGLES.get(normalized_partition, CREATOR_PARTITION_ANGLES["knowledge"])
+
+    question_topic = seed_topic or profile or normalize_creator_text(idea) or "这类内容第一条该怎么做"
+    is_dance_case = any(token in f"{profile} {idea}" for token in ["跳", "舞", "舞蹈"])
+
+    if is_dance_case:
+        topics = [
+            f"{profile or '这类账号'}第一条视频跳什么更容易起量",
+            f"{profile or '这类账号'}别一上来就硬跳：先做哪种开场动作更容易进推荐",
+            f"{profile or '这类账号'}做系列内容时，第1条、第2条、第3条分别跳什么",
+        ]
+    else:
+        topics = [
+            f"{profile or question_topic}第一条视频先做什么更容易起量",
+            f"别直接硬拍 {profile or question_topic}：先做哪种切口更容易进推荐",
+            f"{profile or question_topic}做成系列内容时，第1条、第2条、第3条分别拍什么",
+        ]
+
+    ideas = []
+    base_keywords = extract_creator_keywords(profile or question_topic)[:3]
+    for index, topic in enumerate(topics):
+        idea_keywords = list(dict.fromkeys(base_keywords + trending_keywords[:3] + [angle_labels[index % len(angle_labels)]]))[:6]
+        ideas.append(
+            {
+                "topic": topic,
+                "reason": build_creator_reason(question_topic, normalized_partition, source_count, trending_keywords, angle_labels[index % len(angle_labels)]),
+                "video_type": style or "干货",
+                "keywords": idea_keywords,
+                "score": 100 - index * 3,
+            }
+        )
+
+    return {
+        "ideas": ideas,
+        "source_count": source_count,
+        "videos": videos,
+        "seed_topic": seed_topic,
+        "normalized_profile": profile,
+        "trending_keywords": trending_keywords,
+    }
 
 
 def find_json_object(text: str, marker: str) -> str | None:
@@ -483,13 +676,21 @@ def api_module_create():
     if not seed_topic:
         return jsonify({"success": False, "error": "请至少输入领域、方向、想法中的一项"}), 400
 
-    partition_name = (data.get("partition") or "knowledge").strip() or "knowledge"
+    partition_name = CONFIG.normalize_partition((data.get("partition") or "knowledge").strip() or "knowledge")
     style = (data.get("style") or "干货").strip() or "干货"
 
-    topic_result = run_topic(
+    raw_topic_result = run_topic(
         partition_name=partition_name,
         up_ids=None,
         seed_topic=seed_topic,
+    )
+    topic_result = build_creator_topic_result(
+        field_name=field_name,
+        direction=direction,
+        idea=idea,
+        partition_name=partition_name,
+        style=style,
+        base_topic_result=raw_topic_result,
     )
     chosen_topic = (topic_result.get("ideas") or [{}])[0].get("topic") or seed_topic
     copy_result = run_copy(topic=chosen_topic, style=style)
@@ -499,6 +700,7 @@ def api_module_create():
             "success": True,
             "data": {
                 "seed_topic": seed_topic,
+                "normalized_profile": topic_result.get("normalized_profile", ""),
                 "partition": partition_name,
                 "style": style,
                 "topic_result": topic_result,
