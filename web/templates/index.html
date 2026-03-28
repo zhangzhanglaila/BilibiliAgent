@@ -14,7 +14,7 @@
           <div class="brand__badge">B</div>
           <div>
             <h1>B站内容策划与视频分析工作台</h1>
-            <p>两个业务模块加一个智能助手，分别解决“还没发什么内容”和“已经发了怎么优化”。</p>
+            <p>模块一做选题和文案，模块二做视频解析和优化，右侧是对话式智能助手。</p>
           </div>
         </div>
         <div class="topbar__status-wrap">
@@ -28,30 +28,31 @@
     </header>
 
     <main class="page">
-      <section class="workspace-shell">
+      <section class="scroll-stage" id="scrollStage">
+        <section class="workspace-shell" id="workspaceShell">
         <div class="workspace-main">
           <section class="hero-card">
             <div>
-              <span class="hero-card__tag">BiliBili Creator Workspace</span>
-              <h2>把发视频前的选题难题，和发出去之后的数据分析，拆成两条独立工作流。</h2>
+              <span class="hero-card__tag">Bilibili Creator Workspace</span>
+              <h2>把发布前的选题文案，和发布后的数据分析，拆成两条独立工作流。</h2>
               <p>
-                模块一面向还没发布内容的创作者，输入领域、方向和想法后，一键生成选题与文案。
-                模块二面向已经发布视频的创作者，输入视频链接后，先自动解析当前视频信息，再继续做效果判断和优化分析。
+                两个业务模块默认平分宽度，鼠标移到哪个模块，哪个模块就放大；另一个模块只保留标题。
+                右侧助手采用连续会话布局，快捷提问、语音输入和发送按钮都固定在底部区域。
               </p>
               <div class="hero-points">
                 <span class="result-badge">模块一：选题 + 文案</span>
                 <span class="result-badge">模块二：解析 + 优化</span>
-                <span class="result-badge" id="runtimeModeBadge">运行模式：无 Key 规则模式</span>
+                <span class="result-badge" id="runtimeModeBadge">运行模式：规则模式</span>
               </div>
             </div>
             <div class="hero-metrics">
               <div class="metric-box">
                 <span class="metric-box__label">业务面板</span>
-                <strong>2 + 聊天助手</strong>
+                <strong>2 个模块 + 1 个助手</strong>
               </div>
               <div class="metric-box">
                 <span class="metric-box__label">核心能力</span>
-                <strong>选题 / 文案 / 分析 / 优化 / 对话</strong>
+                <strong>选题 / 文案 / 解析 / 优化 / 对话</strong>
               </div>
               <div class="metric-box">
                 <span class="metric-box__label">当前状态</span>
@@ -63,17 +64,17 @@
           <section class="mode-banner" id="runtimeModePanel">
             <div class="mode-banner__content">
               <span class="mode-banner__kicker">运行模式</span>
-              <h3 id="runtimeModeTitle">当前运行中：无 Key 逻辑模式</h3>
+              <h3 id="runtimeModeTitle">当前运行中：规则模式</h3>
               <p id="runtimeModeDesc">当前未配置 LLM_API_KEY，系统运行在纯代码规则模式，不会消耗 token。</p>
             </div>
             <div class="mode-banner__meta">
-              <div class="result-badge" id="runtimeTokenBadge">不会消耗 token，聊天助手当前关闭。</div>
-              <div class="result-badge" id="runtimeSwitchHint">如果要切到 LLM 模式，填写 .env 后重启服务。</div>
+              <div class="result-badge" id="runtimeTokenBadge">不会消耗 token，智能助手当前关闭</div>
+              <div class="result-badge" id="runtimeSwitchHint">配置 .env 后重启服务即可切到 LLM 模式</div>
             </div>
           </section>
 
-          <section class="module-grid">
-            <section class="panel module-panel module-panel--create">
+          <section class="module-grid" id="moduleGrid">
+            <section class="panel module-panel module-panel--create" data-module="create">
               <div class="panel__header">
                 <div>
                   <span class="module-kicker">模块一</span>
@@ -82,103 +83,107 @@
                 </div>
               </div>
 
-              <div class="form-grid">
-                <label class="field">
-                  <span class="field__label">你的领域</span>
-                  <input id="creatorField" placeholder="例如：AI 效率、数码测评、职场成长、美妆、舞蹈" />
-                </label>
+              <div class="module-panel__body">
+                <div class="form-grid">
+                  <label class="field">
+                    <span class="field__label">你的领域</span>
+                    <input id="creatorField" placeholder="例如：AI 效率、数码测评、职场成长、美妆、舞蹈" />
+                  </label>
 
-                <label class="field">
-                  <span class="field__label">你想做的方向</span>
-                  <input id="creatorDirection" placeholder="例如：教程、测评、案例拆解、观点表达、真人出镜" />
-                </label>
+                  <label class="field">
+                    <span class="field__label">你想做的方向</span>
+                    <input id="creatorDirection" placeholder="例如：教程、测评、案例拆解、观点表达、真人出镜" />
+                  </label>
 
-                <label class="field field--full">
-                  <span class="field__label">你已有的想法</span>
-                  <input id="creatorIdea" placeholder="例如：想做一条关于 AI 自动剪辑提高效率的实战视频" />
-                  <span class="field__hint">哪怕只是一个模糊想法也可以，系统会先帮你整理成可执行主题。</span>
-                </label>
-              </div>
+                  <label class="field field--full">
+                    <span class="field__label">你已有的想法</span>
+                    <input id="creatorIdea" placeholder="例如：想做一条关于 AI 自动剪辑提高效率的实战视频" />
+                    <span class="field__hint">哪怕只是一个模糊想法也可以，系统会先帮你整理成可执行主题。</span>
+                  </label>
+                </div>
 
-              <div class="form-grid form-grid--compact">
-                <label class="field">
-                  <span class="field__label">内容分区</span>
-                  <select id="creatorPartition">
-                    <option value="knowledge">知识</option>
-                    <option value="tech">科技</option>
-                    <option value="life">生活</option>
-                    <option value="game">游戏</option>
-                    <option value="ent">娱乐</option>
-                    <option value="beauty">美妆颜值</option>
-                    <option value="dance">舞蹈</option>
-                    <option value="music">音乐</option>
-                    <option value="film">影视</option>
-                    <option value="anime">动漫</option>
-                    <option value="food">美食</option>
-                    <option value="vlog">Vlog 日常</option>
-                    <option value="fashion">穿搭时尚</option>
-                    <option value="emotion">情感观点</option>
-                    <option value="pet">萌宠</option>
-                    <option value="sports">运动健身</option>
-                    <option value="auto">汽车数码</option>
-                    <option value="business">商业职场</option>
-                  </select>
-                </label>
+                <div class="form-grid form-grid--compact">
+                  <label class="field">
+                    <span class="field__label">内容分区</span>
+                    <select id="creatorPartition">
+                      <option value="knowledge">知识</option>
+                      <option value="tech">科技</option>
+                      <option value="life">生活</option>
+                      <option value="game">游戏</option>
+                      <option value="ent">娱乐</option>
+                      <option value="beauty">美妆颜值</option>
+                      <option value="dance">舞蹈</option>
+                      <option value="music">音乐</option>
+                      <option value="film">影视</option>
+                      <option value="anime">动漫</option>
+                      <option value="food">美食</option>
+                      <option value="vlog">Vlog 日常</option>
+                      <option value="fashion">穿搭时尚</option>
+                      <option value="emotion">情感观点</option>
+                      <option value="pet">萌宠</option>
+                      <option value="sports">运动健身</option>
+                      <option value="auto">汽车数码</option>
+                      <option value="business">商业职场</option>
+                    </select>
+                  </label>
 
-                <label class="field">
-                  <span class="field__label">文案风格</span>
-                  <select id="creatorStyle">
-                    <option value="干货">干货</option>
-                    <option value="教学">教学</option>
-                    <option value="搞笑">搞笑</option>
-                    <option value="混剪">混剪</option>
-                  </select>
-                </label>
-              </div>
+                  <label class="field">
+                    <span class="field__label">文案风格</span>
+                    <select id="creatorStyle">
+                      <option value="干货">干货</option>
+                      <option value="教学">教学</option>
+                      <option value="搞笑">搞笑</option>
+                      <option value="混剪">混剪</option>
+                    </select>
+                  </label>
+                </div>
 
-              <div class="module-actions">
-                <button class="action-btn action-btn--primary module-run-btn" id="creatorRunBtn" type="button">
-                  <span class="action-btn__title">一键生成选题与文案</span>
-                  <span class="action-btn__desc">基于你的方向和热门结构，自动生成更适合起量的内容方案。</span>
-                </button>
-              </div>
+                <div class="module-actions">
+                  <button class="action-btn action-btn--primary module-run-btn" id="creatorRunBtn" type="button">
+                    <span class="action-btn__title">一键生成选题与文案</span>
+                    <span class="action-btn__desc">基于你的方向和热门结构，自动生成更适合起量的内容方案。</span>
+                  </button>
+                </div>
 
-              <div class="module-result" id="creatorResult">
-                <div class="empty-state">
-                  <h4>还没有生成结果</h4>
-                  <p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p>
+                <div class="module-result" id="creatorResult">
+                  <div class="empty-state">
+                    <h4>还没有生成结果</h4>
+                    <p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p>
+                  </div>
                 </div>
               </div>
             </section>
 
-            <section class="panel module-panel module-panel--analyze">
+            <section class="panel module-panel module-panel--analyze" data-module="analyze">
               <div class="panel__header">
                 <div>
                   <span class="module-kicker">模块二</span>
                   <h3>已经发布了视频，想分析和优化</h3>
-                  <p>输入 B 站视频链接后，页面会先自动解析标题、分区、播放、点赞、收藏等信息，再基于这些真实数据继续分析。</p>
+                  <p>输入 B 站视频链接，后台自动解析视频信息，判断它更像爆款还是播放偏低，并给出对应分析结果。</p>
                 </div>
               </div>
 
-              <label class="field field--full">
-                <span class="field__label">B站视频链接</span>
-                <input id="videoLink" placeholder="粘贴完整 B 站视频链接，支持常规链接和 b23.tv 短链" />
-                <span class="field__hint">粘贴链接后会先自动解析视频标题、分区、播放、点赞等信息，下面的分析按钮只负责进一步分析和优化。</span>
-              </label>
+              <div class="module-panel__body">
+                <label class="field field--full">
+                  <span class="field__label">B站视频链接</span>
+                  <input id="videoLink" placeholder="粘贴完整 B 站视频链接，支持常规链接和 b23.tv 短链" />
+                  <span class="field__hint">粘贴链接后会先自动解析视频信息，下面的分析按钮只负责进一步分析和优化。</span>
+                </label>
 
-              <div class="module-result" id="videoPreview"></div>
+                <div class="module-result" id="videoPreview"></div>
 
-              <div class="module-actions">
-                <button class="action-btn action-btn--primary module-run-btn" id="videoAnalyzeBtn" type="button">
-                  <span class="action-btn__title">一键解析并分析视频</span>
-                  <span class="action-btn__desc">基于已自动解析的视频信息，继续判断是爆款还是待优化，并输出对应拆解或优化建议。</span>
-                </button>
-              </div>
+                <div class="module-actions">
+                  <button class="action-btn action-btn--primary module-run-btn" id="videoAnalyzeBtn" type="button">
+                    <span class="action-btn__title">一键解析并分析视频</span>
+                    <span class="action-btn__desc">基于自动解析到的视频信息，继续判断表现好坏，并输出原因和优化建议。</span>
+                  </button>
+                </div>
 
-              <div class="module-result" id="videoResult">
-                <div class="empty-state">
-                  <h4>还没有分析结果</h4>
-                  <p>输入视频链接后，点击“一键解析并分析视频”。</p>
+                <div class="module-result" id="videoResult">
+                  <div class="empty-state">
+                    <h4>还没有分析结果</h4>
+                    <p>输入视频链接后，点击“一键解析并分析视频”。</p>
+                  </div>
                 </div>
               </div>
             </section>
@@ -189,43 +194,42 @@
           <div class="panel__header">
             <div>
               <span class="module-kicker">智能对话助手</span>
-              <h3>像聊天一样提问，Agent 按意图自主调用工具</h3>
-              <p id="assistantPanelDesc">配置 LLM_API_KEY 后，聊天助手会自动调用选题、视频解析、热榜样本等工具来回答问题。</p>
+              <h3>像聊天一样提问，Agent 按意图自动调用工具</h3>
+              <p id="assistantPanelDesc">配置 LLM_API_KEY 后，助手会自动调用选题、视频解析、热门样本等工具回答问题。</p>
             </div>
             <div class="result-badge" id="assistantModeTag">仅 LLM 模式可用</div>
           </div>
 
           <div class="assistant-layout">
-            <div class="assistant-shortcuts">
-              <button class="copy-btn assistant-prompt" type="button" data-prompt="帮我基于当前输入方向选 3 个更容易起量的题">帮我选题</button>
-              <button class="copy-btn assistant-prompt" type="button" data-prompt="帮我分析当前视频链接，判断为什么表现好或不好">帮我分析视频</button>
-              <button class="copy-btn assistant-prompt" type="button" data-prompt="围绕当前主题给我一版更能发的视频文案">帮我写文案</button>
-              <button class="copy-btn assistant-prompt" type="button" data-prompt="最近这个分区什么内容更容易火，给我直接能点开的参考视频">看最近热点</button>
-            </div>
-
             <div class="module-result assistant-thread-wrap" id="assistantResult">
               <div class="empty-state">
                 <h4>还没有对话内容</h4>
-                <p>配置 LLM_API_KEY 后，可以直接自然语言提问，比如“帮我分析这个视频”或“帮我选题”。</p>
+                <p>配置 LLM_API_KEY 后，可以直接提问，比如“帮我分析这个视频”“帮我选题”“帮我写文案”。</p>
               </div>
             </div>
 
             <div class="assistant-composer">
-              <label class="field assistant-composer__field">
-                <span class="field__label">对话输入</span>
-                <textarea id="assistantMessage" rows="4" placeholder="例如：帮我分析这个视频为什么没有起量；或者：我想做颜值向舞蹈账号，第一条视频该拍什么"></textarea>
-                <span class="field__hint" id="assistantHint">聊天助手会结合当前页面里的选题输入或视频链接一起理解你的问题。</span>
-              </label>
+              <div class="assistant-shortcuts assistant-shortcuts--bottom">
+                <button class="copy-btn assistant-prompt" type="button" data-prompt="帮我选题">帮我选题</button>
+                <button class="copy-btn assistant-prompt" type="button" data-prompt="帮我分析视频">帮我分析视频</button>
+                <button class="copy-btn assistant-prompt" type="button" data-prompt="帮我写文案">帮我写文案</button>
+                <button class="copy-btn assistant-prompt" type="button" data-prompt="看最近热点">看最近热点</button>
+              </div>
 
-              <div class="module-actions assistant-composer__actions">
-                <button class="action-btn action-btn--primary module-run-btn" id="assistantSendBtn" type="button">
-                  <span class="action-btn__title">发送给智能助手</span>
-                  <span class="action-btn__desc">仅在有 Key 时启用，Agent 会按意图自主调用工具后再回答。</span>
-                </button>
+              <div class="assistant-input-shell">
+                <label class="assistant-input-label" for="assistantMessage">对话输入</label>
+                <div class="assistant-input-box">
+                  <textarea id="assistantMessage" rows="3" placeholder="例如：帮我分析这个视频为什么没有起量；或者：我想做颜值向舞蹈账号，第一条视频该拍什么"></textarea>
+                  <button class="assistant-action-btn" id="assistantSendBtn" type="button" aria-label="发送或语音输入">
+                    <span class="assistant-action-btn__icon" id="assistantActionIcon" aria-hidden="true"></span>
+                  </button>
+                </div>
+                <span class="field__hint assistant-input-hint" id="assistantHint">助手会结合当前页面里的选题输入或视频链接一起理解你的问题。</span>
               </div>
             </div>
           </div>
         </aside>
+        </section>
       </section>
     </main>
   </div>

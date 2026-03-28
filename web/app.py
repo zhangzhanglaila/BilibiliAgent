@@ -442,6 +442,12 @@ def normalize_html_info(html: str, state: dict, bvid: str) -> dict:
         "title": title,
         "tid": tid,
         "tname": tname,
+        "pic": (
+            video_data.get("pic")
+            or video_data.get("cover")
+            or extract_meta(html, "property", "og:image")
+            or extract_first_match(html, r'"pic"\s*:\s*"([^"]*)"')
+        ),
         "duration": duration,
         "owner": {
             "mid": safe_int(mid),
@@ -547,6 +553,7 @@ def build_resolved_payload(info: dict, bvid: str) -> dict:
         "mid": mid,
         "up_ids": [mid] if mid else [],
         "up_name": up_name,
+        "cover": info.get("pic") or info.get("cover") or "",
         "partition": partition,
         "partition_label": partition_label,
         "tid": tid,
@@ -696,6 +703,7 @@ def serialize_video_metric(video_metric: object) -> dict:
         "bvid": payload.get("bvid", ""),
         "title": payload.get("title", ""),
         "author": payload.get("author", ""),
+        "cover": payload.get("cover") or payload.get("pic") or payload.get("thumbnail") or "",
         "mid": safe_int(payload.get("mid")),
         "view": safe_int(payload.get("view")),
         "like": safe_int(payload.get("like")),
@@ -771,6 +779,7 @@ def select_reference_videos(sources: list[dict], exclude_bvid: str = "", limit: 
                 "title": item.get("title", ""),
                 "url": url,
                 "author": item.get("author", ""),
+                "cover": item.get("cover", ""),
                 "view": safe_int(item.get("view")),
                 "like_rate": float(item.get("like_rate") or 0.0),
                 "source": item.get("source", ""),
@@ -915,7 +924,8 @@ def run_llm_module_create(data: dict) -> dict:
         "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords\n"
         "- copy_result: 对象，包含 topic, style, titles(3个), script(至少4段，含 section/duration/content), description, tags, pinned_comment\n"
     )
-    return agent.run_structured(
+    try:
+        return agent.run_structured(
         task_name="module_create",
         task_goal="基于用户输入和实时市场样本，为创作者输出更容易起量的 3 个选题，并生成完整可发布文案。",
         user_payload={
@@ -929,7 +939,48 @@ def run_llm_module_create(data: dict) -> dict:
         allowed_tools=["creator_briefing"],
         required_tools=["creator_briefing"],
         required_final_keys=["normalized_profile", "seed_topic", "partition", "style", "chosen_topic", "topic_result", "copy_result"],
+            max_steps=2,
+        )
+    except Exception as exc:
+        fallback_result = run_llm_module_create_fallback(data)
+        fallback_result["llm_warning"] = f"Agent 中枢生成失败，已切换到单次 LLM 回退：{exc}"
+        return fallback_result
+
+
+def run_llm_module_create_fallback(data: dict) -> dict:
+    llm = LLMClient()
+    llm.require_available()
+
+    field_name = (data.get("field") or "").strip()
+    direction = (data.get("direction") or "").strip()
+    idea = (data.get("idea") or "").strip()
+    partition_name = (data.get("partition") or "knowledge").strip() or "knowledge"
+    style = (data.get("style") or "干货").strip() or "干货"
+    briefing = build_creator_briefing(field_name, direction, idea, partition_name)
+
+    system_prompt = (
+        "You are a Bilibili topic and copywriting assistant. "
+        "You already have user input and market samples. "
+        "Return JSON only."
     )
+    user_prompt = (
+        "Return one JSON object with these required keys: "
+        "normalized_profile, seed_topic, partition, style, chosen_topic, topic_result, copy_result.\n\n"
+        f"user_input={json.dumps({'field': field_name, 'direction': direction, 'idea': idea, 'partition': partition_name, 'style': style}, ensure_ascii=False)}\n\n"
+        f"creator_briefing={json.dumps(briefing, ensure_ascii=False)}\n\n"
+        "Rules:\n"
+        "1. partition and style must reuse the current input.\n"
+        "2. chosen_topic must be concrete and natural, not generic template wording.\n"
+        "3. topic_result.ideas must contain 3 items, each with topic, reason, video_type, keywords.\n"
+        "4. copy_result must include topic, style, titles(3), script(at least 4 sections with section/duration/content), description, tags, pinned_comment.\n"
+        "5. Avoid repetitive phrases like a universal '高效做法' template unless the topic really demands it."
+    )
+    result = llm.invoke_json_required(system_prompt, user_prompt)
+    if not isinstance(result, dict):
+        raise ValueError("LLM module create fallback returned invalid format")
+    result.setdefault("runtime_mode", "llm_agent")
+    result.setdefault("agent_trace", ["creator_briefing", "llm_direct_fallback"])
+    return result
 
 
 def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) -> dict:

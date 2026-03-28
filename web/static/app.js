@@ -1,26 +1,35 @@
+const MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 1 1-6 0V6a3 3 0 0 1 3-3z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>';
+const SEND_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4 20-7Z"></path></svg>';
+
 const state = {
-  loadingKey: '',
-  progressJob: null,
   videoResolved: null,
-  videoResolveError: '',
+  videoResolvedUrl: '',
   videoResolveTimer: null,
   videoResolveSeq: 0,
+  moduleSplit: 0.5,
+  moduleSwapProgress: 0,
+  introCollapse: 0,
+  sceneTicking: false,
+  progressJobs: {},
+  chatPending: false,
+  chatTyping: false,
+  chatHistory: [],
   runtime: {
     mode: 'rules',
     llmEnabled: false,
     chatAvailable: false,
-    modeLabel: '无 Key 规则模式',
-    modeTitle: '当前运行中：无 Key 逻辑模式',
+    modeLabel: '规则模式',
+    modeTitle: '当前运行中：规则模式',
     modeDescription: '',
     tokenPolicy: '',
     switchHint: '',
   },
-  chatHistory: [],
+  recognition: null,
+  isListening: false,
 };
 
-function $(selector) {
-  return document.querySelector(selector);
-}
+const $ = selector => document.querySelector(selector);
+const $$ = selector => Array.from(document.querySelectorAll(selector));
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -31,761 +40,580 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
-function formatRichText(value) {
-  return escapeHtml(value).replace(/\n/g, '<br>');
+function rich(value) {
+  return escapeHtml(value || '').replace(/\n/g, '<br>');
 }
 
-function formatNumber(value) {
-  const num = Number(value || 0);
-  return Number.isFinite(num) ? num.toLocaleString('zh-CN') : '0';
+function num(value) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n.toLocaleString('zh-CN') : '0';
 }
 
-function formatPercent(value) {
-  const num = Number(value || 0);
-  return `${(num * 100).toFixed(2)}%`;
+function pct(value) {
+  return `${(Number(value || 0) * 100).toFixed(2)}%`;
+}
+
+function coverUrl(url) {
+  const v = String(url || '').trim();
+  if (!v) return '';
+  return v.startsWith('//') ? `https:${v}` : v;
 }
 
 function setStatus(text, type = 'idle') {
   const pill = $('#globalStatusPill');
-  const statusText = $('#statusText');
-  const modeText = $('#currentModeText');
-  if (!pill || !statusText || !modeText) return;
-
+  if (!pill) return;
   pill.classList.remove('is-loading', 'is-success', 'is-error');
   if (type === 'loading') pill.classList.add('is-loading');
   if (type === 'success') pill.classList.add('is-success');
   if (type === 'error') pill.classList.add('is-error');
-
-  statusText.textContent = text;
-  modeText.textContent = text;
+  $('#statusText').textContent = text;
+  $('#currentModeText').textContent = text;
 }
 
 function showToast(title, message, type = 'success') {
   const stack = $('#toastStack');
   if (!stack) return;
-
-  const toast = document.createElement('div');
-  toast.className = `toast toast--${type}`;
-  toast.innerHTML = `
-    <div class="toast__title">${escapeHtml(title)}</div>
-    <div>${escapeHtml(message)}</div>
-  `;
-  stack.appendChild(toast);
-
-  window.setTimeout(() => {
-    toast.remove();
-  }, 2600);
+  const node = document.createElement('div');
+  node.className = `toast toast--${type}`;
+  node.innerHTML = `<div class="toast__title">${escapeHtml(title)}</div><div>${escapeHtml(message)}</div>`;
+  stack.appendChild(node);
+  setTimeout(() => node.remove(), 2800);
 }
 
-function setButtonLoading(buttonId, isLoading) {
-  const btn = document.getElementById(buttonId);
-  if (!btn) return;
-  btn.disabled = isLoading;
-  btn.classList.toggle('is-loading', isLoading);
+function setButtonLoading(id, loading) {
+  const button = document.getElementById(id);
+  if (!button) return;
+  button.disabled = loading;
+  button.classList.toggle('is-loading', loading);
+}
+
+function autosize(el) {
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+}
+
+function sleep(ms) {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
+function clampPercent(value) {
+  return Math.max(0, Math.min(100, Math.round(value || 0)));
+}
+
+function stopProgressJob(key, finalPercent = null) {
+  const job = state.progressJobs[key];
+  if (!job) return;
+  if (job.timer) {
+    window.clearInterval(job.timer);
+  }
+  if (finalPercent !== null && typeof job.onUpdate === 'function') {
+    job.onUpdate(clampPercent(finalPercent));
+  }
+  delete state.progressJobs[key];
+}
+
+function startProgressJob(key, onUpdate, options = {}) {
+  stopProgressJob(key);
+  const job = {
+    percent: clampPercent(options.start ?? 6),
+    max: clampPercent(options.max ?? 94),
+    onUpdate,
+    timer: null,
+  };
+  state.progressJobs[key] = job;
+
+  if (typeof onUpdate === 'function') {
+    onUpdate(job.percent);
+  }
+
+  job.timer = window.setInterval(() => {
+    const step = (options.stepMin ?? 2) + Math.random() * ((options.stepMax ?? 8) - (options.stepMin ?? 2));
+    job.percent = Math.min(job.max, job.percent + step);
+    if (typeof onUpdate === 'function') {
+      onUpdate(clampPercent(job.percent));
+    }
+  }, options.interval ?? 180);
+
+  return job;
+}
+
+function getProgressPercent(key, fallback = 0) {
+  return clampPercent(state.progressJobs[key]?.percent ?? fallback);
 }
 
 async function requestJson(url, payload) {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json();
-  if (!response.ok || !data.success) {
-    throw new Error(data.error || '请求失败');
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || '请求失败');
+    return data.data;
+  } catch (error) {
+    if (error instanceof Error && /Failed to fetch/i.test(error.message)) {
+      throw new Error('接口请求失败，请检查 Flask 服务是否在运行，或后端是否正在重启。');
+    }
+    throw error;
   }
-  return data.data;
 }
 
 async function requestGetJson(url) {
-  const response = await fetch(url);
-  const data = await response.json();
-  if (!response.ok || !data.success) {
-    throw new Error(data.error || '请求失败');
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || '请求失败');
+    return data.data;
+  } catch (error) {
+    if (error instanceof Error && /Failed to fetch/i.test(error.message)) {
+      throw new Error('接口请求失败，请检查 Flask 服务是否在运行。');
+    }
+    throw error;
   }
-  return data.data;
 }
 
 async function copyText(text, label = '内容') {
   try {
     await navigator.clipboard.writeText(text);
-    showToast('复制成功', `${label}已复制到剪贴板`, 'success');
+    showToast('复制成功', `${label}已复制到剪贴板`);
   } catch (error) {
     showToast('复制失败', '当前浏览器不支持自动复制，请手动复制', 'error');
   }
 }
 
 function bindCopyButtons(scope = document) {
-  scope.querySelectorAll('[data-copy]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      copyText(btn.dataset.copy, btn.dataset.copyLabel || '内容');
-    });
+  scope.querySelectorAll('[data-copy]').forEach(button => {
+    if (button.dataset.copyBound === '1') return;
+    button.dataset.copyBound = '1';
+    button.addEventListener('click', () => copyText(button.dataset.copy || '', button.dataset.copyLabel || '内容'));
   });
 }
 
-function renderTags(tags = []) {
-  if (!tags.length) return '<p class="section-note">暂无关键词。</p>';
-  return `<div class="tag-list">${tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('')}</div>`;
+function tags(items = []) {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  return list.length
+    ? `<div class="tag-list">${list.map(item => `<span class="tag">${escapeHtml(item)}</span>`).join('')}</div>`
+    : '<p class="section-note">暂无标签</p>';
 }
 
-function renderIdeaCards(topicResult) {
-  const ideas = topicResult?.ideas || [];
-  if (!ideas.length) {
-    return '<div class="info-card"><h4>暂无选题建议</h4><p>当前没有可展示的选题结果。</p></div>';
-  }
-
+function loadingCard(title, desc, steps = []) {
   return `
-    <div class="topic-grid">
-      ${ideas.map((idea, index) => `
-        <article class="topic-card">
-          <div class="topic-card__head">
-            <div>
-              <div class="meta-line">TOP ${index + 1}</div>
-              <h4>${escapeHtml(idea.topic)}</h4>
-            </div>
-            <span class="type-badge">${escapeHtml(idea.video_type || '干货')}</span>
-          </div>
-          <p>${escapeHtml(idea.reason || '')}</p>
-          ${renderTags(idea.keywords || [])}
-        </article>
-      `).join('')}
-    </div>
-  `;
-}
-
-function renderReferenceVideos(items = [], title = '可直接参考的高表现视频', description = '点击可直接打开对应 B 站页面') {
-  if (!items.length) {
-    return '';
-  }
-
-  return `
-    <section class="copy-block">
+    <section class="loading-card">
       <div class="block-title">
-        <div>
-          <h4>${escapeHtml(title)}</h4>
-          <p>${escapeHtml(description)}</p>
-        </div>
+        <div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div>
+        <span class="type-badge">处理中</span>
       </div>
-      <div class="topic-grid">
-        ${items.map((item, index) => `
-          <article class="copy-card">
-            <div class="card-head">
-              <div>
-                <div class="meta-line">参考视频 ${index + 1}</div>
-                <h4>${escapeHtml(item.title || '未命名视频')}</h4>
-              </div>
-              <a class="copy-btn" href="${escapeHtml(item.url || '#')}" target="_blank" rel="noopener noreferrer">打开链接</a>
-            </div>
-            <p>${escapeHtml(item.author || '未知UP')} · 播放 ${formatNumber(item.view)} · 点赞率 ${formatPercent(item.like_rate)}</p>
-          </article>
-        `).join('')}
-      </div>
+      <div class="bili-progress"><div class="bili-progress__bar bili-progress__bar--indeterminate"></div></div>
+      ${steps.length ? `<div class="bili-progress__steps">${steps.map((step, i) => `<div class="progress-step ${i === 0 ? 'is-active' : ''}"><span class="progress-step__dot"></span><span>${escapeHtml(step)}</span></div>`).join('')}</div>` : ''}
     </section>
   `;
 }
 
-function renderCopyResult(copyResult) {
-  const titles = copyResult?.titles || [];
-  const script = copyResult?.script || [];
-  const description = copyResult?.description || '';
-  const tags = copyResult?.tags || [];
-  const pinned = copyResult?.pinned_comment || '';
+function infoCard(title, text, tone = '') {
+  return `<div class="info-card ${tone ? `info-card--${tone}` : ''}"><h4>${escapeHtml(title)}</h4><p>${escapeHtml(text)}</p></div>`;
+}
 
+function previewCard(label, value, hint = '根据视频链接自动解析') {
+  const ok = value !== undefined && value !== null && String(value).trim() !== '';
+  return `<div class="stat-card preview-card" title="${escapeHtml(hint)}"><h4>${escapeHtml(label)}</h4><span class="stat-card__value ${ok ? '' : 'is-placeholder'}">${ok ? escapeHtml(value) : '待解析'}</span></div>`;
+}
+
+function metricCard(label, value, hint = '') {
+  return `<div class="stat-card" title="${escapeHtml(hint)}"><h4>${escapeHtml(label)}</h4><span class="stat-card__value">${escapeHtml(value)}</span>${hint ? `<p>${escapeHtml(hint)}</p>` : ''}</div>`;
+}
+
+function renderIdeas(topicResult) {
+  const ideas = topicResult?.ideas || [];
+  if (!ideas.length) return infoCard('暂无选题建议', '当前没有可展示的选题结果。');
+  return `<div class="topic-grid">${ideas.map((idea, index) => `
+    <article class="topic-card">
+      <div class="topic-card__head">
+        <div><div class="meta-line">TOP ${index + 1}</div><h4>${escapeHtml(idea.topic || '未命名选题')}</h4></div>
+        <span class="type-badge">${escapeHtml(idea.video_type || '干货')}</span>
+      </div>
+      <p>${escapeHtml(idea.reason || '')}</p>
+      ${tags(idea.keywords || [])}
+    </article>
+  `).join('')}</div>`;
+}
+
+function referenceGrid(items = [], compact = false) {
+  const list = Array.isArray(items) ? items.filter(item => item && item.url) : [];
+  if (!list.length) return '';
+  return `<div class="reference-grid ${compact ? 'reference-grid--chat' : ''}">${list.map(item => {
+    const cover = coverUrl(item.cover);
+    const title = item.title || '未命名视频';
+    return `
+      <a class="reference-card ${compact ? 'reference-card--chat' : ''}" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">
+        <div class="reference-card__thumb">${cover ? `<img src="${escapeHtml(cover)}" alt="${escapeHtml(title)}" loading="lazy" />` : '<div class="reference-card__thumb-placeholder">B站</div>'}</div>
+        <div class="reference-card__body">
+          <h4>${escapeHtml(title)}</h4>
+          <p>${escapeHtml(item.author || '未知 UP')}</p>
+          <div class="reference-card__meta"><span>播放 ${num(item.view)}</span><span>点赞率 ${pct(item.like_rate)}</span></div>
+        </div>
+      </a>
+    `;
+  }).join('')}</div>`;
+}
+
+function referenceSection(items = [], title = '可直接参考的高表现视频', desc = '点击卡片可直接打开当前做得好的视频页面。') {
+  const grid = referenceGrid(items, false);
+  if (!grid) return '';
+  return `<section class="copy-block"><div class="block-title"><div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div></div>${grid}</section>`;
+}
+
+function copyResult(copy) {
+  if (!copy) return infoCard('暂无可直接复用文案', '当前结果里没有新的标题、脚本和简介。');
+  const titles = Array.isArray(copy.titles) ? copy.titles.filter(Boolean) : [];
+  const script = Array.isArray(copy.script) ? copy.script.filter(Boolean) : [];
+  const description = copy.description || '';
+  const tagList = Array.isArray(copy.tags) ? copy.tags.filter(Boolean) : [];
+  const pinned = copy.pinned_comment || '';
   return `
     <div class="copy-layout">
       <section class="copy-block">
         <div class="block-title">
-          <div>
-            <h4>高流量标题</h4>
-            <p>结合当前方向自动生成的标题备选</p>
-          </div>
+          <div><h4>高流量标题</h4><p>结合当前方向自动生成的标题备选</p></div>
           <button class="copy-btn" data-copy="${escapeHtml(titles.join('\n'))}" data-copy-label="标题集合">一键复制</button>
         </div>
         <div class="copy-title-grid">
           ${titles.length ? titles.map((title, index) => `
             <article class="copy-card">
               <div class="card-head">
-                <div>
-                  <div class="meta-line">标题 ${index + 1}</div>
-                  <h4>${escapeHtml(title)}</h4>
-                </div>
+                <div><div class="meta-line">标题 ${index + 1}</div><h4>${escapeHtml(title)}</h4></div>
                 <button class="copy-btn" data-copy="${escapeHtml(title)}" data-copy-label="标题 ${index + 1}">复制</button>
               </div>
             </article>
-          `).join('') : '<div class="info-card"><p>暂无标题结果。</p></div>'}
+          `).join('') : infoCard('暂无标题', '当前没有可展示的标题。')}
         </div>
       </section>
-
       <section class="copy-block">
         <div class="block-title">
-          <div>
-            <h4>文案脚本</h4>
-            <p>可直接拆成视频段落使用</p>
-          </div>
-          <button
-            class="copy-btn"
-            data-copy="${escapeHtml(script.map(item => `[${item.duration || ''}] ${item.section || ''}: ${item.content || ''}`).join('\n'))}"
-            data-copy-label="完整脚本"
-          >
-            一键复制
-          </button>
+          <div><h4>文案脚本</h4><p>可直接拆成视频段落使用</p></div>
+          <button class="copy-btn" data-copy="${escapeHtml(script.map(item => `[${item.duration || ''}] ${item.section || ''}: ${item.content || ''}`).join('\n'))}" data-copy-label="完整脚本">一键复制</button>
         </div>
         <div class="script-list">
           ${script.length ? script.map((item, index) => `
             <article class="script-item">
               <div class="script-item__meta">
-                <div style="display:flex;align-items:center;gap:12px;">
-                  <span class="script-item__index">${index + 1}</span>
-                  <strong>${escapeHtml(item.section || '片段')}</strong>
-                </div>
+                <div class="script-item__title"><span class="script-item__index">${index + 1}</span><strong>${escapeHtml(item.section || '片段')}</strong></div>
                 <span class="script-item__time">${escapeHtml(item.duration || '')}</span>
               </div>
               <p>${escapeHtml(item.content || '')}</p>
-              <div>
-                <button class="copy-btn" data-copy="${escapeHtml(item.content || '')}" data-copy-label="脚本片段 ${index + 1}">复制片段</button>
-              </div>
+              <button class="copy-btn" data-copy="${escapeHtml(item.content || '')}" data-copy-label="脚本片段 ${index + 1}">复制片段</button>
             </article>
-          `).join('') : '<div class="info-card"><p>暂无脚本结果。</p></div>'}
+          `).join('') : infoCard('暂无脚本', '当前没有可展示的脚本。')}
         </div>
       </section>
-
       <section class="copy-block">
-        <div class="block-title">
-          <div>
-            <h4>简介与标签</h4>
-            <p>适合直接放到发布页里</p>
-          </div>
-        </div>
+        <div class="block-title"><div><h4>简介与标签</h4><p>适合直接放到发布页里</p></div></div>
         <article class="copy-card">
           <div class="card-head">
-            <div>
-              <div class="meta-line">视频简介</div>
-              <h4>简介文案</h4>
-            </div>
+            <div><div class="meta-line">视频简介</div><h4>简介文案</h4></div>
             <button class="copy-btn" data-copy="${escapeHtml(description)}" data-copy-label="视频简介">复制简介</button>
           </div>
-          <p>${escapeHtml(description || '暂无简介结果。')}</p>
+          <p>${escapeHtml(description || '暂无简介')}</p>
           <div class="spacer-xs"></div>
-          ${renderTags(tags)}
+          ${tags(tagList)}
         </article>
       </section>
-
       <section class="copy-block">
         <div class="block-title">
-          <div>
-            <h4>置顶评论</h4>
-            <p>用于引导互动和收集下一期方向</p>
-          </div>
+          <div><h4>置顶评论</h4><p>用于引导互动和收集下一期方向</p></div>
           <button class="copy-btn" data-copy="${escapeHtml(pinned)}" data-copy-label="置顶评论">复制评论</button>
         </div>
-        <article class="dark-card">
-          <p class="rich-text">${escapeHtml(pinned || '暂无置顶评论结果。')}</p>
-        </article>
+        <article class="dark-card"><p class="rich-text">${rich(pinned || '暂无置顶评论')}</p></article>
       </section>
     </div>
   `;
 }
 
-function renderCreatorResult(data) {
-  const normalizedProfile = data.normalized_profile || data.seed_topic || '未填写';
-  const userQuestion = data.seed_topic || normalizedProfile || '未填写';
+function creatorResult(data) {
+  const profile = data.normalized_profile || data.seed_topic || '未整理';
+  const question = data.seed_topic || profile || '未整理';
   return `
     <div class="result-stack">
+      ${data.llm_warning ? `<div class="inline-notice">${escapeHtml(data.llm_warning)}</div>` : ''}
       <div class="summary-strip">
-        <div class="stat-card">
-          <h4>整理后的方向</h4>
-          <p>${escapeHtml(normalizedProfile)}</p>
-        </div>
-        <div class="stat-card">
-          <h4>当前问题</h4>
-          <p>${escapeHtml(userQuestion)}</p>
-        </div>
-        <div class="stat-card">
-          <h4>推荐主选题</h4>
-          <p>${escapeHtml(data.chosen_topic || '暂无')}</p>
-        </div>
-        <div class="stat-card">
-          <h4>文案风格</h4>
-          <p>${escapeHtml(data.style || '干货')}</p>
-        </div>
+        <div class="stat-card"><h4>整理后的方向</h4><span class="stat-card__value">${escapeHtml(profile)}</span></div>
+        <div class="stat-card"><h4>当前问题</h4><span class="stat-card__value">${escapeHtml(question)}</span></div>
+        <div class="stat-card"><h4>推荐主选题</h4><span class="stat-card__value">${escapeHtml(data.chosen_topic || '暂无')}</span></div>
+        <div class="stat-card"><h4>文案风格</h4><span class="stat-card__value">${escapeHtml(data.style || '干货')}</span></div>
       </div>
-
       <section class="copy-block">
-        <div class="block-title">
-          <div>
-            <h4>热门选题建议</h4>
-            <p>基于你的方向和当前热门结构，自动整理出更值得做的切口。</p>
-          </div>
-        </div>
-        ${renderIdeaCards(data.topic_result)}
+        <div class="block-title"><div><h4>热门选题建议</h4><p>基于你的方向和当前热门结构，自动整理出更值得做的切口。</p></div></div>
+        ${renderIdeas(data.topic_result)}
       </section>
-
       <section class="copy-block">
-        <div class="block-title">
-          <div>
-            <h4>自动生成文案</h4>
-            <p>围绕主选题生成标题、脚本、简介和置顶评论。</p>
-          </div>
-        </div>
-        ${renderCopyResult(data.copy_result)}
+        <div class="block-title"><div><h4>自动生成文案</h4><p>围绕主选题生成标题、脚本、简介和置顶评论。</p></div></div>
+        ${copyResult(data.copy_result)}
       </section>
     </div>
   `;
 }
 
-function renderMetricCard(label, value, hint = '') {
-  return `
-    <div class="stat-card" title="${escapeHtml(hint || '根据视频链接自动解析')}">
-      <h4>${escapeHtml(label)}</h4>
-      <span class="stat-card__value">${escapeHtml(value)}</span>
-      ${hint ? `<p>${escapeHtml(hint)}</p>` : ''}
-    </div>
-  `;
-}
-
-function renderPreviewCard(label, value, hint = '根据视频链接自动解析') {
-  const display = value ? escapeHtml(value) : '待自动解析';
-  return `
-    <div class="stat-card preview-card" title="${escapeHtml(hint)}">
-      <h4>${escapeHtml(label)}</h4>
-      <span class="stat-card__value">${display}</span>
-      <p>${escapeHtml(hint)}</p>
-    </div>
-  `;
-}
-
-function renderVideoPreview(data, options = {}) {
+function videoPreview(data, options = {}) {
   const resolved = data || {};
   const stats = resolved.stats || {};
   const loading = Boolean(options.loading);
   const error = options.error || '';
-  const title = loading ? '正在自动解析视频信息' : error ? '自动解析失败' : data ? '已自动解析当前视频信息' : '等待自动解析视频信息';
+  const title = loading ? '正在自动解析视频信息' : error ? '视频链接解析失败' : data ? '已自动解析当前视频信息' : '当前视频信息预览';
   const note = loading
-    ? '系统正在根据你输入的 B 站视频链接提取标题、分区、播放、点赞等真实信息。'
+    ? '系统正在根据你输入的 B 站视频链接提取标题、分区、UP 主和互动数据。'
     : error
       ? error
       : data
-        ? '这些字段来自当前视频链接的自动解析结果，点击下面按钮会基于这些信息继续分析。'
-        : '粘贴完整视频链接后，这里会自动显示标题、分区、播放、点赞、收藏等信息。';
-
+        ? '这些字段来自当前视频链接的自动解析结果，点击下方按钮会基于这些真实信息继续分析。'
+        : '粘贴视频链接后，这里会自动显示标题、类型、播放、点赞、投币、收藏、评论和分享。';
+  const cover = coverUrl(resolved.cover);
   return `
     <section class="copy-block">
       <div class="block-title">
-        <div>
-          <h4>${escapeHtml(title)}</h4>
-          <p>${escapeHtml(note)}</p>
-        </div>
-        ${loading ? '<span class="type-badge">自动解析中</span>' : data ? '<span class="type-badge">已解析</span>' : '<span class="type-badge">待解析</span>'}
+        <div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(note)}</p></div>
+        <span class="type-badge ${error ? 'type-badge--danger' : ''}">${loading ? '自动解析中' : data ? '已解析' : '待解析'}</span>
       </div>
-      ${loading ? `
-        <div class="bili-progress">
-          <div class="bili-progress__bar bili-progress__bar--indeterminate"></div>
-        </div>
-      ` : ''}
+      ${loading ? '<div class="bili-progress"><div class="bili-progress__bar bili-progress__bar--indeterminate"></div></div>' : ''}
+      ${cover ? `<div class="video-cover-strip"><div class="video-cover-strip__thumb"><img src="${escapeHtml(cover)}" alt="${escapeHtml(resolved.title || '视频封面')}" loading="lazy" /></div><div class="video-cover-strip__body"><strong>${escapeHtml(resolved.title || '当前视频')}</strong><span>${escapeHtml(resolved.up_name || '自动解析结果')}</span></div></div>` : ''}
       <div class="summary-strip">
-        ${renderPreviewCard('视频标题', resolved.title || '', '根据视频链接自动解析当前视频标题')}
-        ${renderPreviewCard('视频类型', resolved.partition_label || resolved.partition || '', '根据视频链接自动解析分区/视频类型')}
-        ${renderPreviewCard('UP 主', resolved.up_name || '', '根据视频链接自动解析 UP 主信息')}
-        ${renderPreviewCard('BV 号', resolved.bv_id || '', '根据视频链接自动解析 BV 号')}
+        ${previewCard('视频标题', resolved.title || '', '根据视频链接自动解析当前视频标题')}
+        ${previewCard('视频类型', resolved.partition_label || resolved.partition || '', '根据视频链接自动解析分区和视频类型')}
+        ${previewCard('UP 主', resolved.up_name || '', '根据视频链接自动解析对应 UP 主')}
+        ${previewCard('BV 号', resolved.bv_id || '', '根据视频链接自动解析对应 BV 号')}
       </div>
-      <div class="summary-strip">
-        ${renderPreviewCard('播放量', data ? formatNumber(stats.view) : '', '根据视频链接自动解析公开播放量')}
-        ${renderPreviewCard('点赞量', data ? formatNumber(stats.like) : '', '根据视频链接自动解析公开点赞量')}
-        ${renderPreviewCard('投币 / 收藏', data ? `${formatNumber(stats.coin)} / ${formatNumber(stats.favorite)}` : '', '根据视频链接自动解析公开投币和收藏')}
-        ${renderPreviewCard('评论 / 分享', data ? `${formatNumber(stats.reply)} / ${formatNumber(stats.share)}` : '', '根据视频链接自动解析公开评论和分享')}
+      <div class="summary-strip summary-strip--metrics">
+        ${previewCard('播放量', data ? num(stats.view) : '', '根据视频链接自动解析公开播放量')}
+        ${previewCard('点赞量', data ? num(stats.like) : '', '根据视频链接自动解析公开点赞量')}
+        ${previewCard('投币量', data ? num(stats.coin) : '', '根据视频链接自动解析公开投币量')}
+        ${previewCard('收藏量', data ? num(stats.favorite) : '', '根据视频链接自动解析公开收藏量')}
+        ${previewCard('评论量', data ? num(stats.reply) : '', '根据视频链接自动解析公开评论量')}
+        ${previewCard('分享量', data ? num(stats.share) : '', '根据视频链接自动解析公开分享量')}
       </div>
     </section>
   `;
 }
 
-function renderVideoMetrics(resolved) {
+function videoMetrics(resolved) {
   const stats = resolved?.stats || {};
   return `
-    <div class="summary-strip">
-      ${renderMetricCard('播放', formatNumber(stats.view), '当前公开播放数据')}
-      ${renderMetricCard('点赞', formatNumber(stats.like), `点赞率 ${formatPercent(stats.like_rate)}`)}
-      ${renderMetricCard('投币 / 收藏', `${formatNumber(stats.coin)} / ${formatNumber(stats.favorite)}`, '反映内容认可度和收藏价值')}
-      ${renderMetricCard('评论 / 分享', `${formatNumber(stats.reply)} / ${formatNumber(stats.share)}`, '反映讨论和传播意愿')}
+    <div class="summary-strip summary-strip--metrics">
+      ${metricCard('播放', num(stats.view), '当前公开播放数据')}
+      ${metricCard('点赞', num(stats.like), `点赞率 ${pct(stats.like_rate)}`)}
+      ${metricCard('投币', num(stats.coin), '反映内容认可度')}
+      ${metricCard('收藏', num(stats.favorite), '反映内容留存和收藏意愿')}
+      ${metricCard('评论', num(stats.reply), '反映讨论反馈')}
+      ${metricCard('分享', num(stats.share), '反映传播意愿')}
     </div>
   `;
 }
 
-function renderBulletList(items = []) {
-  if (!items.length) {
-    return '<div class="info-card"><p>暂无内容。</p></div>';
-  }
-  return `
-    <div class="analysis-list">
-      ${items.filter(Boolean).map(item => `
-        <article class="analysis-item">
-          <span class="analysis-item__dot"></span>
-          <p>${escapeHtml(item)}</p>
-        </article>
-      `).join('')}
-    </div>
-  `;
+function bulletList(items = []) {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!list.length) return infoCard('暂无内容', '当前没有可展示的分析项。');
+  return `<div class="analysis-list">${list.map(item => `<article class="analysis-item"><span class="analysis-item__dot"></span><p>${escapeHtml(item)}</p></article>`).join('')}</div>`;
 }
 
-function renderSimpleTopics(topics = [], title = '后续可做方向') {
+function topicSection(items = [], title = '后续可做方向', desc = '') {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (!list.length) return '';
   return `
     <section class="copy-block">
-      <div class="block-title">
-        <div>
-          <h4>${escapeHtml(title)}</h4>
-          <p>围绕当前视频继续做内容延展</p>
-        </div>
-      </div>
-      <div class="topic-grid">
-        ${topics.length ? topics.map((topic, index) => `
-          <article class="copy-card">
-            <div class="card-head">
-              <div>
-                <div class="meta-line">方向 ${index + 1}</div>
-                <h4>${escapeHtml(topic)}</h4>
-              </div>
-              <button class="copy-btn" data-copy="${escapeHtml(topic)}" data-copy-label="后续方向 ${index + 1}">复制</button>
-            </div>
-          </article>
-        `).join('') : '<div class="info-card"><p>暂无后续方向建议。</p></div>'}
-      </div>
+      <div class="block-title"><div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div></div>
+      <div class="topic-grid">${list.map((item, index) => `<article class="topic-card topic-card--simple"><div class="meta-line">方向 ${index + 1}</div><h4>${escapeHtml(item)}</h4></article>`).join('')}</div>
     </section>
   `;
 }
 
-function renderVideoResult(data) {
-  const resolved = data.resolved || {};
-  const performance = data.performance || {};
+function optimizeSection(titleSuggestions = [], coverSuggestion = '', contentSuggestions = []) {
+  const titles = Array.isArray(titleSuggestions) ? titleSuggestions.filter(Boolean) : [];
+  const content = Array.isArray(contentSuggestions) ? contentSuggestions.filter(Boolean) : [];
+  if (!titles.length && !coverSuggestion && !content.length) return '';
+  return `
+    <section class="copy-block">
+      <div class="block-title"><div><h4>具体优化建议</h4><p>从标题、封面和内容结构三个层面给出可执行调整。</p></div></div>
+      ${titles.length ? `<article class="copy-card"><div class="card-head"><div><div class="meta-line">标题优化</div><h4>建议替换标题</h4></div><button class="copy-btn" data-copy="${escapeHtml(titles.join('\n'))}" data-copy-label="优化标题">复制标题</button></div>${bulletList(titles)}</article>` : ''}
+      ${coverSuggestion ? `<article class="copy-card"><div class="card-head"><div><div class="meta-line">封面优化</div><h4>封面建议</h4></div></div><p>${escapeHtml(coverSuggestion)}</p></article>` : ''}
+      ${content.length ? `<article class="copy-card"><div class="card-head"><div><div class="meta-line">内容结构优化</div><h4>内容建议</h4></div></div>${bulletList(content)}</article>` : ''}
+    </section>
+  `;
+}
+
+function videoResult(data) {
+  const resolved = data.resolved || state.videoResolved || {};
+  const perf = data.performance || {};
   const analysis = data.analysis || {};
-  const optimizeResult = data.optimize_result || {};
-  const copyResult = data.copy_result;
-  const referenceVideos = data.reference_videos || [];
-  const llmWarning = data.llm_warning || '';
-
-  const headerSummary = `
-    <div class="summary-strip">
-      <div class="stat-card">
-        <h4>视频标题</h4>
-        <p>${escapeHtml(resolved.title || '未知标题')}</p>
-      </div>
-      <div class="stat-card">
-        <h4>UP 主 / 分区</h4>
-        <p>${escapeHtml(resolved.up_name || '未知UP')} / ${escapeHtml(resolved.partition_label || resolved.partition || '未知')}</p>
-      </div>
-      <div class="stat-card">
-        <h4>结果判断</h4>
-        <p>${escapeHtml(performance.label || '待判断')}</p>
-      </div>
-      <div class="stat-card">
-        <h4>BV 号</h4>
-        <p>${escapeHtml(resolved.bv_id || '-')}</p>
-      </div>
-    </div>
-  `;
-
-  const hotSection = performance.is_hot ? `
-    <section class="copy-block">
-      <div class="block-title">
-        <div>
-          <h4>为什么它能火</h4>
-          <p>${escapeHtml(performance.summary || '')}</p>
-        </div>
-      </div>
-      ${renderBulletList(analysis.analysis_points || [])}
-    </section>
-    ${renderSimpleTopics(analysis.followup_topics || [], '继续放大的后续选题')}
-  ` : '';
-
-  const lowSection = !performance.is_hot ? `
-    <section class="copy-block">
-      <div class="block-title">
-        <div>
-          <h4>为什么现在播放偏低</h4>
-          <p>${escapeHtml(performance.summary || '')}</p>
-        </div>
-      </div>
-      ${renderBulletList(analysis.analysis_points || [])}
-    </section>
-
-    <section class="copy-block">
-      <div class="block-title">
-        <div>
-          <h4>优化建议</h4>
-          <p>针对标题、封面和内容节奏给出可执行调整。</p>
-        </div>
-      </div>
-      <div class="summary-strip">
-        ${renderMetricCard('优化标题', (analysis.title_suggestions || []).join(' / ') || '暂无', '建议先做标题 AB 测试')}
-        ${renderMetricCard('封面方向', analysis.cover_suggestion || '暂无', '先强化结果感和反差感')}
-      </div>
-      ${renderBulletList(analysis.content_suggestions || optimizeResult.content_suggestions || [])}
-    </section>
-
-    ${renderSimpleTopics(analysis.next_topics || [], '建议尝试的新选题方向')}
-
-    ${copyResult ? `
-      <section class="copy-block">
-        <div class="block-title">
-          <div>
-            <h4>当前主题可直接参考的新文案</h4>
-            <p>围绕当前视频核心主题，重新生成一版更适合优化后的文案结构。</p>
-          </div>
-        </div>
-        ${renderCopyResult(copyResult)}
-      </section>
-    ` : ''}
-  ` : '';
-
+  const optimize = data.optimize_result || {};
+  const topics = perf.is_hot ? analysis.followup_topics : analysis.next_topics;
+  const titleSuggestions = analysis.title_suggestions || optimize.optimized_titles || [];
+  const coverSuggestion = analysis.cover_suggestion || optimize.cover_suggestion || '';
+  const contentSuggestions = analysis.content_suggestions || optimize.content_suggestions || [];
+  const points = analysis.analysis_points || perf.reasons || [];
   return `
     <div class="result-stack">
-      ${llmWarning ? `<article class="info-card"><h4>LLM 分析提示</h4><p>${escapeHtml(llmWarning)}</p></article>` : ''}
-      ${headerSummary}
-      ${renderVideoMetrics(resolved)}
-      ${hotSection}
-      ${lowSection}
-      ${renderReferenceVideos(referenceVideos, '现在做得好的同类视频', '点击即可跳转到当前表现更好的参考视频页面')}
+      ${data.llm_warning ? `<div class="inline-notice">${escapeHtml(data.llm_warning)}</div>` : ''}
+      <section class="performance-hero ${perf.is_hot ? 'performance-hero--hot' : 'performance-hero--low'}">
+        <div><div class="meta-line">当前判断</div><h3>${escapeHtml(perf.label || '待判断')}</h3><p>${escapeHtml(perf.summary || '')}</p></div>
+        <div class="performance-hero__side"><span class="performance-badge">${perf.is_hot ? '更像爆款' : '播放偏低'}</span><span class="performance-score">得分 ${escapeHtml(String(perf.score ?? 0))}</span></div>
+      </section>
+      <section class="copy-block"><div class="block-title"><div><h4>当前视频核心信息</h4><p>以下数据来自当前视频链接自动解析结果。</p></div></div>${videoMetrics(resolved)}</section>
+      <section class="copy-block">
+        <div class="block-title"><div><h4>${perf.is_hot ? '为什么这条视频容易火' : '为什么这条视频目前表现偏弱'}</h4><p>${perf.is_hot ? '从标题、互动率和赛道匹配度拆解原因。' : '先找出当前短板，再决定后续优化动作。'}</p></div></div>
+        ${bulletList(points)}
+      </section>
+      ${topicSection(topics, perf.is_hot ? '建议继续延展的后续题材' : '建议下一批优先尝试的题材', perf.is_hot ? '可以沿着这条视频的表现结构继续放大。' : '优先从更容易起量的切口重新测试。')}
+      ${!perf.is_hot ? optimizeSection(titleSuggestions, coverSuggestion, contentSuggestions) : ''}
+      ${data.copy_result ? `<section class="copy-block"><div class="block-title"><div><h4>优化后可直接使用的文案</h4><p>当视频当前表现偏弱时，可直接拿下面这版标题和脚本做新一轮测试。</p></div></div>${copyResult(data.copy_result)}</section>` : ''}
+      ${referenceSection(data.reference_videos || [], perf.is_hot ? '同赛道高表现参考视频' : '建议直接对标的参考视频', '点击卡片可直接跳转到当前表现更好的视频页面。')}
     </div>
   `;
 }
 
-function getCurrentChatContext() {
-  return {
-    field: $('#creatorField')?.value.trim() || '',
-    direction: $('#creatorDirection')?.value.trim() || '',
-    idea: $('#creatorIdea')?.value.trim() || '',
-    partition: $('#creatorPartition')?.value || 'knowledge',
-    style: $('#creatorStyle')?.value || '干货',
-    videoLink: $('#videoLink')?.value.trim() || '',
-  };
+function assistantEmptyState() {
+  return `
+    <div class="empty-state">
+      <h4>${state.runtime.chatAvailable ? '还没有对话内容' : '当前为规则模式'}</h4>
+      <p>${state.runtime.chatAvailable ? '你可以直接像聊天一样提问，助手会结合当前页面上下文作答。' : '配置 LLM_API_KEY 后，右侧对话助手会切到真正的 LLM Agent 链路。'}</p>
+    </div>
+  `;
 }
 
-function renderChatResult() {
-  const container = $('#assistantResult');
-  if (!container) return;
-
-  if (!state.chatHistory.length) {
-    container.innerHTML = `
-      <div class="empty-state">
-        <h4>还没有对话内容</h4>
-        <p>${escapeHtml(state.runtime.chatAvailable
-          ? '现在可以直接自然语言提问，Agent 会按意图调用工具后回答。'
-          : '当前是无 Key 规则模式，聊天助手会在配置 LLM_API_KEY 后启用。')}</p>
+function assistantPendingBubble() {
+  return `
+    <article class="chat-row chat-row--assistant">
+      <div class="chat-bubble chat-bubble--assistant chat-bubble--pending">
+        <div class="chat-bubble__head"><strong class="chat-bubble__name">智能助手</strong><span class="meta-line">正在思考</span></div>
+        ${loadingCard('Agent 正在思考', '正在结合当前页面输入、工具结果和上下文组织回答。', ['理解问题', '调用工具', '组织回答'])}
       </div>
-    `;
+    </article>
+  `;
+}
+
+function renderAssistant() {
+  const box = $('#assistantResult');
+  if (!box) return;
+  if (!state.chatHistory.length && !state.chatPending) {
+    box.innerHTML = assistantEmptyState();
     return;
   }
-
-  container.innerHTML = `
+  box.innerHTML = `
     <div class="assistant-thread">
-      ${state.chatHistory.map((item, index) => `
+      ${state.chatHistory.map(item => `
         <article class="chat-row chat-row--${escapeHtml(item.role)}">
-          <div class="chat-bubble chat-bubble--${escapeHtml(item.role)}">
+          <div class="chat-bubble chat-bubble--${escapeHtml(item.role)} ${item.error ? 'chat-bubble--error' : ''}">
             <div class="chat-bubble__head">
-              <div class="meta-line">${item.role === 'user' ? '你' : '智能助手'}</div>
-              ${item.role === 'assistant'
-                ? `<button class="copy-btn" data-copy="${escapeHtml(item.content || '')}" data-copy-label="助手回复 ${index}">复制</button>`
-                : ''}
+              <strong class="chat-bubble__name">${item.role === 'assistant' ? '智能助手' : '你'}</strong>
+              ${item.role === 'assistant' ? `<button class="copy-btn" data-copy="${escapeHtml(item.content || '')}" data-copy-label="回答">复制</button>` : ''}
             </div>
-            <p class="rich-text">${formatRichText(item.content || '')}</p>
-            ${item.tools?.length ? `<div class="tag-list">${item.tools.map(tool => `<span class="tag">工具: ${escapeHtml(tool)}</span>`).join('')}</div>` : ''}
-            ${item.references?.length ? `
-              <div class="chat-links">
-                ${item.references.map((link, linkIndex) => `
-                  <a class="copy-btn" href="${escapeHtml(link.url || '#')}" target="_blank" rel="noopener noreferrer">
-                    参考视频 ${linkIndex + 1}
-                  </a>
-                `).join('')}
-              </div>
-            ` : ''}
-            ${item.actions?.length ? `<div class="assistant-actions">${item.actions.map(action => `<div class="analysis-item"><span class="analysis-item__dot"></span><p>${escapeHtml(action)}</p></div>`).join('')}</div>` : ''}
+            <div class="rich-text">${rich(item.content || '')}</div>
+            ${item.actions?.length ? `<div class="assistant-actions">${bulletList(item.actions)}</div>` : ''}
+            ${item.references?.length ? `<div class="chat-links"><div class="meta-line">可直接打开的参考视频</div>${referenceGrid(item.references, true)}</div>` : ''}
           </div>
         </article>
       `).join('')}
+      ${state.chatPending ? assistantPendingBubble() : ''}
     </div>
   `;
-  bindCopyButtons(container);
-  container.scrollTop = container.scrollHeight;
-}
-
-function renderProgressCard(title, progress, steps = []) {
-  return `
-    <div class="result-stack">
-      <article class="loading-card">
-        <div class="loading-card__head">
-          <div>
-            <div class="meta-line">处理中</div>
-            <h4>${escapeHtml(title)}</h4>
-          </div>
-          <span class="type-badge">${Math.max(1, Math.min(99, Math.round(progress)))}%</span>
-        </div>
-        <div class="bili-progress">
-          <div class="bili-progress__bar" style="width:${Math.max(6, Math.min(96, progress))}%;"></div>
-        </div>
-        <div class="analysis-list">
-          ${steps.map((item, index) => `
-            <article class="analysis-item ${index === steps.length - 1 ? 'analysis-item--active' : ''}">
-              <span class="analysis-item__dot"></span>
-              <p>${escapeHtml(item)}</p>
-            </article>
-          `).join('')}
-        </div>
-      </article>
-    </div>
-  `;
-}
-
-function stopProgress() {
-  if (state.progressJob?.timer) {
-    window.clearInterval(state.progressJob.timer);
-  }
-  state.progressJob = null;
-}
-
-function startProgress(targetId, title, stages) {
-  stopProgress();
-  const container = document.getElementById(targetId);
-  if (!container) return;
-
-  state.progressJob = {
-    targetId,
-    title,
-    stages: stages.slice(),
-    progress: 12,
-    activeCount: 1,
-    timer: null,
-  };
-
-  const render = () => {
-    const current = state.progressJob;
-    const target = document.getElementById(targetId);
-    if (!current || !target) return;
-    target.innerHTML = renderProgressCard(current.title, current.progress, current.stages.slice(0, current.activeCount));
-  };
-
-  render();
-  state.progressJob.timer = window.setInterval(() => {
-    const current = state.progressJob;
-    if (!current) return;
-    current.progress = Math.min(92, current.progress + Math.random() * 11);
-    const nextCount = Math.min(current.stages.length, Math.max(1, Math.ceil((current.progress / 100) * current.stages.length)));
-    current.activeCount = Math.max(current.activeCount, nextCount);
-    render();
-  }, 700);
-}
-
-function finishProgress() {
-  if (!state.progressJob) return;
-  state.progressJob.progress = 100;
-  state.progressJob.activeCount = state.progressJob.stages.length;
-  const container = document.getElementById(state.progressJob.targetId);
-  if (container) {
-    container.innerHTML = renderProgressCard(state.progressJob.title, 100, state.progressJob.stages);
-  }
-  window.setTimeout(() => {
-    stopProgress();
-  }, 220);
+  bindCopyButtons(box);
+  requestAnimationFrame(() => {
+    box.scrollTop = box.scrollHeight;
+  });
 }
 
 function updateRuntimeUi() {
-  const runtimePanel = $('#runtimeModePanel');
-  const runtimeBadge = $('#runtimeModeBadge');
-  const runtimeTitle = $('#runtimeModeTitle');
-  const runtimeDesc = $('#runtimeModeDesc');
-  const runtimeTokenBadge = $('#runtimeTokenBadge');
-  const runtimeSwitchHint = $('#runtimeSwitchHint');
-  const assistantModeTag = $('#assistantModeTag');
-  const panelDesc = $('#assistantPanelDesc');
-  const hint = $('#assistantHint');
-  const sendBtn = $('#assistantSendBtn');
+  $('#runtimeModeBadge').textContent = `运行模式：${state.runtime.modeLabel}`;
+  $('#runtimeModeTitle').textContent = state.runtime.modeTitle;
+  $('#runtimeModeDesc').textContent = state.runtime.modeDescription;
+  $('#runtimeTokenBadge').textContent = state.runtime.tokenPolicy;
+  $('#runtimeSwitchHint').textContent = state.runtime.switchHint;
+  $('#assistantModeTag').textContent = state.runtime.chatAvailable ? 'LLM Agent 已启用' : '仅 LLM 模式可用';
+  $('#assistantPanelDesc').textContent = state.runtime.chatAvailable
+    ? '助手会在对话里自主调用选题、视频解析和热门样本等工具。'
+    : '当前未配置 LLM_API_KEY，右侧对话助手不会调用模型，也不会消耗 token。';
+  $('#assistantHint').textContent = state.runtime.chatAvailable
+    ? '助手会结合当前页面里的选题输入或视频链接一起理解你的问题。'
+    : '想启用对话助手，请在 .env 中配置 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL 后重启服务。';
   const input = $('#assistantMessage');
-
-  if (runtimePanel) {
-    runtimePanel.classList.remove('mode-banner--rules', 'mode-banner--llm');
-    runtimePanel.classList.add(state.runtime.mode === 'llm_agent' ? 'mode-banner--llm' : 'mode-banner--rules');
-  }
-
-  if (runtimeBadge) {
-    runtimeBadge.textContent = `运行模式：${state.runtime.modeLabel || '未知模式'}`;
-  }
-  if (runtimeTitle) {
-    runtimeTitle.textContent = state.runtime.modeTitle || '当前运行模式未知';
-  }
-  if (runtimeDesc) {
-    runtimeDesc.textContent = state.runtime.modeDescription || '';
-  }
-  if (runtimeTokenBadge) {
-    runtimeTokenBadge.textContent = state.runtime.tokenPolicy || '';
-  }
-  if (runtimeSwitchHint) {
-    runtimeSwitchHint.textContent = state.runtime.switchHint || '';
-  }
-  if (assistantModeTag) {
-    assistantModeTag.textContent = state.runtime.chatAvailable ? 'LLM Agent 已启用' : '仅 LLM 模式可用';
-  }
-  if (panelDesc) {
-    panelDesc.textContent = state.runtime.modeDescription || '';
-  }
-  if (hint) {
-    hint.textContent = state.runtime.chatAvailable
-      ? '聊天助手会结合当前页面里的选题输入或视频链接一起理解你的问题。'
-      : '当前未检测到 LLM_API_KEY，聊天面板仅展示占位说明，不会发送任何模型请求。';
-  }
-  if (sendBtn) {
-    sendBtn.disabled = !state.runtime.chatAvailable;
-  }
-  if (input) {
-    input.disabled = !state.runtime.chatAvailable;
-  }
+  input.disabled = !state.runtime.chatAvailable;
+  input.placeholder = state.runtime.chatAvailable
+    ? '例如：帮我分析这个视频为什么没有起量；或者：我想做颜值向舞蹈账号，第一条视频该拍什么'
+    : '当前为规则模式。配置 LLM_API_KEY 后这里会启用对话。';
+  updateAssistantButton();
+  renderAssistant();
 }
 
-function resetVideoPreview() {
+function updateAssistantButton() {
+  const input = $('#assistantMessage');
+  const button = $('#assistantSendBtn');
+  const icon = $('#assistantActionIcon');
+  if (!input || !button || !icon) return;
+  button.disabled = !state.runtime.chatAvailable;
+  button.classList.toggle('is-listening', state.isListening);
+  icon.innerHTML = input.value.trim() ? SEND_ICON : MIC_ICON;
+  button.setAttribute('aria-label', input.value.trim() ? '发送消息' : '语音输入');
+}
+
+function clearResults() {
   state.videoResolved = null;
-  state.videoResolveError = '';
-  const container = $('#videoPreview');
-  if (container) {
-    container.innerHTML = renderVideoPreview(null);
-  }
+  state.videoResolvedUrl = '';
+  state.videoResolveSeq += 1;
+  state.chatHistory = [];
+  state.chatPending = false;
+  if (state.videoResolveTimer) clearTimeout(state.videoResolveTimer);
+  $('#creatorResult').innerHTML = '<div class="empty-state"><h4>还没有生成结果</h4><p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p></div>';
+  $('#videoResult').innerHTML = '<div class="empty-state"><h4>还没有分析结果</h4><p>输入视频链接后，点击“一键解析并分析视频”。</p></div>';
+  $('#videoPreview').innerHTML = videoPreview(null);
+  renderAssistant();
+  setStatus('已清空结果', 'success');
 }
 
-async function autoResolveVideoLink(force = false) {
-  const input = $('#videoLink');
-  const url = input?.value.trim() || '';
-  const container = $('#videoPreview');
-  if (!container) return null;
-
-  if (!url) {
-    resetVideoPreview();
-    return null;
+function syncModuleHover() {
+  const heroCard = $('.hero-card');
+  const modeBanner = $('.mode-banner');
+  if (heroCard) {
+    heroCard.style.removeProperty('display');
+    heroCard.style.removeProperty('maxHeight');
+    heroCard.style.removeProperty('opacity');
+    heroCard.style.removeProperty('filter');
+    heroCard.style.removeProperty('transform');
+    heroCard.style.removeProperty('marginBottom');
+    heroCard.style.removeProperty('pointerEvents');
   }
-
-  const seq = ++state.videoResolveSeq;
-  container.innerHTML = renderVideoPreview(null, { loading: true });
-  try {
-    const data = await requestJson('/api/resolve-bili-link', { url });
-    if (seq !== state.videoResolveSeq && !force) {
-      return null;
-    }
-    state.videoResolved = data;
-    state.videoResolveError = '';
-    container.innerHTML = renderVideoPreview(data);
-    return data;
-  } catch (error) {
-    if (seq !== state.videoResolveSeq && !force) {
-      return null;
-    }
-    state.videoResolved = null;
-    state.videoResolveError = error.message || '视频链接自动解析失败';
-    container.innerHTML = renderVideoPreview(null, { error: state.videoResolveError });
-    return null;
+  if (modeBanner) {
+    modeBanner.style.removeProperty('display');
+    modeBanner.style.removeProperty('maxHeight');
+    modeBanner.style.removeProperty('opacity');
+    modeBanner.style.removeProperty('filter');
+    modeBanner.style.removeProperty('transform');
+    modeBanner.style.removeProperty('marginBottom');
+    modeBanner.style.removeProperty('pointerEvents');
   }
+  $$('.module-panel').forEach(panel => {
+    panel.style.removeProperty('--panel-fade-opacity');
+    panel.style.removeProperty('--panel-fade-size');
+    panel.style.removeProperty('transform');
+    panel.style.removeProperty('opacity');
+    panel.classList.remove('is-expanded', 'is-compressed');
+  });
 }
 
-function scheduleVideoResolve() {
-  if (state.videoResolveTimer) {
-    window.clearTimeout(state.videoResolveTimer);
-  }
-  state.videoResolveTimer = window.setTimeout(() => {
-    autoResolveVideoLink();
-  }, 650);
+function updateGlobalScrollScene() {
+  state.moduleSplit = 0.5;
+  state.moduleSwapProgress = 0;
+  state.introCollapse = 0;
+  syncModuleHover();
+}
+
+function scheduleGlobalScrollSceneUpdate() {
+  updateGlobalScrollScene();
+}
+
+function initGlobalScrollScene() {
+  updateGlobalScrollScene();
+}
+
+function isResolvedForUrl(url) {
+  return Boolean(state.videoResolved && state.videoResolvedUrl === String(url || '').trim());
 }
 
 async function loadRuntimeInfo() {
@@ -795,245 +623,524 @@ async function loadRuntimeInfo() {
       mode: data.mode || 'rules',
       llmEnabled: Boolean(data.llm_enabled),
       chatAvailable: Boolean(data.chat_available),
-      modeLabel: data.mode_label || '无 Key 规则模式',
-      modeTitle: data.mode_title || '当前运行模式未知',
+      modeLabel: data.mode_label || '规则模式',
+      modeTitle: data.mode_title || '当前运行中：规则模式',
       modeDescription: data.mode_description || '',
       tokenPolicy: data.token_policy || '',
       switchHint: data.switch_hint || '',
     };
+    updateRuntimeUi();
   } catch (error) {
-    state.runtime = {
-      mode: 'rules',
-      llmEnabled: false,
-      chatAvailable: false,
-      modeLabel: '无 Key 规则模式',
-      modeTitle: '当前运行中：无 Key 逻辑模式',
-      modeDescription: '运行模式读取失败，默认按无 Key 规则模式处理。',
-      tokenPolicy: '不会消耗 token，聊天助手当前关闭。',
-      switchHint: '如果要切到 LLM 模式，填写 .env 里的 LLM_API_KEY 后重启服务。',
-    };
+    showToast('模式读取失败', error.message || '请检查后端服务', 'error');
   }
-  updateRuntimeUi();
-  renderChatResult();
+}
+
+async function resolveVideoLink(url, seq = ++state.videoResolveSeq, options = {}) {
+  const currentUrl = String(url || '').trim();
+  if (!currentUrl) {
+    state.videoResolved = null;
+    state.videoResolvedUrl = '';
+    $('#videoPreview').innerHTML = videoPreview(null);
+    return null;
+  }
+  $('#videoPreview').innerHTML = videoPreview(isResolvedForUrl(currentUrl) ? state.videoResolved : null, { loading: true });
+  if (!options.silent) setStatus('正在解析视频链接', 'loading');
+  try {
+    const data = await requestJson('/api/resolve-bili-link', { url: currentUrl });
+    if (seq !== state.videoResolveSeq || ($('#videoLink').value || '').trim() !== currentUrl) return null;
+    state.videoResolved = data;
+    state.videoResolvedUrl = currentUrl;
+    $('#videoPreview').innerHTML = videoPreview(data);
+    if (!options.silent) setStatus('视频信息已解析', 'success');
+    return data;
+  } catch (error) {
+    if (seq !== state.videoResolveSeq || ($('#videoLink').value || '').trim() !== currentUrl) return null;
+    state.videoResolved = null;
+    state.videoResolvedUrl = '';
+    $('#videoPreview').innerHTML = videoPreview(null, { error: error.message });
+    if (!options.silent) {
+      setStatus('视频链接解析失败', 'error');
+      showToast('解析失败', error.message, 'error');
+    }
+    throw error;
+  }
+}
+
+function scheduleVideoResolve() {
+  const url = ($('#videoLink').value || '').trim();
+  state.videoResolveSeq += 1;
+  if (state.videoResolveTimer) clearTimeout(state.videoResolveTimer);
+  if (!url) {
+    state.videoResolved = null;
+    state.videoResolvedUrl = '';
+    $('#videoPreview').innerHTML = videoPreview(null);
+    return;
+  }
+  const seq = state.videoResolveSeq;
+  state.videoResolveTimer = setTimeout(() => {
+    resolveVideoLink(url, seq, { silent: true }).catch(() => {});
+  }, 550);
 }
 
 async function runCreatorModule() {
-  if (state.loadingKey) return;
-
-  const field = $('#creatorField')?.value.trim() || '';
-  const direction = $('#creatorDirection')?.value.trim() || '';
-  const idea = $('#creatorIdea')?.value.trim() || '';
-  const partition = $('#creatorPartition')?.value || 'knowledge';
-  const style = $('#creatorStyle')?.value || '干货';
-
-  if (!field && !direction && !idea) {
-    showToast('缺少输入', '请至少填写领域、方向或想法中的一项', 'error');
+  const payload = {
+    field: ($('#creatorField').value || '').trim(),
+    direction: ($('#creatorDirection').value || '').trim(),
+    idea: ($('#creatorIdea').value || '').trim(),
+    partition: $('#creatorPartition').value || 'knowledge',
+    style: $('#creatorStyle').value || '干货',
+  };
+  if (!payload.field && !payload.direction && !payload.idea) {
+    showToast('缺少输入', '请至少输入领域、方向、想法中的一项。', 'error');
     return;
   }
-
+  setButtonLoading('creatorRunBtn', true);
+  setStatus('正在生成选题与文案', 'loading');
+  $('#creatorResult').innerHTML = loadingCard('正在生成选题与文案', '系统会先整理你的方向，再结合热门结构生成更自然的选题和文案。', ['整理方向', '分析热门结构', '生成选题', '生成文案']);
   try {
-    state.loadingKey = 'creator';
-    setButtonLoading('creatorRunBtn', true);
-    setStatus('正在生成选题与文案...', 'loading');
-    startProgress('creatorResult', '正在生成模块一结果', [
-      '整理你的领域、方向和想法',
-      '抓取当前分区热点与同类样本',
-      '生成更容易起量的选题方向',
-      '输出标题、脚本、简介和标签',
-    ]);
-
-    const data = await requestJson('/api/module-create', {
-      field,
-      direction,
-      idea,
-      partition,
-      style,
-    });
-
-    const container = $('#creatorResult');
-    if (container) {
-      finishProgress();
-      container.innerHTML = renderCreatorResult(data);
-      bindCopyButtons(container);
-    }
-
-    setStatus('模块一结果已更新', 'success');
-    showToast('生成完成', '已生成选题与文案结果', 'success');
+    const data = await requestJson('/api/module-create', payload);
+    $('#creatorResult').innerHTML = creatorResult(data);
+    bindCopyButtons($('#creatorResult'));
+    if (data.llm_warning) showToast('LLM 已回退', 'Agent 中枢失败，已自动回退到直接 LLM 生成。', 'error');
+    setStatus('选题与文案已生成', 'success');
   } catch (error) {
-    setStatus('模块一执行失败', 'error');
-    showToast('生成失败', error.message || '发生未知错误', 'error');
+    $('#creatorResult').innerHTML = infoCard('生成失败', error.message, 'danger');
+    setStatus('选题与文案生成失败', 'error');
+    showToast('生成失败', error.message, 'error');
   } finally {
-    stopProgress();
-    state.loadingKey = '';
     setButtonLoading('creatorRunBtn', false);
   }
 }
 
-async function runVideoModule() {
-  if (state.loadingKey) return;
-
-  const url = $('#videoLink')?.value.trim() || '';
+async function runAnalyzeModule() {
+  const url = ($('#videoLink').value || '').trim();
   if (!url) {
-    showToast('缺少链接', '请先输入 B 站视频链接', 'error');
+    showToast('缺少链接', '请先输入 B 站视频链接。', 'error');
     return;
   }
-
+  setButtonLoading('videoAnalyzeBtn', true);
+  setStatus('正在分析视频', 'loading');
+  $('#videoResult').innerHTML = loadingCard('正在分析视频', '先校验当前视频信息，再判断它更像爆款还是播放偏低，并生成对应建议。', ['校验视频信息', '判断表现', '分析原因', '输出建议']);
   try {
-    let resolved = state.videoResolved;
-    if (!resolved) {
-      resolved = await autoResolveVideoLink(true);
+    if (!isResolvedForUrl(url)) await resolveVideoLink(url, ++state.videoResolveSeq, { silent: true });
+    const data = await requestJson('/api/module-analyze', { url, resolved: state.videoResolved });
+    if (data.resolved) {
+      state.videoResolved = data.resolved;
+      state.videoResolvedUrl = url;
+      $('#videoPreview').innerHTML = videoPreview(data.resolved);
     }
-    if (!resolved) {
-      throw new Error(state.videoResolveError || '当前视频链接还没有解析成功');
-    }
-
-    state.loadingKey = 'video';
-    setButtonLoading('videoAnalyzeBtn', true);
-    setStatus('正在解析并分析视频...', 'loading');
-    startProgress('videoResult', '正在分析模块二结果', [
-      '提取视频标题、播放、点赞、投币、收藏等真实信息',
-      '抓取同类样本与热点视频',
-      '判断更像爆款还是播放偏低',
-      '生成分析结论和优化建议',
-    ]);
-
-    const data = await requestJson('/api/module-analyze', { url, resolved });
-    const container = $('#videoResult');
-    if (container) {
-      finishProgress();
-      container.innerHTML = renderVideoResult(data);
-      bindCopyButtons(container);
-    }
-
-    setStatus('模块二结果已更新', 'success');
-    showToast('分析完成', '已返回视频解析和优化结果', 'success');
+    $('#videoResult').innerHTML = videoResult(data);
+    bindCopyButtons($('#videoResult'));
+    if (data.llm_warning) showToast('LLM 已回退', 'Agent 中枢失败，已自动回退到直接 LLM 分析。', 'error');
+    setStatus('视频分析已完成', 'success');
   } catch (error) {
-    setStatus('模块二执行失败', 'error');
-    showToast('分析失败', error.message || '发生未知错误', 'error');
+    $('#videoResult').innerHTML = infoCard('分析失败', error.message, 'danger');
+    setStatus('视频分析失败', 'error');
+    showToast('分析失败', error.message, 'error');
   } finally {
-    stopProgress();
-    state.loadingKey = '';
     setButtonLoading('videoAnalyzeBtn', false);
   }
 }
 
-async function sendAssistantMessage() {
-  if (state.loadingKey) return;
+function chatContext() {
+  return {
+    field: ($('#creatorField').value || '').trim(),
+    direction: ($('#creatorDirection').value || '').trim(),
+    idea: ($('#creatorIdea').value || '').trim(),
+    partition: $('#creatorPartition').value || 'knowledge',
+    style: $('#creatorStyle').value || '干货',
+    videoLink: ($('#videoLink').value || '').trim(),
+  };
+}
+
+async function sendAssistantMessage(forced = '') {
   if (!state.runtime.chatAvailable) {
-    showToast('功能未启用', '当前是无 Key 规则模式，聊天助手仅在配置 LLM_API_KEY 后可用', 'error');
+    showToast('当前不可用', '请先配置 LLM_API_KEY 并重启服务。', 'error');
     return;
   }
-
   const input = $('#assistantMessage');
-  const message = input?.value.trim() || '';
+  const message = (forced || input.value || '').trim();
   if (!message) {
-    showToast('缺少内容', '请输入你想让智能助手处理的问题', 'error');
+    toggleVoiceInput();
     return;
   }
-
   state.chatHistory.push({ role: 'user', content: message });
-  renderChatResult();
-  if (input) input.value = '';
-
+  state.chatPending = true;
+  input.value = '';
+  autosize(input);
+  updateAssistantButton();
+  renderAssistant();
+  setStatus('智能助手正在思考', 'loading');
   try {
-    state.loadingKey = 'assistant';
-    setButtonLoading('assistantSendBtn', true);
-    setStatus('智能助手正在思考...', 'loading');
-    startProgress('assistantResult', '智能助手正在思考', [
-      '理解你的问题和当前页面上下文',
-      '按意图选择要调用的工具',
-      '提取参考视频与样本数据',
-      '组织回答并给出下一步建议',
-    ]);
-
     const data = await requestJson('/api/chat', {
       message,
       history: state.chatHistory.map(item => ({ role: item.role, content: item.content })),
-      context: getCurrentChatContext(),
+      context: chatContext(),
     });
-
     state.chatHistory.push({
       role: 'assistant',
-      content: data.reply || '助手没有返回有效内容。',
-      actions: data.suggested_next_actions || [],
-      tools: data.agent_trace || [],
-      references: data.reference_links || [],
+      content: data.reply || '暂无回复',
+      actions: Array.isArray(data.suggested_next_actions) ? data.suggested_next_actions : [],
+      references: Array.isArray(data.reference_links) ? data.reference_links : [],
     });
-    finishProgress();
-    renderChatResult();
     setStatus('智能助手已回复', 'success');
   } catch (error) {
-    setStatus('智能助手执行失败', 'error');
-    showToast('对话失败', error.message || '发生未知错误', 'error');
+    state.chatHistory.push({ role: 'assistant', content: `请求失败：${error.message}`, error: true });
+    setStatus('智能助手请求失败', 'error');
+    showToast('智能助手失败', error.message, 'error');
   } finally {
-    stopProgress();
-    state.loadingKey = '';
-    setButtonLoading('assistantSendBtn', false);
-    updateRuntimeUi();
+    state.chatPending = false;
+    renderAssistant();
+    updateAssistantButton();
   }
 }
 
-function clearAllResults() {
-  stopProgress();
-  if (state.videoResolveTimer) {
-    window.clearTimeout(state.videoResolveTimer);
-    state.videoResolveTimer = null;
-  }
-  const creatorResult = $('#creatorResult');
-  const videoResult = $('#videoResult');
-
-  if (creatorResult) {
-    creatorResult.innerHTML = `
-      <div class="empty-state">
-        <h4>还没有生成结果</h4>
-        <p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p>
-      </div>
-    `;
-  }
-
-  if (videoResult) {
-    videoResult.innerHTML = `
-      <div class="empty-state">
-        <h4>还没有分析结果</h4>
-        <p>输入视频链接后，点击“一键解析并分析视频”。</p>
-      </div>
-    `;
-  }
-
-  resetVideoPreview();
-
-  state.chatHistory = [];
-  renderChatResult();
-
-  setStatus('等待操作', 'idle');
-  showToast('已清空', '模块结果和聊天记录都已重置', 'success');
+function initSpeechRecognition() {
+  const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Ctor) return;
+  const recognition = new Ctor();
+  recognition.lang = 'zh-CN';
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.onstart = () => {
+    state.isListening = true;
+    updateAssistantButton();
+    showToast('语音输入已开始', '请直接说话，识别结果会写入输入框。');
+  };
+  recognition.onresult = event => {
+    const input = $('#assistantMessage');
+    input.value = Array.from(event.results).map(item => item[0]?.transcript || '').join('');
+    autosize(input);
+    updateAssistantButton();
+  };
+  recognition.onerror = event => {
+    if (event.error && event.error !== 'aborted') showToast('语音输入失败', `浏览器返回：${event.error}`, 'error');
+  };
+  recognition.onend = () => {
+    state.isListening = false;
+    updateAssistantButton();
+  };
+  state.recognition = recognition;
 }
 
-async function init() {
-  $('#creatorRunBtn')?.addEventListener('click', runCreatorModule);
-  $('#videoAnalyzeBtn')?.addEventListener('click', runVideoModule);
-  $('#assistantSendBtn')?.addEventListener('click', sendAssistantMessage);
-  $('#assistantMessage')?.addEventListener('keydown', event => {
+function toggleVoiceInput() {
+  if (!state.runtime.chatAvailable) return;
+  if (!state.recognition) {
+    showToast('当前浏览器不支持', '浏览器不支持语音输入，请直接输入文字。', 'error');
+    return;
+  }
+  try {
+    if (state.isListening) state.recognition.stop();
+    else state.recognition.start();
+  } catch (error) {
+    showToast('语音输入失败', '语音识别暂时不可用，请稍后再试。', 'error');
+  }
+}
+
+function initEvents() {
+  $('#creatorRunBtn').addEventListener('click', runCreatorModule);
+  $('#videoAnalyzeBtn').addEventListener('click', runAnalyzeModule);
+  $('#clearResultsBtn').addEventListener('click', clearResults);
+  $('#videoLink').addEventListener('input', scheduleVideoResolve);
+
+  const assistantInput = $('#assistantMessage');
+  autosize(assistantInput);
+  assistantInput.addEventListener('input', () => {
+    autosize(assistantInput);
+    updateAssistantButton();
+  });
+  assistantInput.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       sendAssistantMessage();
     }
   });
-  document.querySelectorAll('.assistant-prompt').forEach(button => {
+
+  $('#assistantSendBtn').addEventListener('click', () => {
+    ($('#assistantMessage').value || '').trim() ? sendAssistantMessage() : toggleVoiceInput();
+  });
+
+  $$('.assistant-prompt').forEach(button => {
     button.addEventListener('click', () => {
-      const input = $('#assistantMessage');
-      if (input) {
-        input.value = button.dataset.prompt || '';
-        input.focus();
+      const prompt = button.dataset.prompt || '';
+      if (state.runtime.chatAvailable) {
+        sendAssistantMessage(prompt);
+        return;
       }
+      $('#assistantMessage').value = prompt;
+      autosize($('#assistantMessage'));
+      updateAssistantButton();
+      $('#assistantMessage').focus();
     });
   });
-  $('#videoLink')?.addEventListener('input', scheduleVideoResolve);
-  $('#videoLink')?.addEventListener('blur', () => autoResolveVideoLink(true));
-  $('#clearResultsBtn')?.addEventListener('click', clearAllResults);
-  setStatus('等待操作', 'idle');
-  resetVideoPreview();
-  await loadRuntimeInfo();
 }
 
-init();
+function currentProgressPercent(key) {
+  return getProgressPercent(key, 0);
+}
+
+function loadingCard(title, desc, steps = [], percent = 0) {
+  const safePercent = clampPercent(percent);
+  const activeIndex = steps.length ? Math.min(steps.length - 1, Math.floor((safePercent / 100) * steps.length)) : -1;
+  return `
+    <section class="loading-card">
+      <div class="block-title">
+        <div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div>
+        <span class="type-badge progress-percent">${safePercent}%</span>
+      </div>
+      <div class="bili-progress"><div class="bili-progress__bar" style="width:${safePercent}%"></div></div>
+      ${steps.length ? `<div class="bili-progress__steps">${steps.map((step, i) => `<div class="progress-step ${i < activeIndex ? 'is-done' : ''} ${i === activeIndex ? 'is-active' : ''}"><span class="progress-step__dot"></span><span>${escapeHtml(step)}</span></div>`).join('')}</div>` : ''}
+    </section>
+  `;
+}
+
+function renderProgressInto(containerId, title, desc, steps, percent) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = loadingCard(title, desc, steps, percent);
+}
+
+function assistantPendingBubble() {
+  const percent = currentProgressPercent('assistant');
+  return `
+    <article class="chat-row chat-row--assistant">
+      <div class="chat-bubble chat-bubble--assistant chat-bubble--pending">
+        <div class="chat-bubble__head"><strong class="chat-bubble__name">智能助手</strong><span class="meta-line">正在思考</span></div>
+        ${loadingCard('Agent 正在思考', '正在结合当前页面输入、工具结果和上下文组织回答。', ['理解问题', '调用工具', '组织回答'], percent)}
+      </div>
+    </article>
+  `;
+}
+
+function renderAssistant() {
+  const box = $('#assistantResult');
+  if (!box) return;
+  if (!state.chatHistory.length && !state.chatPending) {
+    box.innerHTML = assistantEmptyState();
+    return;
+  }
+  box.innerHTML = `
+    <div class="assistant-thread">
+      ${state.chatHistory.map(item => `
+        <article class="chat-row chat-row--${escapeHtml(item.role)}">
+          <div class="chat-bubble chat-bubble--${escapeHtml(item.role)} ${item.error ? 'chat-bubble--error' : ''}">
+            <div class="chat-bubble__head">
+              <strong class="chat-bubble__name">${item.role === 'assistant' ? '智能助手' : '你'}</strong>
+              ${item.role === 'assistant' ? `<button class="copy-btn" data-copy="${escapeHtml(item.content || item.fullContent || '')}" data-copy-label="回答">复制</button>` : ''}
+            </div>
+            <div class="rich-text">${rich(item.content || '')}${item.typing ? '<span class="typing-caret"></span>' : ''}</div>
+            ${item.actions?.length ? `<div class="assistant-actions">${bulletList(item.actions)}</div>` : ''}
+            ${item.references?.length ? `<div class="chat-links"><div class="meta-line">可直接打开的参考视频</div>${referenceGrid(item.references, true)}</div>` : ''}
+          </div>
+        </article>
+      `).join('')}
+      ${state.chatPending ? assistantPendingBubble() : ''}
+    </div>
+  `;
+  bindCopyButtons(box);
+  requestAnimationFrame(() => {
+    box.scrollTop = box.scrollHeight;
+  });
+}
+
+function updateAssistantButton() {
+  const input = $('#assistantMessage');
+  const button = $('#assistantSendBtn');
+  const icon = $('#assistantActionIcon');
+  if (!input || !button || !icon) return;
+  button.disabled = !state.runtime.chatAvailable || state.chatPending || state.chatTyping;
+  button.classList.toggle('is-listening', state.isListening);
+  icon.innerHTML = input.value.trim() ? SEND_ICON : MIC_ICON;
+  button.setAttribute('aria-label', input.value.trim() ? '发送消息' : '语音输入');
+}
+
+function clearResults() {
+  stopProgressJob('creator');
+  stopProgressJob('analyze');
+  stopProgressJob('assistant');
+  state.videoResolved = null;
+  state.videoResolvedUrl = '';
+  state.videoResolveSeq += 1;
+  state.chatPending = false;
+  state.chatTyping = false;
+  state.chatHistory = [];
+  if (state.videoResolveTimer) {
+    window.clearTimeout(state.videoResolveTimer);
+    state.videoResolveTimer = null;
+  }
+  $('#creatorResult').innerHTML = '<div class="empty-state"><h4>还没有生成结果</h4><p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p></div>';
+  $('#videoResult').innerHTML = '<div class="empty-state"><h4>还没有分析结果</h4><p>输入视频链接后，点击“一键解析并分析视频”。</p></div>';
+  $('#videoPreview').innerHTML = videoPreview(null);
+  renderAssistant();
+  updateAssistantButton();
+  setStatus('已清空结果', 'success');
+}
+
+async function typeAssistantReply(messageItem) {
+  if (!messageItem) return;
+  const fullText = messageItem.fullContent || messageItem.content || '';
+  messageItem.content = '';
+  messageItem.typing = true;
+  state.chatTyping = true;
+  renderAssistant();
+  updateAssistantButton();
+
+  for (let index = 0; index < fullText.length; index += 1) {
+    messageItem.content += fullText[index];
+    renderAssistant();
+    await sleep(fullText[index] === '\n' ? 0 : 12);
+  }
+
+  messageItem.typing = false;
+  delete messageItem.fullContent;
+  state.chatTyping = false;
+  renderAssistant();
+  updateAssistantButton();
+}
+
+async function runCreatorModule() {
+  const payload = {
+    field: ($('#creatorField').value || '').trim(),
+    direction: ($('#creatorDirection').value || '').trim(),
+    idea: ($('#creatorIdea').value || '').trim(),
+    partition: $('#creatorPartition').value || 'knowledge',
+    style: $('#creatorStyle').value || '干货',
+  };
+  if (!payload.field && !payload.direction && !payload.idea) {
+    showToast('缺少输入', '请至少输入领域、方向、想法中的一项。', 'error');
+    return;
+  }
+
+  const title = '正在生成选题与文案';
+  const desc = '系统会先整理你的方向，再结合热门结构生成更自然的选题和文案。';
+  const steps = ['整理方向', '分析热门结构', '生成选题', '生成文案'];
+
+  setButtonLoading('creatorRunBtn', true);
+  setStatus(title, 'loading');
+  startProgressJob('creator', percent => renderProgressInto('creatorResult', title, desc, steps, percent));
+
+  try {
+    const data = await requestJson('/api/module-create', payload);
+    stopProgressJob('creator', 100);
+    $('#creatorResult').innerHTML = creatorResult(data);
+    bindCopyButtons($('#creatorResult'));
+    if (data.llm_warning) showToast('LLM 已回退', 'Agent 中枢失败，已自动回退到直接 LLM 生成。', 'error');
+    setStatus('选题与文案已生成', 'success');
+  } catch (error) {
+    stopProgressJob('creator', 100);
+    $('#creatorResult').innerHTML = infoCard('生成失败', error.message, 'danger');
+    setStatus('选题与文案生成失败', 'error');
+    showToast('生成失败', error.message, 'error');
+  } finally {
+    stopProgressJob('creator');
+    setButtonLoading('creatorRunBtn', false);
+  }
+}
+
+async function runAnalyzeModule() {
+  const url = ($('#videoLink').value || '').trim();
+  if (!url) {
+    showToast('缺少链接', '请先输入 B 站视频链接。', 'error');
+    return;
+  }
+
+  const title = '正在分析视频';
+  const desc = '先校验当前视频信息，再判断它更像爆款还是播放偏低，并生成对应建议。';
+  const steps = ['校验视频信息', '判断表现', '分析原因', '输出建议'];
+
+  setButtonLoading('videoAnalyzeBtn', true);
+  setStatus(title, 'loading');
+  startProgressJob('analyze', percent => renderProgressInto('videoResult', title, desc, steps, percent));
+
+  try {
+    if (!isResolvedForUrl(url)) await resolveVideoLink(url, ++state.videoResolveSeq, { silent: true });
+    const data = await requestJson('/api/module-analyze', { url, resolved: state.videoResolved });
+    stopProgressJob('analyze', 100);
+    if (data.resolved) {
+      state.videoResolved = data.resolved;
+      state.videoResolvedUrl = url;
+      $('#videoPreview').innerHTML = videoPreview(data.resolved);
+    }
+    $('#videoResult').innerHTML = videoResult(data);
+    bindCopyButtons($('#videoResult'));
+    if (data.llm_warning) showToast('LLM 已回退', 'Agent 中枢失败，已自动回退到直接 LLM 分析。', 'error');
+    setStatus('视频分析已完成', 'success');
+  } catch (error) {
+    stopProgressJob('analyze', 100);
+    $('#videoResult').innerHTML = infoCard('分析失败', error.message, 'danger');
+    setStatus('视频分析失败', 'error');
+    showToast('分析失败', error.message, 'error');
+  } finally {
+    stopProgressJob('analyze');
+    setButtonLoading('videoAnalyzeBtn', false);
+  }
+}
+
+async function sendAssistantMessage(forced = '') {
+  if (!state.runtime.chatAvailable) {
+    showToast('当前不可用', '请先配置 LLM_API_KEY 并重启服务。', 'error');
+    return;
+  }
+  const input = $('#assistantMessage');
+  const message = (forced || input.value || '').trim();
+  if (!message) {
+    toggleVoiceInput();
+    return;
+  }
+
+  state.chatHistory.push({ role: 'user', content: message });
+  state.chatPending = true;
+  input.value = '';
+  autosize(input);
+  updateAssistantButton();
+  renderAssistant();
+  setStatus('智能助手正在思考', 'loading');
+  startProgressJob('assistant', () => renderAssistant(), { start: 5, max: 96, stepMin: 2, stepMax: 6, interval: 120 });
+
+  try {
+    const data = await requestJson('/api/chat', {
+      message,
+      history: state.chatHistory.map(item => ({ role: item.role, content: item.fullContent || item.content })),
+      context: chatContext(),
+    });
+
+    stopProgressJob('assistant', 100);
+    state.chatPending = false;
+    const assistantItem = {
+      role: 'assistant',
+      content: '',
+      fullContent: data.reply || '暂无回复',
+      actions: Array.isArray(data.suggested_next_actions) ? data.suggested_next_actions : [],
+      references: Array.isArray(data.reference_links) ? data.reference_links : [],
+      typing: true,
+    };
+    state.chatHistory.push(assistantItem);
+    renderAssistant();
+    setStatus('智能助手正在输出回答', 'loading');
+    await typeAssistantReply(assistantItem);
+    setStatus('智能助手已回复', 'success');
+  } catch (error) {
+    stopProgressJob('assistant', 100);
+    state.chatPending = false;
+    state.chatHistory.push({ role: 'assistant', content: `请求失败：${error.message}`, error: true });
+    setStatus('智能助手请求失败', 'error');
+    showToast('智能助手失败', error.message, 'error');
+    renderAssistant();
+  } finally {
+    stopProgressJob('assistant');
+    updateAssistantButton();
+  }
+}
+
+function init() {
+  $('#videoPreview').innerHTML = videoPreview(null);
+  renderAssistant();
+  initEvents();
+  initSpeechRecognition();
+  initGlobalScrollScene();
+  loadRuntimeInfo();
+  updateAssistantButton();
+  bindCopyButtons(document);
+}
+
+window.addEventListener('DOMContentLoaded', init);
