@@ -20,7 +20,7 @@ from bilibili_api import sync, video
 from agents.llm_workspace_agent import AgentTool, LLMWorkspaceAgent
 from agents.topic_agent import TopicAgent
 from config import CONFIG
-from llm_client import LLMClient
+from llm_client import LLMClient, format_llm_error, llm_error_http_status, should_skip_same_provider_fallback
 from main import run_copy, run_operate, run_optimize, run_pipeline, run_topic
 
 app = Flask(
@@ -755,6 +755,38 @@ def build_market_snapshot(partition_name: str, up_ids: list[int] | None = None) 
     }
 
 
+def compact_market_item_for_llm(item: dict) -> dict:
+    return {
+        "bvid": item.get("bvid", ""),
+        "title": item.get("title", ""),
+        "author": item.get("author", ""),
+        "view": safe_int(item.get("view")),
+        "like": safe_int(item.get("like")),
+        "coin": safe_int(item.get("coin")),
+        "favorite": safe_int(item.get("favorite")),
+        "reply": safe_int(item.get("reply")),
+        "share": safe_int(item.get("share")),
+        "like_rate": float(item.get("like_rate") or 0.0),
+        "completion_rate": float(item.get("completion_rate") or 0.0),
+        "competition_score": float(item.get("competition_score") or 0.0),
+        "source": item.get("source", ""),
+        "url": item.get("url", ""),
+    }
+
+
+def compact_market_snapshot_for_llm(market_snapshot: dict, limit: int = 4) -> dict:
+    return {
+        "partition": market_snapshot.get("partition", ""),
+        "partition_label": market_snapshot.get("partition_label", ""),
+        "source_count": safe_int(market_snapshot.get("source_count")),
+        "hot_board": [compact_market_item_for_llm(item) for item in (market_snapshot.get("hot_board") or [])[:limit]],
+        "partition_samples": [
+            compact_market_item_for_llm(item) for item in (market_snapshot.get("partition_samples") or [])[:limit]
+        ],
+        "peer_samples": [compact_market_item_for_llm(item) for item in (market_snapshot.get("peer_samples") or [])[:limit]],
+    }
+
+
 def select_reference_videos(sources: list[dict], exclude_bvid: str = "", limit: int = 6) -> list[dict]:
     ranked = sorted(
         [item for item in sources if item.get("url")],
@@ -853,6 +885,13 @@ def build_creator_briefing(field_name: str, direction: str, idea: str, partition
     }
 
 
+def compact_creator_briefing_for_llm(briefing: dict) -> dict:
+    return {
+        "user_input": briefing.get("user_input", {}),
+        "market_snapshot": compact_market_snapshot_for_llm(briefing.get("market_snapshot") or {}),
+    }
+
+
 def build_video_briefing(url: str) -> dict:
     bvid = extract_bvid(url)
     info = fetch_video_info(url, bvid)
@@ -942,9 +981,18 @@ def run_llm_module_create(data: dict) -> dict:
             max_steps=2,
         )
     except Exception as exc:
-        fallback_result = run_llm_module_create_fallback(data)
-        fallback_result["llm_warning"] = f"Agent 中枢生成失败，已切换到单次 LLM 回退：{exc}"
-        return fallback_result
+        if should_skip_same_provider_fallback(exc):
+            raise RuntimeError(
+                f"LLM 服务当前不可用：{format_llm_error(exc)} 当前不会继续尝试同 provider 的 fallback，请稍后重试。"
+            ) from exc
+        try:
+            fallback_result = run_llm_module_create_fallback(data)
+            fallback_result["llm_warning"] = f"Agent 中枢生成失败，已切换到单次 LLM 回退：{format_llm_error(exc)}"
+            return fallback_result
+        except Exception as fallback_exc:
+            raise RuntimeError(
+                f"LLM Agent 生成失败：{format_llm_error(exc)}；LLM fallback 也失败：{format_llm_error(fallback_exc)}"
+            ) from fallback_exc
 
 
 def run_llm_module_create_fallback(data: dict) -> dict:
@@ -956,7 +1004,7 @@ def run_llm_module_create_fallback(data: dict) -> dict:
     idea = (data.get("idea") or "").strip()
     partition_name = (data.get("partition") or "knowledge").strip() or "knowledge"
     style = (data.get("style") or "干货").strip() or "干货"
-    briefing = build_creator_briefing(field_name, direction, idea, partition_name)
+    briefing = compact_creator_briefing_for_llm(build_creator_briefing(field_name, direction, idea, partition_name))
 
     system_prompt = (
         "You are a Bilibili topic and copywriting assistant. "
@@ -1014,6 +1062,7 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
 def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     llm = LLMClient()
     llm.require_available()
+    compact_snapshot = compact_market_snapshot_for_llm(market_snapshot)
     system_prompt = (
         "你是 B 站视频分析助手。"
         "当前已经拿到后端解析出的真实视频信息和同类样本，请直接完成爆款/低表现判断、原因拆解、优化建议和后续选题。"
@@ -1023,7 +1072,7 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
         "请根据下面的数据直接输出 JSON，对象字段必须包含："
         "resolved, performance, topic_result, optimize_result, copy_result, analysis。\n\n"
         f"当前视频真实信息：{json.dumps(resolved, ensure_ascii=False)}\n\n"
-        f"市场样本：{json.dumps(market_snapshot, ensure_ascii=False)}\n\n"
+        f"市场样本：{json.dumps(compact_snapshot, ensure_ascii=False)}\n\n"
         "要求：\n"
         "1. resolved 直接复用当前视频真实信息，不要改 BV、标题、播放等字段。\n"
         "2. performance 必须包含 label, is_hot, score, reasons, summary。\n"
@@ -1123,7 +1172,7 @@ def api_module_create():
         try:
             return jsonify({"success": True, "data": run_llm_module_create(data)})
         except Exception as exc:
-            return jsonify({"success": False, "error": f"LLM Agent 生成失败：{exc}"}), 500
+            return jsonify({"success": False, "error": f"LLM Agent 生成失败：{format_llm_error(exc)}"}), llm_error_http_status(exc)
 
     seed_topic = build_seed_topic(field_name, direction, idea)
     partition_name = CONFIG.normalize_partition((data.get("partition") or "knowledge").strip() or "knowledge")
@@ -1178,13 +1227,37 @@ def api_module_analyze():
             market_snapshot = build_market_snapshot(resolved.get("partition"), resolved.get("up_ids"))
             return jsonify({"success": True, "data": run_llm_module_analyze(data, resolved, market_snapshot)})
         except Exception as exc:
+            if should_skip_same_provider_fallback(exc):
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": (
+                                f"LLM Agent 分析失败：{format_llm_error(exc)} "
+                                "当前不会继续尝试同 provider 的 fallback，请稍后重试。"
+                            ),
+                        }
+                    ),
+                    llm_error_http_status(exc),
+                )
             try:
                 market_snapshot = build_market_snapshot(resolved.get("partition"), resolved.get("up_ids"))
                 fallback_result = run_llm_module_analyze_fallback(data, resolved, market_snapshot)
-                fallback_result["llm_warning"] = f"Agent 中枢执行失败，已切换到 LLM 直出分析：{exc}"
+                fallback_result["llm_warning"] = f"Agent 中枢执行失败，已切换到 LLM 直出分析：{format_llm_error(exc)}"
                 return jsonify({"success": True, "data": fallback_result})
             except Exception as fallback_exc:
-                return jsonify({"success": False, "error": f"LLM Agent 分析失败：{exc}；LLM fallback 也失败：{fallback_exc}"}), 500
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": (
+                                f"LLM Agent 分析失败：{format_llm_error(exc)}；"
+                                f"LLM fallback 也失败：{format_llm_error(fallback_exc)}"
+                            ),
+                        }
+                    ),
+                    llm_error_http_status(fallback_exc),
+                )
 
     topic_result = run_topic(
         partition_name=resolved.get("partition"),
@@ -1234,7 +1307,7 @@ def api_chat():
         result = run_llm_chat(data)
         return jsonify({"success": True, "data": result})
     except Exception as exc:
-        return jsonify({"success": False, "error": f"智能对话失败：{exc}"}), 500
+        return jsonify({"success": False, "error": f"智能对话失败：{format_llm_error(exc)}"}), llm_error_http_status(exc)
 
 
 @app.post("/api/topic")

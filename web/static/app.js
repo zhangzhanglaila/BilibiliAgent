@@ -11,6 +11,7 @@ const state = {
   introCollapse: 0,
   sceneTicking: false,
   progressJobs: {},
+  activeModule: 'analyze',
   chatPending: false,
   chatTyping: false,
   chatHistory: [],
@@ -101,6 +102,17 @@ function clampPercent(value) {
   return Math.max(0, Math.min(100, Math.round(value || 0)));
 }
 
+function clampProgressValue(value) {
+  return Math.max(0, Math.min(100, Number(value || 0)));
+}
+
+function formatProgressLabel(value) {
+  const safe = clampProgressValue(value);
+  if (safe >= 100) return '100%';
+  if (safe >= 90) return `${safe.toFixed(1)}%`;
+  return `${Math.round(safe)}%`;
+}
+
 function stopProgressJob(key, finalPercent = null) {
   const job = state.progressJobs[key];
   if (!job) return;
@@ -108,7 +120,8 @@ function stopProgressJob(key, finalPercent = null) {
     window.clearInterval(job.timer);
   }
   if (finalPercent !== null && typeof job.onUpdate === 'function') {
-    job.onUpdate(clampPercent(finalPercent));
+    job.percent = clampProgressValue(finalPercent);
+    job.onUpdate(job.percent);
   }
   delete state.progressJobs[key];
 }
@@ -116,8 +129,8 @@ function stopProgressJob(key, finalPercent = null) {
 function startProgressJob(key, onUpdate, options = {}) {
   stopProgressJob(key);
   const job = {
-    percent: clampPercent(options.start ?? 6),
-    max: clampPercent(options.max ?? 94),
+    percent: clampProgressValue(options.start ?? 6),
+    max: clampProgressValue(options.max ?? 99.4),
     onUpdate,
     timer: null,
   };
@@ -128,18 +141,20 @@ function startProgressJob(key, onUpdate, options = {}) {
   }
 
   job.timer = window.setInterval(() => {
-    const step = (options.stepMin ?? 2) + Math.random() * ((options.stepMax ?? 8) - (options.stepMin ?? 2));
+    const remaining = Math.max(0, job.max - job.percent);
+    if (remaining <= 0.02) return;
+    const step = Math.max(options.minStep ?? 0.18, remaining * (options.easeFactor ?? 0.085));
     job.percent = Math.min(job.max, job.percent + step);
     if (typeof onUpdate === 'function') {
-      onUpdate(clampPercent(job.percent));
+      onUpdate(job.percent);
     }
-  }, options.interval ?? 180);
+  }, options.interval ?? 160);
 
   return job;
 }
 
 function getProgressPercent(key, fallback = 0) {
-  return clampPercent(state.progressJobs[key]?.percent ?? fallback);
+  return clampProgressValue(state.progressJobs[key]?.percent ?? fallback);
 }
 
 async function requestJson(url, payload) {
@@ -682,6 +697,22 @@ function scheduleVideoResolve() {
   }, 550);
 }
 
+function setActiveModule(module, options = {}) {
+  const next = module === 'create' ? 'create' : 'analyze';
+  state.activeModule = next;
+  const grid = $('#moduleGrid');
+  if (grid) {
+    grid.dataset.active = next;
+  }
+  $$('[data-module-tab]').forEach(button => {
+    button.classList.toggle('is-active', button.dataset.moduleTab === next);
+  });
+  if (options.focus) {
+    const target = grid?.querySelector(`.module-panel[data-module="${next}"] input, .module-panel[data-module="${next}"] textarea, .module-panel[data-module="${next}"] select`);
+    if (target) target.focus({ preventScroll: true });
+  }
+}
+
 async function runCreatorModule() {
   const payload = {
     field: ($('#creatorField').value || '').trim(),
@@ -842,6 +873,11 @@ function initEvents() {
   $('#videoAnalyzeBtn').addEventListener('click', runAnalyzeModule);
   $('#clearResultsBtn').addEventListener('click', clearResults);
   $('#videoLink').addEventListener('input', scheduleVideoResolve);
+  $$('[data-module-tab]').forEach(button => {
+    button.addEventListener('click', () => {
+      setActiveModule(button.dataset.moduleTab || 'analyze', { focus: true });
+    });
+  });
 
   const assistantInput = $('#assistantMessage');
   autosize(assistantInput);
@@ -880,13 +916,13 @@ function currentProgressPercent(key) {
 }
 
 function loadingCard(title, desc, steps = [], percent = 0) {
-  const safePercent = clampPercent(percent);
+  const safePercent = clampProgressValue(percent);
   const activeIndex = steps.length ? Math.min(steps.length - 1, Math.floor((safePercent / 100) * steps.length)) : -1;
   return `
     <section class="loading-card">
       <div class="block-title">
         <div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div>
-        <span class="type-badge progress-percent">${safePercent}%</span>
+        <span class="type-badge progress-percent">${formatProgressLabel(safePercent)}</span>
       </div>
       <div class="bili-progress"><div class="bili-progress__bar" style="width:${safePercent}%"></div></div>
       ${steps.length ? `<div class="bili-progress__steps">${steps.map((step, i) => `<div class="progress-step ${i < activeIndex ? 'is-done' : ''} ${i === activeIndex ? 'is-active' : ''}"><span class="progress-step__dot"></span><span>${escapeHtml(step)}</span></div>`).join('')}</div>` : ''}
@@ -1095,7 +1131,7 @@ async function sendAssistantMessage(forced = '') {
   updateAssistantButton();
   renderAssistant();
   setStatus('智能助手正在思考', 'loading');
-  startProgressJob('assistant', () => renderAssistant(), { start: 5, max: 96, stepMin: 2, stepMax: 6, interval: 120 });
+  startProgressJob('assistant', () => renderAssistant(), { start: 5, max: 99.5, minStep: 0.2, easeFactor: 0.09, interval: 140 });
 
   try {
     const data = await requestJson('/api/chat', {
@@ -1132,7 +1168,53 @@ async function sendAssistantMessage(forced = '') {
   }
 }
 
+function videoPreview(data, options = {}) {
+  const resolved = data || {};
+  const stats = resolved.stats || {};
+  const loading = Boolean(options.loading);
+  const error = options.error || '';
+  const title = loading ? '正在自动解析视频信息' : error ? '视频链接解析失败' : data ? '已自动解析当前视频信息' : '当前视频信息预览';
+  const note = loading
+    ? '系统正在根据你输入的 B 站视频链接提取标题、分区、UP 主和互动数据。'
+    : error
+      ? error
+      : data
+        ? '这些字段来自当前视频链接的自动解析结果，点击下方按钮会基于这些真实信息继续分析。'
+        : '粘贴视频链接后，这里会自动显示标题、类型、播放、点赞、投币、收藏、评论和分享。';
+  const progress = loading
+    ? (options.progress != null
+      ? options.progress
+      : (currentProgressPercent('analyze') || currentProgressPercent('resolve') || 0))
+    : 0;
+  const hasProgress = progress > 0;
+
+  return `
+    <section class="copy-block">
+      <div class="block-title">
+        <div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(note)}</p></div>
+        <span class="type-badge ${error ? 'type-badge--danger' : ''}">${loading ? '自动解析中' : data ? '已解析' : '待解析'}</span>
+      </div>
+      ${loading ? `<div class="bili-progress"><div class="bili-progress__bar ${hasProgress ? '' : 'bili-progress__bar--indeterminate'}" ${hasProgress ? `style="width:${clampProgressValue(progress)}%"` : ''}></div></div>` : ''}
+      <div class="summary-strip">
+        ${previewCard('视频标题', resolved.title || '', '根据视频链接自动解析当前视频标题')}
+        ${previewCard('视频类型', resolved.partition_label || resolved.partition || '', '根据视频链接自动解析分区和视频类型')}
+        ${previewCard('UP 主', resolved.up_name || '', '根据视频链接自动解析对应 UP 主')}
+        ${previewCard('BV 号', resolved.bv_id || '', '根据视频链接自动解析对应 BV 号')}
+      </div>
+      <div class="summary-strip summary-strip--metrics">
+        ${previewCard('播放量', data ? num(stats.view) : '', '根据视频链接自动解析公开播放量')}
+        ${previewCard('点赞量', data ? num(stats.like) : '', '根据视频链接自动解析公开点赞量')}
+        ${previewCard('投币量', data ? num(stats.coin) : '', '根据视频链接自动解析公开投币量')}
+        ${previewCard('收藏量', data ? num(stats.favorite) : '', '根据视频链接自动解析公开收藏量')}
+        ${previewCard('评论量', data ? num(stats.reply) : '', '根据视频链接自动解析公开评论量')}
+        ${previewCard('分享量', data ? num(stats.share) : '', '根据视频链接自动解析公开分享量')}
+      </div>
+    </section>
+  `;
+}
+
 function init() {
+  setActiveModule(state.activeModule);
   $('#videoPreview').innerHTML = videoPreview(null);
   renderAssistant();
   initEvents();

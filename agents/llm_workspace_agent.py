@@ -35,8 +35,8 @@ class LLMWorkspaceAgent:
         blocks = []
         for index, item in enumerate(scratchpad, start=1):
             observation = json.dumps(item.get("observation", {}), ensure_ascii=False)
-            if len(observation) > 8000:
-                observation = observation[:8000] + "...(truncated)"
+            if len(observation) > 3500:
+                observation = observation[:3500] + "...(truncated)"
             blocks.append(
                 f"第 {index} 步\n"
                 f"action: {item.get('action')}\n"
