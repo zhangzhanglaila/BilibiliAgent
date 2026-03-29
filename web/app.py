@@ -724,42 +724,135 @@ def inspect_title_strength(title: str) -> list[str]:
     return points
 
 
+def uplift_performance_score(raw_score: object, is_hot: bool) -> int:
+    try:
+        value = float(raw_score or 0)
+    except Exception:
+        value = 0.0
+
+    value = max(0.0, value)
+    floor = 82 if is_hot else 50
+
+    # Some chains may still return a coarse 0-5 score.
+    if value <= 5:
+        step = 3 if is_hot else 4
+        return min(96, floor + int(round(value * step)))
+
+    # Some chains return a 0-10 style score.
+    if value <= 10:
+        step = 1.4 if is_hot else 2.0
+        return min(96, floor + int(round(value * step)))
+
+    # If the model already returns a 0-100 score, keep it but allow low-performance videos to stay lower.
+    return min(96, max(floor, int(round(value))))
+
+
+def normalize_performance_payload(performance: object) -> dict:
+    if not isinstance(performance, dict):
+        return {
+            "label": "待判断",
+            "is_hot": False,
+            "score": 50,
+            "reasons": [],
+            "summary": "",
+        }
+
+    is_hot = bool(performance.get("is_hot"))
+    normalized = dict(performance)
+    normalized["score"] = uplift_performance_score(performance.get("score"), is_hot)
+    normalized.setdefault("label", "热门爆款" if is_hot else "播放偏低")
+    normalized.setdefault("reasons", [])
+    normalized.setdefault("summary", "")
+    return normalized
+
+
 def classify_video_performance(resolved: dict) -> dict:
     stats = resolved.get("stats", {})
     view = safe_int(stats.get("view"))
+    favorite = safe_int(stats.get("favorite"))
     like_rate = float(stats.get("like_rate") or 0.0)
     coin_rate = float(stats.get("coin_rate") or 0.0)
     favorite_rate = float(stats.get("favorite_rate") or 0.0)
 
-    score = 0
+    score = 50
     reasons: list[str] = []
 
-    if view >= 100000:
-        score += 2
+    if view >= 500000:
+        score += 18
+        reasons.append(f"当前播放 {view:,}，已经是明显爆款量级。")
+    elif view >= 200000:
+        score += 16
+        reasons.append(f"当前播放 {view:,}，已经具备很强的自然放大能力。")
+    elif view >= 100000:
+        score += 14
         reasons.append(f"当前播放 {view:,}，已经达到明显起量水平。")
-    elif view >= 30000:
-        score += 1
+    elif view >= 50000:
+        score += 11
+        reasons.append(f"当前播放 {view:,}，处于比较健康的流量区间。")
+    elif view >= 20000:
+        score += 8
         reasons.append(f"当前播放 {view:,}，有一定自然流量基础。")
-    else:
-        reasons.append(f"当前播放 {view:,}，仍有明显提升空间。")
-
-    if like_rate >= 0.05:
+    elif view >= 10000:
+        score += 5
+        reasons.append(f"当前播放 {view:,}，已经有基础曝光，但离更大放量还有距离。")
+    elif view >= 3000:
         score += 2
+        reasons.append(f"当前播放 {view:,}，还处于早期验证阶段。")
+    else:
+        reasons.append(f"当前播放 {view:,}，整体曝光偏弱，仍有明显提升空间。")
+
+    if favorite_rate >= 0.03 or favorite >= 5000:
+        score += 16
+        reasons.append(f"收藏 {favorite:,}、收藏率 {favorite_rate:.2%}，说明内容留存价值非常强。")
+    elif favorite_rate >= 0.02 or favorite >= 2000:
+        score += 13
+        reasons.append(f"收藏 {favorite:,}、收藏率 {favorite_rate:.2%}，内容具备较强复用价值。")
+    elif favorite_rate >= 0.012 or favorite >= 800:
+        score += 10
+        reasons.append(f"收藏 {favorite:,}、收藏率 {favorite_rate:.2%}，收藏表现已经不错。")
+    elif favorite_rate >= 0.008 or favorite >= 300:
+        score += 7
+        reasons.append(f"收藏 {favorite:,}、收藏率 {favorite_rate:.2%}，内容开始体现留存价值。")
+    elif favorite_rate >= 0.004 or favorite >= 100:
+        score += 4
+        reasons.append(f"收藏 {favorite:,}、收藏率 {favorite_rate:.2%}，有一定收藏价值，但还不够强。")
+    elif favorite_rate >= 0.002 or favorite >= 30:
+        score += 2
+        reasons.append(f"收藏 {favorite:,}、收藏率 {favorite_rate:.2%}，留存价值偏弱。")
+    else:
+        reasons.append(f"收藏 {favorite:,}、收藏率 {favorite_rate:.2%}，说明内容的留存价值还不够突出。")
+
+    if like_rate >= 0.08:
+        score += 8
+        reasons.append(f"点赞率 {like_rate:.2%}，互动质量很高。")
+    elif like_rate >= 0.05:
+        score += 6
         reasons.append(f"点赞率 {like_rate:.2%}，互动质量较高。")
     elif like_rate >= 0.03:
-        score += 1
+        score += 4
         reasons.append(f"点赞率 {like_rate:.2%}，基本达到可继续放大的水平。")
+    elif like_rate >= 0.015:
+        score += 2
+        reasons.append(f"点赞率 {like_rate:.2%}，基础互动尚可。")
     else:
         reasons.append(f"点赞率 {like_rate:.2%}，说明内容共鸣还不够强。")
 
-    if favorite_rate >= 0.01 or coin_rate >= 0.005:
+    if coin_rate >= 0.008:
+        score += 4
+        reasons.append(f"投币率 {coin_rate:.2%}，用户认可度较高。")
+    elif coin_rate >= 0.005:
+        score += 3
+        reasons.append(f"投币率 {coin_rate:.2%}，有一定深度认可。")
+    elif coin_rate >= 0.002:
         score += 1
-        reasons.append("收藏/投币数据说明内容有一定留存价值。")
+        reasons.append(f"投币率 {coin_rate:.2%}，有少量高意愿互动。")
     else:
-        reasons.append("收藏和投币偏弱，内容的可复用价值还不够突出。")
+        reasons.append(f"投币率 {coin_rate:.2%}，深度认可仍然偏弱。")
 
-    is_hot = score >= 4
-    return {
+    score = min(96, max(50, score))
+    is_hot = score >= 82
+    return normalize_performance_payload(
+        {
         "label": "热门爆款" if is_hot else "播放偏低",
         "is_hot": is_hot,
         "score": score,
@@ -767,7 +860,8 @@ def classify_video_performance(resolved: dict) -> dict:
         "summary": "这条视频更接近热门爆款，可重点拆解它为什么能火。"
         if is_hot
         else "这条视频当前更像播放偏低的视频，优先做针对性优化。",
-    }
+        }
+    )
 
 
 def build_hot_analysis(resolved: dict, performance: dict, topic_result: dict) -> dict:
@@ -1557,6 +1651,7 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
         required_final_keys=["resolved", "performance", "topic_result", "optimize_result", "analysis", "copy_result"],
     )
     result["resolved"] = resolved
+    result["performance"] = normalize_performance_payload(result.get("performance"))
     if result.get("copy_result") is not None:
         copy_topic = (
             clean_copy_text((result.get("copy_result") or {}).get("topic", ""))
@@ -1606,6 +1701,7 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
     if not isinstance(result, dict):
         raise ValueError("LLM fallback 返回格式无效")
     result["resolved"] = resolved
+    result["performance"] = normalize_performance_payload(result.get("performance"))
     if result.get("copy_result") is not None:
         copy_topic = (
             clean_copy_text((result.get("copy_result") or {}).get("topic", ""))

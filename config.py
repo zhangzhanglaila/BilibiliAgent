@@ -43,10 +43,10 @@ PARTITION_ALIASES = {
 class AppConfig:
     request_interval: float = float(os.getenv("REQUEST_INTERVAL", "1.2"))
     db_path: str = os.getenv("DB_PATH", "bilibili_agents.db")
-    llm_provider: str = os.getenv("LLM_PROVIDER", "deepseek")
+    llm_provider: str = os.getenv("LLM_PROVIDER", "openai")
     llm_api_key: str = os.getenv("LLM_API_KEY", "")
-    llm_base_url: str = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
-    llm_model: str = os.getenv("LLM_MODEL", "deepseek-chat")
+    llm_base_url: str = os.getenv("LLM_BASE_URL", "https://zapi.aicc0.com/v1")
+    llm_model: str = os.getenv("LLM_MODEL", "gpt-5.4")
     llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "75"))
     llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
     llm_retry_backoff_seconds: float = float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "1.6"))

@@ -67,6 +67,14 @@ copy .env.example .env
 cp .env.example .env
 ```
 
+```env
+# edit D:\agent\.env
+LLM_PROVIDER=openai
+LLM_API_KEY=your-real-key
+LLM_BASE_URL=https://zapi.aicc0.com/v1
+LLM_MODEL=gpt-5.4
+```
+
 可选配置：
 
 - `LLM_API_KEY`
