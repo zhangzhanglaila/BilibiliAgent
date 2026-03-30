@@ -319,9 +319,7 @@ def normalize_copy_result_payload(copy_result: object, topic: str, style: str) -
     if not isinstance(copy_result, dict):
         return fallback
 
-    titles_raw = copy_result.get("titles")
-    titles = [clean_copy_text(item) for item in titles_raw] if isinstance(titles_raw, list) else []
-    titles = [item for item in titles if item][:3] or fallback["titles"]
+    titles = RAW_COPY_AGENT._normalize_titles(copy_result.get("titles"), fallback["titles"])
 
     script_raw = copy_result.get("script")
     script: list[dict] = []
@@ -1942,7 +1940,8 @@ def run_llm_module_create_fallback(data: dict) -> dict:
         "2. chosen_topic must be concrete and natural, not generic template wording.\n"
         "3. topic_result.ideas must contain 3 items, each with topic, reason, video_type, keywords.\n"
         "4. copy_result must include topic, style, titles(3), script(at least 4 sections with section/duration/content), description, tags, pinned_comment.\n"
-        "5. Avoid repetitive phrases like a universal '高效做法' template unless the topic really demands it."
+        "5. copy_result.titles must be narrative, statement-style Bilibili titles with a natural vlog / daily-record feeling when the topic fits; no question titles, no teaching tone.\n"
+        "6. Avoid repetitive phrases like a universal '高效做法' template unless the topic really demands it."
     )
     result = llm.invoke_json_required(system_prompt, user_prompt)
     if not isinstance(result, dict):
@@ -1968,7 +1967,7 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
         "- performance: 对象，包含 label, is_hot, score, reasons, summary\n"
         "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords\n"
         "- optimize_result: 对象，包含 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions\n"
-        "- copy_result: 对象或 null；如果你判断视频表现偏低，则必须返回一套新的标题/脚本/简介/标签/置顶评论\n"
+        "- copy_result: 对象或 null；如果你判断视频表现偏低，则必须返回一套新的标题/脚本/简介/标签/置顶评论，其中 titles 要用陈述型、叙事型、生活化表达，不要提问句和教学口吻\n"
         "- analysis: 对象，包含 analysis_points，并根据判断补充 followup_topics 或 next_topics、title_suggestions、cover_suggestion、content_suggestions\n"
     )
     result = agent.run_structured(
@@ -2029,7 +2028,8 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
         "3. topic_result.ideas 输出 3 个后续选题，每项包含 topic, reason, video_type, keywords。\n"
         "4. optimize_result 输出 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions。\n"
         "5. 如果你判断 is_hot=true，则 copy_result 返回 null，analysis 重点输出 analysis_points 和 followup_topics。\n"
-        "6. 如果你判断 is_hot=false，则 copy_result 必须输出一版新文案，analysis 重点输出 analysis_points, next_topics, title_suggestions, cover_suggestion, content_suggestions。"
+        "6. 如果你判断 is_hot=false，则 copy_result 必须输出一版新文案，analysis 重点输出 analysis_points, next_topics, title_suggestions, cover_suggestion, content_suggestions。\n"
+        "7. copy_result.titles 必须是陈述型、叙事型、生活化标题，不要提问句，不要教学口吻，不要出现“为什么 / 怎么 / 哪种 / 更容易起量 / 更容易进推荐”这类模板。"
     )
     result = llm.invoke_json_required(system_prompt, user_prompt)
     if not isinstance(result, dict):

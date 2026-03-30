@@ -98,59 +98,202 @@ class CopywritingAgent:
             keywords.append(word)
         return keywords[:6]
 
+    # 把偏策略/提问口吻的主题整理成更适合标题表达的生活化主体。
+    def _title_subject(self, topic: str) -> str:
+        base = self._content_subject(self._extract_subject(topic))
+        if not base or base == "这类内容":
+            base = self._clean_text(topic)
+
+        patterns = [
+            r"第一条(?:视频)?",
+            r"第[1一二三123]+条",
+            r"做成系列内容时",
+            r"做系列内容时",
+            r"别一上来就",
+            r"先(?:做|拍|跳)什么",
+            r"更容易(?:起量|进推荐|被推荐)",
+            r"怎么(?:拍|做|设计)?",
+            r"如何",
+            r"为什么",
+            r"起号",
+            r"切口",
+            r"开场动作",
+            r"前三秒",
+            r"镜头顺序",
+            r"内容顺序",
+            r"结构设计",
+            r"教程",
+            r"攻略",
+        ]
+        for pattern in patterns:
+            base = re.sub(pattern, " ", base, flags=re.IGNORECASE)
+        base = re.sub(r"(视频|内容|账号)$", "", base)
+        base = self._clean_text(base)
+        if base in {"这类", "这类内容"}:
+            return ""
+        return base
+
+    # 判断主题是否更接近日常记录 / 生活区 vlog 的表达场景。
+    def _is_life_record_topic(self, topic: str) -> bool:
+        text = f"{self._clean_text(topic)} {self._title_subject(topic)}".lower()
+        return any(
+            token in text
+            for token in [
+                "异地恋",
+                "报备",
+                "情侣",
+                "恋爱",
+                "日常",
+                "生活",
+                "vlog",
+                "记录",
+                "通勤",
+                "下班",
+                "回家",
+                "碎碎念",
+            ]
+        )
+
+    # 判断标题是否仍然落回了提问式 / 教学式模板。
+    def _is_bad_title(self, title: str) -> bool:
+        clean = self._clean_text(title)
+        if not clean:
+            return True
+        if "?" in clean or "？" in clean or clean.endswith(("吗", "呢")):
+            return True
+        if any(clean.startswith(prefix) for prefix in ["别直接", "别一上来就"]):
+            return True
+        if any(
+            token in clean
+            for token in [
+                "为什么",
+                "如何",
+                "怎么",
+                "哪种",
+                "哪类",
+                "该怎么",
+                "先做什么",
+                "先拍什么",
+                "先跳什么",
+                "更容易起量",
+                "更容易进推荐",
+                "更容易被推荐",
+                "先做哪种切口",
+                "教程",
+                "攻略",
+                "教你",
+            ]
+        ):
+            return True
+        return False
+
+    # 统一清洗标题列表；如果模型结果仍然模板化，则自动用规则标题补齐。
+    def _normalize_titles(self, raw_titles: object, fallback_titles: List[str]) -> List[str]:
+        values = raw_titles if isinstance(raw_titles, list) else []
+        result: List[str] = []
+        for item in values:
+            clean = self._clean_text(str(item))
+            if self._is_bad_title(clean) or clean in result:
+                continue
+            result.append(clean)
+
+        for item in fallback_titles:
+            clean = self._clean_text(item)
+            if not clean or clean in result:
+                continue
+            result.append(clean)
+            if len(result) >= 3:
+                break
+        return result[:3] or fallback_titles
+
+    # 生成更像生活区 vlog 的日常记录标题。
+    def _build_life_record_titles(self, topic: str, subject: str) -> List[str]:
+        text = f"{self._clean_text(topic)} {subject}"
+        if "异地恋" in text and "报备" in text:
+            return [
+                "异地恋报备日常，从早安到晚安都想慢慢告诉你",
+                "今天也在认真报备，吃饭下班回家路上都没落下",
+                "把异地恋过成普通日常，琐碎小事也想第一时间分享",
+            ]
+        if "异地恋" in text:
+            return [
+                "异地恋的一天，从早安电话到晚安视频都记下来了",
+                "隔着屏幕过日常，今天的碎碎念也想慢慢分享",
+                "异地恋日常存档，吃饭下班回家路上都在认真联系",
+            ]
+        if "报备" in text:
+            return [
+                "今天也在认真报备，把一天里的小事都慢慢说完",
+                "报备式日常记录，吃饭下班回家路上都想告诉你",
+                "把琐碎日常发给重要的人，这一天也被认真记住了",
+            ]
+
+        base = subject if subject and subject != "这类内容" else "日常"
+        if base.endswith("日常"):
+            return [
+                f"{base}存档，把今天从头到尾慢慢记下来",
+                f"围着{base}过的一天，琐碎小事也想认真分享",
+                f"今天的{base}小记录，轻轻松松把状态都留住",
+            ]
+        return [
+            f"{base}日常记录，把今天从头到尾慢慢拍下来",
+            f"围着{base}过的一天，琐碎流程也想认真分享",
+            f"今天的{base}小存档，顺手把真实状态都留住",
+        ]
+
     # 按主题模式和风格生成多组可直接使用的标题。
     def _build_titles(self, topic: str, style: str) -> List[str]:
         mode = self._topic_mode(topic)
         subject = self._extract_subject(topic)
-        account_subject = self._account_subject(subject)
         content_subject = self._content_subject(subject)
+        title_subject = self._title_subject(topic)
+        default_subjects = {
+            "dance_first_video": "第一条内容",
+            "opening_hook": "开场",
+            "series_plan": "这个系列",
+            "first_video": "第一条内容",
+            "general": "这条内容",
+        }
+        base_subject = title_subject or default_subjects.get(mode, "这条内容")
+
+        if self._is_life_record_topic(topic):
+            life_subject = title_subject or (content_subject if content_subject and content_subject != "这类内容" else "日常")
+            return self._build_life_record_titles(topic, life_subject)
 
         if mode == "dance_first_video":
             return [
-                f"想做{account_subject}，第一条先跳什么才更容易进推荐",
-                f"别一上来就上难度，{account_subject}第一条先跳这几类动作",
-                f"同样是{content_subject}，为什么这种开场更容易被看完",
+                f"第一次认真拍{base_subject}，先从最顺手的那段开始",
+                f"把{base_subject}的第一条慢慢顺下来，动作和镜头都轻一点",
+                f"今天先把{base_subject}的第一条拍出来，简单一点反而更舒服",
             ]
         if mode == "opening_hook":
             return [
-                f"{account_subject}别一上来就硬跳，这种开场动作更容易进推荐",
-                f"3 秒先留人再发力：{content_subject}开场该怎么设计",
-                f"做{content_subject}最容易掉播放的，不是动作难度，是开场顺序",
+                f"把{base_subject}的开场重新顺了一遍，前三秒终于不空了",
+                f"今天只改{base_subject}的开头，整条节奏一下子顺了很多",
+                f"这次先把{base_subject}前几秒拍稳，后面看起来也自然多了",
             ]
         if mode == "series_plan":
             return [
-                f"{account_subject}做系列别乱发，第1条到第3条这样排更容易起量",
-                f"想把{content_subject}做成系列，先把前三条内容顺序定好",
-                f"{content_subject}连续发三条时，每一条分别承担什么作用",
+                f"把{base_subject}当成系列慢慢发，前三条先这样记下来",
+                f"今天顺了{base_subject}的前三条内容，节奏终于没那么乱了",
+                f"先把{base_subject}的系列起步排清楚，后面拍起来轻松很多",
             ]
         if mode == "first_video":
+            if base_subject == "第一条内容":
+                return [
+                    "第一次认真发第一条内容，这条就当作起步记录",
+                    "新号开更的第一天，先把第一条稳稳顺下来",
+                    "先把这次起步完整拍下来，轻一点的版本反而更自然",
+                ]
             return [
-                f"新号做{content_subject}，第一条先拍什么更容易拿到推荐",
-                f"别直接上最难的，{content_subject}第一条先做这个切口",
-                f"想把{content_subject}做起来，第一条视频先解决这件事",
-            ]
-        if style == "教学":
-            return [
-                f"{content_subject}新手第一条该怎么拍，顺序我给你排好了",
-                f"想做{content_subject}，先按这个结构拍，试错成本最低",
-                f"{content_subject}别乱开题，先从最容易验证的一条开始",
-            ]
-        if style == "搞笑":
-            return [
-                f"{content_subject}别上来就自嗨，这种拍法更容易被看完",
-                f"同样是做{content_subject}，为什么有人一发就有量",
-                f"{content_subject}第一条别硬冲，这种切口更容易出效果",
-            ]
-        if style == "混剪":
-            return [
-                f"{content_subject}第一条怎么剪，前三秒高能位要这样放",
-                f"想做{content_subject}混剪，先把镜头顺序排对",
-                f"{content_subject}为什么总留不住人，问题通常出在第一屏",
+                f"第一次认真做{base_subject}，这条就当作起步记录",
+                f"新号开始拍{base_subject}，先把第一条稳稳顺下来",
+                f"把{base_subject}的第一条从头到尾捋顺，这次先发轻一点的版本",
             ]
         return [
-            f"{content_subject}先做哪种切口，更容易被推荐",
-            f"同样是{content_subject}，这类表达为什么更容易起量",
-            f"{content_subject}想做成系列，先从这一条开始",
+            f"这次把{base_subject}从头到尾顺了一遍，整条节奏舒服多了",
+            f"围着{base_subject}忙了一天，流程和细节都慢慢补齐了",
+            f"今天先把{base_subject}这件事认真做完，过程也顺手记下来了",
         ]
 
     # 按主题模式生成分段脚本结构。
@@ -338,11 +481,7 @@ class CopywritingAgent:
 
     # 从模型结果里挑出可用标题，失败时回退到本地兜底标题。
     def _pick_titles(self, data: Dict[str, Any], fallback: CopywritingResult) -> List[str]:
-        raw = data.get("titles")
-        if not isinstance(raw, list):
-            return fallback.titles
-        values = [self._clean_text(str(item)) for item in raw if self._clean_text(str(item))]
-        return values[:3] or fallback.titles
+        return self._normalize_titles(data.get("titles"), fallback.titles)
 
     # 从模型结果里挑出可用脚本段落，失败时回退到本地兜底脚本。
     def _pick_script(self, data: Dict[str, Any], fallback: CopywritingResult) -> List[Dict[str, str]]:
@@ -399,6 +538,8 @@ class CopywritingAgent:
             f"风格：{style}\n"
             f"风格要求：{STYLE_GUIDE.get(style, STYLE_GUIDE['干货'])}\n"
             "请基于创作者场景生成自然、可直接口播和发布的 JSON，避免复读输入词，避免机械使用“高效做法”等空泛表述。"
+            "其中 titles 必须是 3 个生活化、叙事感、陈述型的 B 站标题，像真实 vlog / 日常记录会使用的标题；"
+            "不要提问句，不要教学口吻，不要出现“为什么 / 怎么 / 如何 / 哪种 / 先做什么 / 更容易起量 / 更容易进推荐”这类模板化表达。"
             "字段为 titles(3个标题), script(数组，每项包含section/duration/content), "
             "description, tags(10-15个), pinned_comment。"
         )
