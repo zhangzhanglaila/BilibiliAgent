@@ -595,12 +595,21 @@ def extract_creator_keywords(text: str, strict: bool = False) -> list[str]:
     return keywords
 
 
+def clean_creator_keyword(keyword: str) -> str:
+    clean = normalize_creator_text(keyword)
+    clean = re.sub(r"^[的地得把被让跟与和在从向给将]+", "", clean)
+    clean = re.sub(r"^(一段|一处|一个|一条|一种|一版|新的|固定更新的)", "", clean)
+    clean = re.sub(r"(里面|当中|相关|这种|这一条|这条)$", "", clean)
+    return normalize_creator_text(clean)
+
+
 def merge_creator_keywords(*groups: list[str]) -> list[str]:
     merged: list[str] = []
     for group in groups:
         for keyword in group:
-            if keyword and keyword not in merged:
-                merged.append(keyword)
+            clean = clean_creator_keyword(keyword)
+            if clean and clean not in merged:
+                merged.append(clean)
     pruned: list[str] = []
     for keyword in merged:
         if any(existing != keyword and existing in keyword for existing in pruned):
@@ -612,6 +621,31 @@ def merge_creator_keywords(*groups: list[str]) -> list[str]:
 
 def build_creator_context_keywords(*texts: str) -> list[str]:
     return merge_creator_keywords(*[extract_creator_keywords(text) for text in texts if text])[:8]
+
+
+def infer_creator_topic_focus(topic: str) -> str:
+    text = normalize_creator_text(topic)
+    if any(token in text for token in ["拆成", "三条", "三段", "连续", "固定更新", "系列"]):
+        return "series"
+    if any(token in text for token in ["细节", "小事", "瞬间", "情绪", "共鸣"]):
+        return "detail"
+    if any(token in text for token in ["日常", "片段", "一段", "记录"]):
+        return "scene"
+    if any(token in text for token in ["对比", "前后", "变化"]):
+        return "contrast"
+    return "general"
+
+
+def select_creator_topic_cue(topic: str) -> str:
+    focus = infer_creator_topic_focus(topic)
+    mapping = {
+        "series": "连续更新",
+        "detail": "细节放大",
+        "scene": "日常片段",
+        "contrast": "前后对比",
+        "general": "具体场景",
+    }
+    return mapping.get(focus, "具体场景")
 
 
 def keyword_matches_creator_context(keyword: str, context_keywords: list[str]) -> bool:
@@ -665,19 +699,36 @@ def collect_creator_trending_keywords(
 
 # 为创作者选题结果生成一段“为什么推荐这个方向”的解释。
 def build_creator_reason(
-    question_topic: str,
+    topic: str,
     partition_name: str,
     source_count: int,
     trending_keywords: list[str],
     angle_label: str,
+    index: int = 0,
 ) -> str:
     partition_label = PARTITION_LABELS.get(partition_name, partition_name)
     keyword_text = "、".join(trending_keywords[:3]) if trending_keywords else "开场反差、结果感、互动点"
-    return (
-        f"结合当前{partition_label}分区的 {source_count} 条热点/样本数据，近期更容易起量的结构集中在「{keyword_text}」。"
-        f"这条选题先解决“{question_topic}”这个具体问题，更适合拿来做第一轮测试；"
-        f"表达重点建议放在 {angle_label}。"
-    )
+    focus = infer_creator_topic_focus(topic)
+    lead_templates = [
+        f"从当前{partition_label}分区的 {source_count} 条热点 / 样本看，「{keyword_text}」这类结构最近更容易把人留住。",
+        f"这一批{partition_label}题材里，跑得更好的内容大多都带着「{keyword_text}」这类表达特征。",
+        f"按当前{partition_label}分区样本回看，观众更容易停留在「{keyword_text}」这种信息组织方式上。",
+    ]
+    focus_lines = {
+        "scene": f"这一条适合先抓一个最容易代入的生活片段，把场景立住，比一上来讲完整关系更顺。",
+        "series": f"这一条更适合拆成连续更新，先用第一条把核心场景立住，后面再补变化和互动。",
+        "detail": f"这一条重点不在铺大逻辑，而是把一个会被反复提起的小细节单独放大。",
+        "contrast": f"这一条更适合把变化感直接摆出来，让观众一眼看到前后差异。",
+        "general": f"这一条先把一个最具体的场景讲透，会比大而泛的总结更容易起步。",
+    }
+    angle_templates = [
+        f"表达上先往「{angle_label}」去组织，会比平铺直叙更容易测出反馈。",
+        f"第一轮测试建议把重点压在「{angle_label}」这层，不用一次塞太多信息。",
+        f"如果先做规则模式测试，这条更建议往「{angle_label}」这个方向去落。",
+    ]
+    lead = lead_templates[index % len(lead_templates)]
+    angle = angle_templates[index % len(angle_templates)]
+    return f"{lead}{focus_lines.get(focus, focus_lines['general'])}{angle}"
 
 
 # 把基础选题结果改写成更贴近创作者输入语境的结果结构。
@@ -720,17 +771,17 @@ def build_creator_topic_result(
     for index, raw_idea in enumerate(raw_ideas[:3]):
         topic = normalize_creator_text(str(raw_idea.get("topic") or "")) or question_topic
         angle_label = angle_labels[index % len(angle_labels)]
-        topic_keywords = extract_creator_keywords(topic)
+        topic_cue = select_creator_topic_cue(topic)
         idea_keywords = merge_creator_keywords(
-            context_keywords[:3],
-            topic_keywords[:2],
-            trending_keywords[:2],
+            context_keywords[:2],
+            [topic_cue],
+            trending_keywords[:1],
             [angle_label],
-        )[:6]
+        )[:5]
         ideas.append(
             {
                 "topic": topic,
-                "reason": build_creator_reason(topic, normalized_partition, source_count, trending_keywords, angle_label),
+                "reason": build_creator_reason(topic, normalized_partition, source_count, trending_keywords, angle_label, index),
                 "video_type": raw_idea.get("video_type") or style or "干货",
                 "keywords": idea_keywords,
                 "score": float(raw_idea.get("score") or (100 - index * 3)),
@@ -1746,6 +1797,7 @@ def select_reference_videos(
                     "author": item.get("author", ""),
                     "cover": item.get("cover", ""),
                     "view": safe_int(item.get("view")),
+                    "like": safe_int(item.get("like")),
                     "like_rate": float(item.get("like_rate") or 0.0),
                     "source": item.get("source", ""),
                 }

@@ -516,7 +516,7 @@ function referenceGrid(items = [], compact = false) {
         <div class="reference-card__body">
           <h4>${escapeHtml(title)}</h4>
           <p>${escapeHtml(item.author || '未知 UP')}</p>
-          <div class="reference-card__meta"><span>播放 ${num(item.view)}</span><span>点赞率 ${pct(item.like_rate)}</span></div>
+          <div class="reference-card__meta"><span>播放 ${num(item.view)}</span><span>点赞 ${item.like ? num(item.like) : '暂缺'}</span></div>
         </div>
       </a>
     `;
