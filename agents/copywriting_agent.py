@@ -25,8 +25,8 @@ STYLE_ENDING = {
 
 class CopywritingAgent:
     # 初始化文案 Agent，并准备可选的 LLM 增强能力。
-    def __init__(self) -> None:
-        self.llm = LLMClient()
+    def __init__(self, llm_client: LLMClient | None = None) -> None:
+        self.llm = llm_client or LLMClient()
 
     # 规则模板和 LLM 输出都走同一套清洗逻辑，避免前端拿到两种风格完全不同的脏数据。
     def _clean_text(self, text: str) -> str:

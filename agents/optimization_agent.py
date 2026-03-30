@@ -13,9 +13,9 @@ from models import OptimizationSuggestion, VideoMetrics
 
 class OptimizationAgent:
     # 初始化优化 Agent，准备持久化快照的存储层和可选的 LLM 增强能力。
-    def __init__(self, store: SQLiteStore | None = None) -> None:
+    def __init__(self, store: SQLiteStore | None = None, llm_client: LLMClient | None = None) -> None:
         self.store = store or SQLiteStore()
-        self.llm = LLMClient()
+        self.llm = llm_client or LLMClient()
 
     # 用公开互动数据估算一个近似完播率，供规则诊断和优化建议参考。
     def _estimate_completion_rate(self, duration: int, view: int, like: int, coin: int, favorite: int) -> float:

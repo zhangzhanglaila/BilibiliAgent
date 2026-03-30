@@ -19,10 +19,12 @@ from bilibili_api import sync, video
 
 from agents.copywriting_agent import CopywritingAgent
 from agents.llm_workspace_agent import AgentTool, LLMWorkspaceAgent
+from agents.optimization_agent import OptimizationAgent
 from agents.topic_agent import TopicAgent
 from config import CONFIG
 from llm_client import LLMClient, format_llm_error, llm_error_http_status, should_skip_same_provider_fallback
 from main import run_copy, run_operate, run_optimize, run_pipeline, run_topic
+from models import to_plain_data
 
 app = Flask(
     __name__,
@@ -173,6 +175,21 @@ def build_runtime_llm_client_kwargs() -> dict:
 def build_runtime_llm_client() -> LLMClient:
     kwargs = build_runtime_llm_client_kwargs()
     return LLMClient(**kwargs) if kwargs else LLMClient(api_key="", base_url="", model=(CONFIG.llm_model or "gpt-5.4"))
+
+
+# 构造一个明确禁用模型请求的 LLMClient，供规则模式里的纯规则分支使用。
+def build_disabled_llm_client() -> LLMClient:
+    return LLMClient(api_key="", base_url="", model=(CONFIG.llm_model or "gpt-5.4"))
+
+
+# 构造规则模式专用的文案 Agent，确保不会因为 .env 里有 Key 就触发 LLM。
+def build_rule_copy_agent() -> CopywritingAgent:
+    return CopywritingAgent(llm_client=build_disabled_llm_client())
+
+
+# 构造规则模式专用的优化 Agent，确保优化建议只走规则逻辑。
+def build_rule_optimization_agent() -> OptimizationAgent:
+    return OptimizationAgent(llm_client=build_disabled_llm_client())
 
 
 # 校验并清洗前端提交的运行时 LLM 配置。
@@ -2100,7 +2117,7 @@ def api_module_create():
         base_topic_result=raw_topic_result,
     )
     chosen_topic = (topic_result.get("ideas") or [{}])[0].get("topic") or seed_topic
-    copy_result = run_copy(topic=chosen_topic, style=style)
+    copy_result = to_plain_data(build_rule_copy_agent().run(topic=chosen_topic, style=style))
 
     return jsonify(
         {
@@ -2173,15 +2190,21 @@ def api_module_analyze():
         up_ids=resolved.get("up_ids"),
         seed_topic=resolved.get("topic"),
     )
-    optimize_result = run_optimize(resolved.get("bv_id", "BV1Demo411111"))
     performance = classify_video_performance(resolved)
 
     copy_result = None
+    optimize_result: dict = {}
     analysis = {}
     if performance["is_hot"]:
         analysis = build_hot_analysis(resolved, performance, topic_result)
     else:
-        copy_result = run_copy(topic=resolved.get("topic") or resolved.get("title") or "视频优化", style=resolved.get("style", "干货"))
+        optimize_result = to_plain_data(build_rule_optimization_agent().run(resolved.get("bv_id", "BV1Demo411111")))
+        copy_result = to_plain_data(
+            build_rule_copy_agent().run(
+                topic=resolved.get("topic") or resolved.get("title") or "视频优化",
+                style=resolved.get("style", "干货"),
+            )
+        )
         analysis = build_low_performance_analysis(resolved, performance, optimize_result, topic_result)
 
     reference_videos = select_reference_videos(
