@@ -16,11 +16,13 @@ class AgentTool:
 
 
 class LLMWorkspaceAgent:
-    def __init__(self, tools: Sequence[AgentTool], max_steps: int = 4) -> None:
-        self.llm = LLMClient()
+    # 初始化受控 Agent 运行时，注册工具并设置最大推理步数。
+    def __init__(self, tools: Sequence[AgentTool], max_steps: int = 4, llm_client: LLMClient | None = None) -> None:
+        self.llm = llm_client or LLMClient()
         self.tools = {tool.name: tool for tool in tools}
         self.max_steps = max_steps
 
+    # 把允许使用的工具列表渲染成提示词里的工具说明块。
     def _tool_block(self, allowed_tools: Sequence[str]) -> str:
         lines = []
         for name in allowed_tools:
@@ -28,6 +30,7 @@ class LLMWorkspaceAgent:
             lines.append(f"- {tool.name}: {tool.description}")
         return "\n".join(lines)
 
+    # 把历史工具调用记录整理成提示词，供模型基于已有观察继续决策。
     def _scratchpad_block(self, scratchpad: List[Dict[str, Any]]) -> str:
         if not scratchpad:
             return "暂无工具调用记录。"
@@ -45,6 +48,7 @@ class LLMWorkspaceAgent:
             )
         return "\n\n".join(blocks)
 
+    # 校验最终结果里是否包含调用方要求的关键字段。
     def _validate_final(self, final: Dict[str, Any], required_final_keys: Sequence[str]) -> List[str]:
         missing = []
         for key in required_final_keys:
@@ -52,6 +56,7 @@ class LLMWorkspaceAgent:
                 missing.append(key)
         return missing
 
+    # 运行受限的工具调用循环，直到模型给出合法最终结果或步数耗尽。
     def run_structured(
         self,
         *,
@@ -83,6 +88,8 @@ class LLMWorkspaceAgent:
             "你可以多步调用工具；当信息足够时，再输出最终 JSON。"
         )
 
+        # 整个 Agent 只允许在“调工具”或“给最终结果”之间有限次循环，方便排查问题，
+        # 也避免模型在开放式推理里越跑越偏。
         for _ in range(limit):
             user_prompt = (
                 f"任务名称：{task_name}\n"
@@ -142,6 +149,7 @@ class LLMWorkspaceAgent:
                     )
                     continue
 
+                # 把执行轨迹带回去，前端或排障时可以看到这次回答到底用了哪些工具。
                 final.setdefault("agent_trace", used_tools)
                 final.setdefault("tool_observations", scratchpad)
                 final.setdefault("runtime_mode", "llm_agent")

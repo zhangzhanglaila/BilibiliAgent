@@ -1,5 +1,6 @@
 const MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 1 1-6 0V6a3 3 0 0 1 3-3z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>';
 const SEND_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4 20-7Z"></path></svg>';
+const INITIAL_RUNTIME = window.__INITIAL_RUNTIME__ || {};
 
 const state = {
   videoResolved: null,
@@ -16,22 +17,33 @@ const state = {
   chatTyping: false,
   chatHistory: [],
   runtime: {
-    mode: 'rules',
-    llmEnabled: false,
-    chatAvailable: false,
-    modeLabel: '规则模式',
-    modeTitle: '当前运行中：规则模式',
-    modeDescription: '',
-    tokenPolicy: '',
-    switchHint: '',
+    mode: INITIAL_RUNTIME.mode || 'rules',
+    llmEnabled: Boolean(INITIAL_RUNTIME.llm_enabled),
+    chatAvailable: Boolean(INITIAL_RUNTIME.chat_available),
+    switchChecked: Boolean(INITIAL_RUNTIME.switch_checked),
+    hasSavedConfig: Boolean(INITIAL_RUNTIME.has_saved_llm_config),
+    savedConfigSource: INITIAL_RUNTIME.saved_config_source || '',
+    savedProvider: INITIAL_RUNTIME.saved_provider || '',
+    savedModel: INITIAL_RUNTIME.saved_model || '',
+    savedBaseUrl: INITIAL_RUNTIME.saved_base_url || '',
+    savedApiKeyMasked: INITIAL_RUNTIME.saved_api_key_masked || '',
+    requiresConfig: Boolean(INITIAL_RUNTIME.requires_config),
+    modeLabel: INITIAL_RUNTIME.mode_label || '无 Key 逻辑模式',
+    modeTitle: INITIAL_RUNTIME.mode_title || '当前运行中：无 Key 逻辑模式',
+    modeDescription: INITIAL_RUNTIME.mode_description || '',
+    tokenPolicy: INITIAL_RUNTIME.token_policy || '',
+    switchHint: INITIAL_RUNTIME.switch_hint || '',
   },
   recognition: null,
   isListening: false,
 };
 
+// 读取单个匹配选择器的 DOM 节点。
 const $ = selector => document.querySelector(selector);
+// 读取所有匹配选择器的 DOM 节点并转成数组。
 const $$ = selector => Array.from(document.querySelectorAll(selector));
 
+// 转义 HTML 特殊字符，避免把用户内容直接插进页面时产生注入问题。
 function escapeHtml(value) {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -41,19 +53,23 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+// 把纯文本转换成适合富文本区域展示的 HTML。
 function rich(value) {
   return escapeHtml(value || '').replace(/\n/g, '<br>');
 }
 
+// 把数字格式化成中文环境下更易读的展示文本。
 function num(value) {
   const n = Number(value || 0);
   return Number.isFinite(n) ? n.toLocaleString('zh-CN') : '0';
 }
 
+// 把比例值格式化成百分比字符串。
 function pct(value) {
   return `${(Number(value || 0) * 100).toFixed(2)}%`;
 }
 
+// 统一处理封面 URL，补齐协议并修正 http 地址。
 function coverUrl(url) {
   const v = String(url || '').trim();
   if (!v) return '';
@@ -65,6 +81,7 @@ function coverUrl(url) {
 const COVER_RETRY_LIMIT = 2;
 const COVER_RETRY_BASE_DELAY_MS = 900;
 
+// 生成封面区域的 HTML，包括加载态和失败兜底态。
 function renderCoverMedia(url, title, variant = 'card') {
   const safeUrl = coverUrl(url);
   const safeTitle = title || '视频封面';
@@ -85,6 +102,7 @@ function renderCoverMedia(url, title, variant = 'card') {
   `;
 }
 
+// 为封面重试请求拼一个带时间戳的地址，尽量绕开缓存失败。
 function coverRetrySrc(src, attempt) {
   if (!src) return '';
   try {
@@ -97,6 +115,7 @@ function coverRetrySrc(src, attempt) {
   }
 }
 
+// 切换封面组件的加载、成功和失败状态。
 function setCoverFrameState(frame, nextState) {
   if (!frame) return;
   const loader = frame.querySelector('[data-cover-loader]');
@@ -121,6 +140,7 @@ function setCoverFrameState(frame, nextState) {
   }
 }
 
+// 在封面彻底加载失败时切到兜底展示。
 function finalizeCoverFallback(frame, img) {
   if (img) {
     img.hidden = true;
@@ -130,6 +150,7 @@ function finalizeCoverFallback(frame, img) {
   setCoverFrameState(frame, 'fallback');
 }
 
+// 按退避节奏安排封面图片重试加载。
 function scheduleCoverRetry(img, frame) {
   const retries = Number(img?.dataset.retryCount || 0);
   if (!img || !frame) return;
@@ -153,6 +174,7 @@ function scheduleCoverRetry(img, frame) {
   }, retryDelay);
 }
 
+// 给单张封面图片绑定加载成功和失败处理逻辑。
 function bindCoverImage(img) {
   if (!img || img.dataset.coverBound === '1') return;
   img.dataset.coverBound = '1';
@@ -185,6 +207,7 @@ function bindCoverImage(img) {
   }
 }
 
+// 在指定范围内批量绑定封面媒体组件。
 function bindCoverMedia(scope = document) {
   const root = scope && typeof scope.querySelectorAll === 'function' ? scope : document;
   if (root.matches && root.matches('[data-cover-image]')) {
@@ -208,6 +231,7 @@ function bindCoverMedia(scope = document) {
   });
 }
 
+// 初始化全局封面媒体监听，处理后续动态插入的图片节点。
 function initCoverMedia() {
   bindCoverMedia(document);
   if (state.coverObserver) {
@@ -230,6 +254,7 @@ function initCoverMedia() {
   state.coverObserver.observe(document.body, { childList: true, subtree: true });
 }
 
+// 更新页面顶部的全局状态提示。
 function setStatus(text, type = 'idle') {
   const pill = $('#globalStatusPill');
   if (!pill) return;
@@ -241,6 +266,7 @@ function setStatus(text, type = 'idle') {
   $('#currentModeText').textContent = text;
 }
 
+// 在页面右下角弹出短暂提示消息。
 function showToast(title, message, type = 'success') {
   const stack = $('#toastStack');
   if (!stack) return;
@@ -251,6 +277,7 @@ function showToast(title, message, type = 'success') {
   setTimeout(() => node.remove(), 2800);
 }
 
+// 切换按钮的 loading 状态和禁用态。
 function setButtonLoading(id, loading) {
   const button = document.getElementById(id);
   if (!button) return;
@@ -258,30 +285,36 @@ function setButtonLoading(id, loading) {
   button.classList.toggle('is-loading', loading);
 }
 
+// 根据内容自动调整文本框高度。
 function autosize(el) {
   if (!el) return;
   el.style.height = 'auto';
   el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
 }
 
+// 返回一个指定时长后完成的 Promise。
 function sleep(ms) {
   return new Promise(resolve => window.setTimeout(resolve, ms));
 }
 
+// 把百分比值限制在 0 到 100 之间。
 function clampPercent(value) {
   return Math.max(0, Math.min(100, Math.round(value || 0)));
 }
 
+// 把进度值限制在 0 到 100 之间并转成数字。
 function clampProgressValue(value) {
   return Math.max(0, Math.min(100, Number(value || 0)));
 }
 
+// 把进度数值格式化成前端展示用的百分比文本。
 function formatProgressLabel(value) {
   const safe = clampProgressValue(value);
   if (safe >= 100) return '100%';
   return `${safe.toFixed(1)}%`;
 }
 
+// 停止某个进度条任务，并可选写入最终进度。
 function stopProgressJob(key, finalPercent = null) {
   const job = state.progressJobs[key];
   if (!job) return;
@@ -295,6 +328,7 @@ function stopProgressJob(key, finalPercent = null) {
   delete state.progressJobs[key];
 }
 
+// 启动一个模拟进度条任务，给异步请求提供平滑的视觉反馈。
 function startProgressJob(key, onUpdate, options = {}) {
   stopProgressJob(key);
   const start = clampProgressValue(options.start ?? 6);
@@ -350,10 +384,12 @@ function startProgressJob(key, onUpdate, options = {}) {
   return job;
 }
 
+// 读取某个进度任务当前的进度百分比。
 function getProgressPercent(key, fallback = 0) {
   return clampProgressValue(state.progressJobs[key]?.percent ?? fallback);
 }
 
+// 发送 POST JSON 请求，并统一处理后端错误结构。
 async function requestJson(url, payload) {
   try {
     const res = await fetch(url, {
@@ -372,6 +408,7 @@ async function requestJson(url, payload) {
   }
 }
 
+// 发送 GET 请求并按项目约定解析 JSON 响应。
 async function requestGetJson(url) {
   try {
     const res = await fetch(url);
@@ -386,6 +423,7 @@ async function requestGetJson(url) {
   }
 }
 
+// 调用浏览器剪贴板接口复制文本，并给出提示。
 async function copyText(text, label = '内容') {
   try {
     await navigator.clipboard.writeText(text);
@@ -395,6 +433,7 @@ async function copyText(text, label = '内容') {
   }
 }
 
+// 在指定区域内批量绑定“一键复制”按钮行为。
 function bindCopyButtons(scope = document) {
   scope.querySelectorAll('[data-copy]').forEach(button => {
     if (button.dataset.copyBound === '1') return;
@@ -403,6 +442,7 @@ function bindCopyButtons(scope = document) {
   });
 }
 
+// 把标签数组渲染成统一样式的标签列表。
 function tags(items = []) {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   return list.length
@@ -410,6 +450,7 @@ function tags(items = []) {
     : '<p class="section-note">暂无标签</p>';
 }
 
+// 生成通用加载卡片，用于模块请求中的占位展示。
 function loadingCard(title, desc, steps = []) {
   return `
     <section class="loading-card">
@@ -423,19 +464,23 @@ function loadingCard(title, desc, steps = []) {
   `;
 }
 
+// 生成一个简洁的信息提示卡片。
 function infoCard(title, text, tone = '') {
   return `<div class="info-card ${tone ? `info-card--${tone}` : ''}"><h4>${escapeHtml(title)}</h4><p>${escapeHtml(text)}</p></div>`;
 }
 
+// 生成视频预解析区域里的单个信息卡片。
 function previewCard(label, value, hint = '根据视频链接自动解析') {
   const ok = value !== undefined && value !== null && String(value).trim() !== '';
   return `<div class="stat-card preview-card" title="${escapeHtml(hint)}"><h4>${escapeHtml(label)}</h4><span class="stat-card__value ${ok ? '' : 'is-placeholder'}">${ok ? escapeHtml(value) : '待解析'}</span></div>`;
 }
 
+// 生成指标展示卡片。
 function metricCard(label, value, hint = '') {
   return `<div class="stat-card" title="${escapeHtml(hint)}"><h4>${escapeHtml(label)}</h4><span class="stat-card__value">${escapeHtml(value)}</span>${hint ? `<p>${escapeHtml(hint)}</p>` : ''}</div>`;
 }
 
+// 把选题结果渲染成前端展示卡片。
 function renderIdeas(topicResult) {
   const ideas = topicResult?.ideas || [];
   if (!ideas.length) return infoCard('暂无选题建议', '当前没有可展示的选题结果。');
@@ -451,6 +496,7 @@ function renderIdeas(topicResult) {
   `).join('')}</div>`;
 }
 
+// 把参考视频列表渲染成可点击的卡片网格。
 function referenceGrid(items = [], compact = false) {
   const list = Array.isArray(items) ? items.filter(item => item && item.url) : [];
   if (!list.length) return '';
@@ -470,6 +516,7 @@ function referenceGrid(items = [], compact = false) {
   }).join('')}</div>`;
 }
 
+// 生成参考视频区块，统一处理空状态和说明文案。
 function referenceSection(items = [], title = '可直接参考的高表现视频', desc = '点击卡片可直接打开当前做得好的视频页面。') {
   const grid = referenceGrid(items, false);
   return `
@@ -480,6 +527,7 @@ function referenceSection(items = [], title = '可直接参考的高表现视频
   `;
 }
 
+// 把标题、脚本、简介和置顶评论渲染成可复制的文案结果。
 function copyResult(copy) {
   if (!copy) return infoCard('暂无可直接复用文案', '当前结果里没有新的标题、脚本和简介。');
   const titles = Array.isArray(copy.titles) ? copy.titles.filter(Boolean) : [];
@@ -546,6 +594,7 @@ function copyResult(copy) {
   `;
 }
 
+// 组装内容创作模块的完整结果视图。
 function creatorResult(data) {
   const profile = data.normalized_profile || data.seed_topic || '未整理';
   const question = data.seed_topic || profile || '未整理';
@@ -570,6 +619,7 @@ function creatorResult(data) {
   `;
 }
 
+// 渲染视频解析预览区，展示标题、封面和关键指标。
 function videoPreview(data, options = {}) {
   const resolved = data || {};
   const stats = resolved.stats || {};
@@ -610,6 +660,7 @@ function videoPreview(data, options = {}) {
   `;
 }
 
+// 渲染视频核心指标摘要卡片。
 function videoMetrics(resolved) {
   const stats = resolved?.stats || {};
   return `
@@ -624,12 +675,14 @@ function videoMetrics(resolved) {
   `;
 }
 
+// 把分析建议列表渲染成统一的要点样式。
 function bulletList(items = []) {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   if (!list.length) return infoCard('暂无内容', '当前没有可展示的分析项。');
   return `<div class="analysis-list">${list.map(item => `<article class="analysis-item"><span class="analysis-item__dot"></span><p>${escapeHtml(item)}</p></article>`).join('')}</div>`;
 }
 
+// 生成助手推荐追问按钮区域。
 function assistantActionButtons(items = []) {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   if (!list.length) return '';
@@ -649,6 +702,7 @@ function assistantActionButtons(items = []) {
   `;
 }
 
+// 渲染视频分析结果里的后续选题区块。
 function topicSection(items = [], title = '后续可做方向', desc = '') {
   const list = Array.isArray(items) ? items.filter(Boolean) : [];
   if (!list.length) return '';
@@ -660,6 +714,7 @@ function topicSection(items = [], title = '后续可做方向', desc = '') {
   `;
 }
 
+// 渲染标题、封面和内容结构的优化建议区块。
 function optimizeSection(titleSuggestions = [], coverSuggestion = '', contentSuggestions = []) {
   const titles = Array.isArray(titleSuggestions) ? titleSuggestions.filter(Boolean) : [];
   const content = Array.isArray(contentSuggestions) ? contentSuggestions.filter(Boolean) : [];
@@ -674,6 +729,7 @@ function optimizeSection(titleSuggestions = [], coverSuggestion = '', contentSug
   `;
 }
 
+// 组装视频分析模块的完整结果视图。
 function videoResult(data) {
   const resolved = data.resolved || state.videoResolved || {};
   const perf = data.performance || {};
@@ -704,15 +760,17 @@ function videoResult(data) {
   `;
 }
 
+// 渲染聊天面板的空状态提示。
 function assistantEmptyState() {
   return `
     <div class="empty-state">
-      <h4>${state.runtime.chatAvailable ? '还没有对话内容' : '当前为规则模式'}</h4>
-      <p>${state.runtime.chatAvailable ? '你可以直接像聊天一样提问，助手会结合当前页面上下文作答。' : '配置 LLM_API_KEY 后，右侧对话助手会切到真正的 LLM Agent 链路。'}</p>
+      <h4>${state.runtime.chatAvailable ? '还没有对话内容' : '当前为无 Key 逻辑模式'}</h4>
+      <p>${state.runtime.chatAvailable ? '你可以直接像聊天一样提问，助手会结合当前页面上下文作答。' : '请先在上方运行模式区域开启 LLM Agent 模式，右侧智能助手才会真正进入 Agent 链路。'}</p>
     </div>
   `;
 }
 
+// 渲染助手思考中的占位气泡。
 function assistantPendingBubble() {
   return `
     <article class="chat-row chat-row--assistant">
@@ -724,6 +782,7 @@ function assistantPendingBubble() {
   `;
 }
 
+// 根据当前聊天记录刷新助手对话区域。
 function renderAssistant() {
   const box = $('#assistantResult');
   if (!box) return;
@@ -764,39 +823,169 @@ function renderAssistant() {
   });
 }
 
+// 把后端返回的运行模式信息同步到前端状态对象里。
+function applyRuntimePayload(data = {}) {
+  state.runtime = {
+    ...state.runtime,
+    mode: data.mode || 'rules',
+    llmEnabled: Boolean(data.llm_enabled),
+    chatAvailable: Boolean(data.chat_available),
+    switchChecked: Boolean(data.switch_checked),
+    hasSavedConfig: Boolean(data.has_saved_llm_config),
+    savedConfigSource: data.saved_config_source || '',
+    savedProvider: data.saved_provider || '',
+    savedModel: data.saved_model || '',
+    savedBaseUrl: data.saved_base_url || '',
+    savedApiKeyMasked: data.saved_api_key_masked || '',
+    requiresConfig: Boolean(data.requires_config),
+    modeLabel: data.mode_label || '无 Key 逻辑模式',
+    modeTitle: data.mode_title || '当前运行中：无 Key 逻辑模式',
+    modeDescription: data.mode_description || '',
+    tokenPolicy: data.token_policy || '',
+    switchHint: data.switch_hint || '',
+  };
+}
+
+// 控制运行模式配置表单的显示和隐藏。
+function setRuntimeConfigFormVisible(visible) {
+  const form = $('#runtimeConfigForm');
+  if (!form) return;
+  form.hidden = !visible;
+}
+
+// 让运行模式开关做一次震动提示，强调需要用户先开启或配置模式。
+function shakeRuntimeModeToggle() {
+  const toggle = $('#runtimeModeToggle');
+  if (!toggle) return;
+  toggle.classList.remove('is-shaking');
+  void toggle.offsetWidth;
+  toggle.classList.add('is-shaking');
+  window.setTimeout(() => toggle.classList.remove('is-shaking'), 450);
+}
+
+// 处理无 Key 逻辑模式下点击智能助手面板的提示逻辑。
+function handleAssistantLockedClick() {
+  shakeRuntimeModeToggle();
+  showToast('当前不可用', '请开启LLM Agent模式才能使用智能会话助手。', 'error');
+  document.getElementById('runtimeModePanel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// 根据后端返回的运行模式信息刷新页面提示、开关状态和聊天面板可用性。
 function updateRuntimeUi() {
   $('#runtimeModeBadge').textContent = `运行模式：${state.runtime.modeLabel}`;
   $('#runtimeModeTitle').textContent = state.runtime.modeTitle;
   $('#runtimeModeDesc').textContent = state.runtime.modeDescription;
   $('#runtimeTokenBadge').textContent = state.runtime.tokenPolicy;
   $('#runtimeSwitchHint').textContent = state.runtime.switchHint;
+  $('#runtimeSwitchText').textContent = state.runtime.switchChecked ? 'LLM Agent 模式' : '无 Key 逻辑模式';
   $('#assistantModeTag').textContent = state.runtime.chatAvailable ? 'LLM Agent 已启用' : '仅 LLM 模式可用';
   $('#assistantPanelDesc').textContent = state.runtime.chatAvailable
-    ? '助手会在对话里自主调用选题、视频解析和热门样本等工具。'
-    : '当前未配置 LLM_API_KEY，右侧对话助手不会调用模型，也不会消耗 token。';
+    ? '助手会在对话里自主调用选题、视频解析、热门样本等工具。'
+    : '当前处于无 Key 逻辑模式，智能会话助手会被禁用，切到 LLM Agent 模式后才可使用。';
   $('#assistantHint').textContent = state.runtime.chatAvailable
     ? '助手会结合当前页面里的选题输入或视频链接一起理解你的问题。'
-    : '想启用对话助手，请在 .env 中配置 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL 后重启服务。';
+    : '当前为无 Key 逻辑模式。开启上方开关后，助手才会进入真正的 LLM Agent 链路。';
+
+  const toggle = $('#runtimeModeToggle');
+  if (toggle) {
+    toggle.classList.toggle('is-on', state.runtime.switchChecked);
+    toggle.setAttribute('aria-pressed', state.runtime.switchChecked ? 'true' : 'false');
+  }
+
+  const savedConfigSummary = $('#runtimeConfigSummary');
+  if (savedConfigSummary) {
+    if (state.runtime.hasSavedConfig) {
+      const parts = [
+        state.runtime.savedProvider || '自定义 provider',
+        state.runtime.savedModel || '默认模型',
+        state.runtime.savedBaseUrl || '',
+      ].filter(Boolean);
+      const sourceText = state.runtime.savedConfigSource === 'env' ? '来自 .env' : '来自页面填写';
+      savedConfigSummary.textContent = `已保存配置：${parts.join(' / ')} · ${sourceText}`;
+    } else {
+      savedConfigSummary.textContent = '当前没有已保存的 LLM 配置';
+    }
+  }
+
+  const formVisible = Boolean(state.runtime.requiresConfig && !state.runtime.chatAvailable);
+  setRuntimeConfigFormVisible(formVisible);
+  $('#runtimeConfigHint').textContent = state.runtime.hasSavedConfig
+    ? '当前已经保存过一组配置，关闭开关后再次打开会直接复用。'
+    : '当前没有已保存配置，打开开关时需要先填写 URL、Key 和模型供应商。';
+
+  const assistantPanel = $('#assistantPanel');
+  const assistantOverlay = $('#assistantLockOverlay');
+  if (assistantPanel) assistantPanel.classList.toggle('is-disabled', !state.runtime.chatAvailable);
+  if (assistantOverlay) assistantOverlay.hidden = state.runtime.chatAvailable;
+
   const input = $('#assistantMessage');
-  input.disabled = !state.runtime.chatAvailable;
+  input.disabled = false;
   input.placeholder = state.runtime.chatAvailable
     ? '例如：帮我分析这个视频为什么没有起量；或者：我想做颜值向舞蹈账号，第一条视频该拍什么'
-    : '当前为规则模式。配置 LLM_API_KEY 后这里会启用对话。';
+    : '当前为无 Key 逻辑模式。开启上方 LLM Agent 开关后，这里才可真正发起智能会话。';
+
   updateAssistantButton();
   renderAssistant();
 }
 
-function updateAssistantButton() {
-  const input = $('#assistantMessage');
-  const button = $('#assistantSendBtn');
-  const icon = $('#assistantActionIcon');
-  if (!input || !button || !icon) return;
-  button.disabled = !state.runtime.chatAvailable;
-  button.classList.toggle('is-listening', state.isListening);
-  icon.innerHTML = input.value.trim() ? SEND_ICON : MIC_ICON;
-  button.setAttribute('aria-label', input.value.trim() ? '发送消息' : '语音输入');
+// 切换运行模式开关，并按是否已有配置决定直接生效还是展示配置表单。
+async function toggleRuntimeMode() {
+  const nextEnabled = !state.runtime.switchChecked;
+  try {
+    const data = await requestJson('/api/runtime-mode', { enabled: nextEnabled });
+    applyRuntimePayload(data);
+    updateRuntimeUi();
+    if (data.requires_config) {
+      showToast('还缺配置', '当前没有已保存的 LLM 配置，请先填写 URL、Key 和模型供应商。', 'error');
+      setStatus('请先填写 LLM 配置', 'error');
+      $('#runtimeConfigUrl')?.focus();
+      return;
+    }
+    if (nextEnabled) {
+      showToast('已开启', '当前已经切到 LLM Agent 模式。');
+      setStatus('已切换到 LLM Agent 模式', 'success');
+    } else {
+      showToast('已关闭', '当前已经切回无 Key 逻辑模式。');
+      setStatus('已切换到无 Key 逻辑模式', 'success');
+    }
+  } catch (error) {
+    shakeRuntimeModeToggle();
+    showToast('切换失败', error.message, 'error');
+  }
 }
 
+// 提交运行时 LLM 配置，并在保存成功后立即开启 LLM Agent 模式。
+async function submitRuntimeConfig(event) {
+  event.preventDefault();
+  const payload = {
+    base_url: ($('#runtimeConfigUrl').value || '').trim(),
+    api_key: ($('#runtimeConfigKey').value || '').trim(),
+    provider: ($('#runtimeConfigProvider').value || '').trim(),
+    model: ($('#runtimeConfigModel').value || '').trim(),
+  };
+  if (!payload.base_url || !payload.api_key || !payload.provider) {
+    showToast('缺少配置', '请完整填写 URL、Key 和模型供应商。', 'error');
+    return;
+  }
+
+  const submitButton = $('#runtimeConfigSubmitBtn');
+  if (submitButton) submitButton.disabled = true;
+  try {
+    const data = await requestJson('/api/runtime-llm-config', payload);
+    applyRuntimePayload(data);
+    updateRuntimeUi();
+    $('#runtimeConfigKey').value = '';
+    showToast('配置已保存', '已保存当前 LLM 配置，并切到 LLM Agent 模式。');
+    setStatus('已切换到 LLM Agent 模式', 'success');
+  } catch (error) {
+    showToast('保存失败', error.message, 'error');
+    setStatus('LLM 配置保存失败', 'error');
+  } finally {
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
+// 清空当前生成结果、视频解析状态和对话记录。
 function clearResults() {
   state.videoResolved = null;
   state.videoResolvedUrl = '';
@@ -811,6 +1000,7 @@ function clearResults() {
   setStatus('已清空结果', 'success');
 }
 
+// 重置模块区域的 hover 和过渡样式。
 function syncModuleHover() {
   const heroCard = $('.hero-card');
   const modeBanner = $('.mode-banner');
@@ -841,6 +1031,7 @@ function syncModuleHover() {
   });
 }
 
+// 重置全局滚动场景相关状态。
 function updateGlobalScrollScene() {
   state.moduleSplit = 0.5;
   state.moduleSwapProgress = 0;
@@ -848,37 +1039,33 @@ function updateGlobalScrollScene() {
   syncModuleHover();
 }
 
+// 触发一次全局滚动场景更新。
 function scheduleGlobalScrollSceneUpdate() {
   updateGlobalScrollScene();
 }
 
+// 初始化全局滚动场景。
 function initGlobalScrollScene() {
   updateGlobalScrollScene();
 }
 
+// 判断当前缓存的视频解析结果是否仍对应同一个链接。
 function isResolvedForUrl(url) {
   return Boolean(state.videoResolved && state.videoResolvedUrl === String(url || '').trim());
 }
 
+// 从后端读取运行模式信息并同步到前端状态。
 async function loadRuntimeInfo() {
   try {
     const data = await requestGetJson('/api/runtime-info');
-    state.runtime = {
-      mode: data.mode || 'rules',
-      llmEnabled: Boolean(data.llm_enabled),
-      chatAvailable: Boolean(data.chat_available),
-      modeLabel: data.mode_label || '规则模式',
-      modeTitle: data.mode_title || '当前运行中：规则模式',
-      modeDescription: data.mode_description || '',
-      tokenPolicy: data.token_policy || '',
-      switchHint: data.switch_hint || '',
-    };
+    applyRuntimePayload(data);
     updateRuntimeUi();
   } catch (error) {
     showToast('模式读取失败', error.message || '请检查后端服务', 'error');
   }
 }
 
+// 调用后端解析视频链接，并刷新预览区和缓存结果。
 async function resolveVideoLink(url, seq = ++state.videoResolveSeq, options = {}) {
   const currentUrl = String(url || '').trim();
   if (!currentUrl) {
@@ -914,6 +1101,7 @@ async function resolveVideoLink(url, seq = ++state.videoResolveSeq, options = {}
   }
 }
 
+// 对视频链接输入做防抖解析，避免每次输入都立刻请求。
 function scheduleVideoResolve() {
   const url = ($('#videoLink').value || '').trim();
   state.videoResolveSeq += 1;
@@ -931,6 +1119,7 @@ function scheduleVideoResolve() {
   }, 550);
 }
 
+// 计算当前工作台应展示的目录项列表。
 function getOutlineItems(module = state.activeModule) {
   return [];
   const common = [
@@ -966,6 +1155,7 @@ function getOutlineItems(module = state.activeModule) {
     });
 }
 
+// 根据滚动位置更新目录高亮项。
 function updateOutlineActiveState() {
   return;
   if (!$('#workspaceOutline')) return;
@@ -985,6 +1175,7 @@ function updateOutlineActiveState() {
   });
 }
 
+// 渲染工作台右侧目录，并绑定点击跳转。
 function renderWorkspaceOutline() {
   return;
   const box = $('#workspaceOutline');
@@ -1016,6 +1207,7 @@ function renderWorkspaceOutline() {
   updateOutlineActiveState();
 }
 
+// 切换当前激活的功能模块，并按需聚焦输入控件。
 function setActiveModule(module, options = {}) {
   const next = module === 'create' ? 'create' : 'analyze';
   state.activeModule = next;
@@ -1033,6 +1225,7 @@ function setActiveModule(module, options = {}) {
   }
 }
 
+// 提交内容创作请求并渲染返回的选题与文案结果。
 async function runCreatorModule() {
   const payload = {
     field: ($('#creatorField').value || '').trim(),
@@ -1063,6 +1256,7 @@ async function runCreatorModule() {
   }
 }
 
+// 提交视频分析请求并渲染解析与分析结果。
 async function runAnalyzeModule() {
   const url = ($('#videoLink').value || '').trim();
   if (!url) {
@@ -1093,6 +1287,7 @@ async function runAnalyzeModule() {
   }
 }
 
+// 收集当前页面输入，作为助手对话的上下文。
 function chatContext() {
   return {
     field: ($('#creatorField').value || '').trim(),
@@ -1104,9 +1299,10 @@ function chatContext() {
   };
 }
 
+// 发送助手消息并把返回结果写入对话记录。
 async function sendAssistantMessage(forced = '') {
   if (!state.runtime.chatAvailable) {
-    showToast('当前不可用', '请先配置 LLM_API_KEY 并重启服务。', 'error');
+    handleAssistantLockedClick();
     return;
   }
   const input = $('#assistantMessage');
@@ -1146,6 +1342,7 @@ async function sendAssistantMessage(forced = '') {
   }
 }
 
+// 初始化浏览器语音识别能力并同步输入框状态。
 function initSpeechRecognition() {
   const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Ctor) return;
@@ -1174,8 +1371,12 @@ function initSpeechRecognition() {
   state.recognition = recognition;
 }
 
+// 在开始和停止语音输入之间切换。
 function toggleVoiceInput() {
-  if (!state.runtime.chatAvailable) return;
+  if (!state.runtime.chatAvailable) {
+    handleAssistantLockedClick();
+    return;
+  }
   if (!state.recognition) {
     showToast('当前浏览器不支持', '浏览器不支持语音输入，请直接输入文字。', 'error');
     return;
@@ -1188,10 +1389,14 @@ function toggleVoiceInput() {
   }
 }
 
+// 绑定页面主要按钮、输入框和快捷交互事件。
 function initEvents() {
   $('#creatorRunBtn').addEventListener('click', runCreatorModule);
   $('#videoAnalyzeBtn').addEventListener('click', runAnalyzeModule);
   $('#clearResultsBtn').addEventListener('click', clearResults);
+  $('#runtimeModeToggle').addEventListener('click', toggleRuntimeMode);
+  $('#runtimeConfigForm').addEventListener('submit', submitRuntimeConfig);
+  $('#assistantLockOverlay').addEventListener('click', handleAssistantLockedClick);
   $('#videoLink').addEventListener('input', scheduleVideoResolve);
   $$('[data-module-tab]').forEach(button => {
     button.addEventListener('click', () => {
@@ -1231,10 +1436,12 @@ function initEvents() {
   });
 }
 
+// 读取指定任务当前的进度百分比。
 function currentProgressPercent(key) {
   return getProgressPercent(key, 0);
 }
 
+// 生成带百分比和步骤状态的加载卡片。
 function loadingCard(title, desc, steps = [], percent = 0) {
   const safePercent = clampProgressValue(percent);
   const activeIndex = steps.length ? Math.min(steps.length - 1, Math.floor((safePercent / 100) * steps.length)) : -1;
@@ -1250,12 +1457,14 @@ function loadingCard(title, desc, steps = [], percent = 0) {
   `;
 }
 
+// 把加载卡片渲染到指定容器。
 function renderProgressInto(containerId, title, desc, steps, percent) {
   const container = document.getElementById(containerId);
   if (!container) return;
   container.innerHTML = loadingCard(title, desc, steps, percent);
 }
 
+// 渲染带实时进度的助手思考占位气泡。
 function assistantPendingBubble() {
   const percent = currentProgressPercent('assistant');
   return `
@@ -1268,6 +1477,7 @@ function assistantPendingBubble() {
   `;
 }
 
+// 用当前聊天状态重新渲染助手区域，并绑定动态按钮。
 function renderAssistant() {
   const box = $('#assistantResult');
   if (!box) return;
@@ -1308,6 +1518,7 @@ function renderAssistant() {
   });
 }
 
+// 根据聊天可用性、请求状态和输入内容刷新发送按钮。
 function updateAssistantButton() {
   const input = $('#assistantMessage');
   const button = $('#assistantSendBtn');
@@ -1319,6 +1530,7 @@ function updateAssistantButton() {
   button.setAttribute('aria-label', input.value.trim() ? '发送消息' : '语音输入');
 }
 
+// 清空所有模块结果、进度状态和当前对话记录。
 function clearResults() {
   stopProgressJob('creator');
   stopProgressJob('analyze');
@@ -1342,6 +1554,7 @@ function clearResults() {
   setStatus('已清空结果', 'success');
 }
 
+// 以打字机效果逐字显示助手回复。
 async function typeAssistantReply(messageItem) {
   if (!messageItem) return;
   const fullText = messageItem.fullContent || messageItem.content || '';
@@ -1364,6 +1577,7 @@ async function typeAssistantReply(messageItem) {
   updateAssistantButton();
 }
 
+// 以带进度条的方式执行内容创作请求并展示结果。
 async function runCreatorModule() {
   const payload = {
     field: ($('#creatorField').value || '').trim(),
@@ -1411,6 +1625,7 @@ async function runCreatorModule() {
   }
 }
 
+// 以带进度条的方式执行视频分析请求并展示结果。
 async function runAnalyzeModule() {
   const url = ($('#videoLink').value || '').trim();
   if (!url) {
@@ -1458,9 +1673,10 @@ async function runAnalyzeModule() {
   }
 }
 
+// 发送助手消息，展示进度，并以打字机效果输出回复。
 async function sendAssistantMessage(forced = '') {
   if (!state.runtime.chatAvailable) {
-    showToast('当前不可用', '请先配置 LLM_API_KEY 并重启服务。', 'error');
+    handleAssistantLockedClick();
     return;
   }
   const input = $('#assistantMessage');
@@ -1520,6 +1736,7 @@ async function sendAssistantMessage(forced = '') {
   }
 }
 
+// 渲染支持进度条的最新视频预览区。
 function videoPreview(data, options = {}) {
   const resolved = data || {};
   const stats = resolved.stats || {};
@@ -1565,6 +1782,7 @@ function videoPreview(data, options = {}) {
   `;
 }
 
+// 初始化页面默认状态、事件绑定和运行模式信息。
 function init() {
   setActiveModule(state.activeModule);
   $('#videoPreview').innerHTML = videoPreview(null);

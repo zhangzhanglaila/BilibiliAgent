@@ -8,12 +8,14 @@ from graph import BilibiliAgentGraph
 from models import to_plain_data
 
 
+# 把命令行里逗号分隔的 UP 主 ID 文本解析成整数列表。
 def parse_up_ids(value: str | None) -> List[int] | None:
     if not value:
         return None
     return [int(item.strip()) for item in value.split(",") if item.strip().isdigit()]
 
 
+# 运行选题 Agent，并把 dataclass 结果转换成普通字典。
 def run_topic(
     partition_name: str = "knowledge",
     up_ids: List[int] | None = None,
@@ -31,24 +33,28 @@ def run_topic(
     return to_plain_data(result["topic_result"])
 
 
+# 运行文案 Agent，并返回适合 CLI / Web 复用的普通结构。
 def run_copy(topic: str, style: str = "干货") -> Dict[str, Any]:
     graph = BilibiliAgentGraph()
     result = graph.run_single_agent("copy", {"topic": topic, "style": style})
     return to_plain_data(result["copywriting_result"])
 
 
+# 运行运营 Agent，输出评论区互动建议动作。
 def run_operate(bv_id: str, dry_run: bool = True) -> Dict[str, Any]:
     graph = BilibiliAgentGraph()
     result = graph.run_single_agent("operate", {"bv_id": bv_id, "dry_run": dry_run})
     return to_plain_data(result["operation_result"])
 
 
+# 运行优化 Agent，生成标题、封面和内容层面的优化建议。
 def run_optimize(bv_id: str) -> Dict[str, Any]:
     graph = BilibiliAgentGraph()
     result = graph.run_single_agent("optimize", {"bv_id": bv_id})
     return to_plain_data(result["optimization_result"])
 
 
+# 运行完整流水线，顺序串起选题、文案、运营和优化四个阶段。
 def run_pipeline(
     bv_id: str,
     partition_name: str = "knowledge",
@@ -69,6 +75,7 @@ def run_pipeline(
     return to_plain_data(result)
 
 
+# 以 CLI 友好的格式打印选题结果。
 def print_topic_result(result: dict) -> None:
     ideas = result.get("ideas", [])
     print("\n=== 选题结果 ===")
@@ -79,6 +86,7 @@ def print_topic_result(result: dict) -> None:
         print(f"   关键词：{', '.join(idea.get('keywords', []))}")
 
 
+# 以 CLI 友好的格式打印文案结果。
 def print_copy_result(result: dict) -> None:
     print("\n=== 文案结果 ===")
     print("标题备选：")
@@ -92,6 +100,7 @@ def print_copy_result(result: dict) -> None:
     print(f"\n置顶评论：{result.get('pinned_comment')}")
 
 
+# 以 CLI 友好的格式打印运营建议结果。
 def print_operation_result(result: dict) -> None:
     print("\n=== 运营结果 ===")
     print(result.get("summary", ""))
@@ -106,6 +115,7 @@ def print_operation_result(result: dict) -> None:
             print(f"- [{action.get('action')}] {action.get('message')} (dry_run={action.get('dry_run')})")
 
 
+# 以 CLI 友好的格式打印优化建议结果。
 def print_optimization_result(result: dict) -> None:
     print("\n=== 数据优化结果 ===")
     print(f"诊断：{result.get('diagnosis')}")
@@ -119,6 +129,7 @@ def print_optimization_result(result: dict) -> None:
     print(f"基准总结：{result.get('benchmark_summary')}")
 
 
+# 构建命令行参数解析器，定义所有可用子命令和参数。
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="B站全自动运营多 Agent 系统")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -148,6 +159,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# 作为 CLI 入口，根据子命令分发到对应的 Agent 包装函数。
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()

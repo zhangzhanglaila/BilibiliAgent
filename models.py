@@ -28,6 +28,7 @@ class VideoMetrics:
     url: str = ""
     extra: Dict[str, Any] = field(default_factory=dict)
 
+    # 把视频指标 dataclass 展开成普通字典，便于序列化和持久化。
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -82,6 +83,7 @@ class OptimizationSuggestion:
     raw_text: str = ""
 
 
+# 递归把 dataclass、字典和列表里的对象都转换成可直接返回 JSON 的普通结构。
 def to_plain_data(value: Any) -> Any:
     if is_dataclass(value):
         return {key: to_plain_data(val) for key, val in asdict(value).items()}

@@ -48,7 +48,7 @@
               <div class="hero-points">
                 <span class="result-badge">视频分析：解析 + 优化</span>
                 <span class="result-badge">内容创作：选题 + 文案</span>
-                <span class="result-badge" id="runtimeModeBadge">运行模式：规则模式</span>
+                <span class="result-badge" id="runtimeModeBadge">运行模式：{{ initial_runtime.mode_label }}</span>
               </div>
             </div>
             <div class="hero-metrics">
@@ -62,7 +62,7 @@
               </div>
               <div class="metric-box">
                 <span class="metric-box__label">当前状态</span>
-                <strong id="currentModeText">空闲</strong>
+                <strong id="currentModeText">{{ initial_runtime.mode_title }}</strong>
               </div>
             </div>
           </section>
@@ -70,13 +70,56 @@
           <section class="mode-banner" id="runtimeModePanel" data-outline-title="运行模式">
             <div class="mode-banner__content">
               <span class="mode-banner__kicker">运行模式</span>
-              <h3 id="runtimeModeTitle">当前运行中：规则模式</h3>
-              <p id="runtimeModeDesc">当前未配置 LLM_API_KEY，系统运行在纯代码规则模式，不会消耗 token。</p>
+              <div class="mode-banner__headline">
+                <h3 id="runtimeModeTitle">{{ initial_runtime.mode_title }}</h3>
+                <button class="mode-switch{% if initial_runtime.switch_checked %} is-on{% endif %}" id="runtimeModeToggle" type="button" aria-pressed="{{ 'true' if initial_runtime.switch_checked else 'false' }}">
+                  <span class="mode-switch__label">模式开关</span>
+                  <span class="mode-switch__track">
+                    <span class="mode-switch__thumb"></span>
+                  </span>
+                  <span class="mode-switch__text" id="runtimeSwitchText">{{ 'LLM Agent 模式' if initial_runtime.switch_checked else '无 Key 逻辑模式' }}</span>
+                </button>
+              </div>
+              <p id="runtimeModeDesc">{{ initial_runtime.mode_description }}</p>
             </div>
             <div class="mode-banner__meta">
-              <div class="result-badge" id="runtimeTokenBadge">不会消耗 token，智能助手当前关闭</div>
-              <div class="result-badge" id="runtimeSwitchHint">配置 .env 后重启服务即可切到 LLM 模式</div>
+              <div class="result-badge" id="runtimeTokenBadge">{{ initial_runtime.token_policy }}</div>
+              <div class="result-badge" id="runtimeSwitchHint">{{ initial_runtime.switch_hint }}</div>
+              <div class="result-badge" id="runtimeConfigSummary">
+                {% if initial_runtime.has_saved_llm_config %}
+                  已保存配置：{{ initial_runtime.saved_provider or '自定义 provider' }} / {{ initial_runtime.saved_model or '默认模型' }}{% if initial_runtime.saved_base_url %} / {{ initial_runtime.saved_base_url }}{% endif %} · {% if initial_runtime.saved_config_source == 'env' %}来自 .env{% else %}来自页面填写{% endif %}
+                {% else %}
+                  当前没有已保存的 LLM 配置
+                {% endif %}
+              </div>
             </div>
+            <form class="runtime-config-form" id="runtimeConfigForm" {% if not initial_runtime.requires_config %}hidden{% endif %}>
+              <div class="runtime-config-form__grid">
+                <label class="field">
+                  <span class="field__label">LLM URL</span>
+                  <input id="runtimeConfigUrl" placeholder="例如：https://api.openai.com/v1" value="{{ initial_runtime.saved_base_url or '' }}" />
+                </label>
+                <label class="field">
+                  <span class="field__label">LLM Key</span>
+                  <input id="runtimeConfigKey" type="password" placeholder="请输入当前可用的 API Key" />
+                </label>
+                <label class="field">
+                  <span class="field__label">模型供应商</span>
+                  <input id="runtimeConfigProvider" placeholder="例如：OpenAI / Azure / Moonshot" value="{{ initial_runtime.saved_provider or '' }}" />
+                </label>
+                <label class="field">
+                  <span class="field__label">模型名称</span>
+                  <input id="runtimeConfigModel" placeholder="选填，默认使用当前项目里的模型名" value="{{ initial_runtime.saved_model or '' }}" />
+                </label>
+              </div>
+              <div class="runtime-config-form__actions">
+                <button class="action-btn runtime-config-form__submit" id="runtimeConfigSubmitBtn" type="submit">
+                  <span class="action-btn__title">保存配置并开启 LLM Agent</span>
+                  <span class="action-btn__desc">提交后立即切到 LLM Agent 模式，后续再次打开可直接复用这组配置。</span>
+                </button>
+                <span class="field__hint" id="runtimeConfigHint">{% if initial_runtime.has_saved_llm_config %}当前已经保存过一组配置，关闭开关后再次打开会直接复用。{% else %}当前没有已保存配置，打开开关时需要先填写 URL、Key 和模型供应商。{% endif %}</span>
+              </div>
+            </form>
           </section>
 
             <section class="module-grid" id="moduleGrid" data-active="analyze">
@@ -196,21 +239,22 @@
           </div>
         </div>
 
-        <aside class="panel assistant-panel">
+        <aside class="panel assistant-panel{% if not initial_runtime.chat_available %} is-disabled{% endif %}" id="assistantPanel">
+          <button class="assistant-lock-overlay" id="assistantLockOverlay" type="button" {% if initial_runtime.chat_available %}hidden{% endif %} aria-label="请先开启 LLM Agent 模式"></button>
           <div class="panel__header">
             <div>
               <span class="module-kicker">智能对话助手</span>
               <h3>像聊天一样提问，Agent 按意图自动调用工具</h3>
-              <p id="assistantPanelDesc">配置 LLM_API_KEY 后，助手会自动调用选题、视频解析、热门样本等工具回答问题。</p>
+              <p id="assistantPanelDesc">{% if initial_runtime.chat_available %}助手会在对话里自主调用选题、视频解析、热门样本等工具。{% else %}当前处于无 Key 逻辑模式，智能会话助手会被禁用，切到 LLM Agent 模式后才可使用。{% endif %}</p>
             </div>
-            <div class="result-badge" id="assistantModeTag">仅 LLM 模式可用</div>
+            <div class="result-badge" id="assistantModeTag">{% if initial_runtime.chat_available %}LLM Agent 已启用{% else %}仅 LLM 模式可用{% endif %}</div>
           </div>
 
           <div class="assistant-layout">
             <div class="module-result assistant-thread-wrap" id="assistantResult">
               <div class="empty-state">
-                <h4>还没有对话内容</h4>
-                <p>配置 LLM_API_KEY 后，可以直接提问，比如“帮我分析这个视频”“帮我选题”“帮我写文案”。</p>
+                <h4>{% if initial_runtime.chat_available %}还没有对话内容{% else %}当前为无 Key 逻辑模式{% endif %}</h4>
+                <p>{% if initial_runtime.chat_available %}你可以直接像聊天一样提问，助手会结合当前页面上下文作答。{% else %}请先在上方运行模式区域开启 LLM Agent 模式，右侧智能助手才会真正进入 Agent 链路。{% endif %}</p>
               </div>
             </div>
 
@@ -225,12 +269,12 @@
               <div class="assistant-input-shell">
                 <label class="assistant-input-label" for="assistantMessage">对话输入</label>
                 <div class="assistant-input-box">
-                  <textarea id="assistantMessage" rows="3" placeholder="例如：帮我分析这个视频为什么没有起量；或者：我想做颜值向舞蹈账号，第一条视频该拍什么"></textarea>
+                  <textarea id="assistantMessage" rows="3" placeholder="{% if initial_runtime.chat_available %}例如：帮我分析这个视频为什么没有起量；或者：我想做颜值向舞蹈账号，第一条视频该拍什么{% else %}当前为无 Key 逻辑模式。开启上方 LLM Agent 开关后，这里才可真正发起智能会话。{% endif %}"></textarea>
                   <button class="assistant-action-btn" id="assistantSendBtn" type="button" aria-label="发送或语音输入">
                     <span class="assistant-action-btn__icon" id="assistantActionIcon" aria-hidden="true"></span>
                   </button>
                 </div>
-                <span class="field__hint assistant-input-hint" id="assistantHint">助手会结合当前页面里的选题输入或视频链接一起理解你的问题。</span>
+                <span class="field__hint assistant-input-hint" id="assistantHint">{% if initial_runtime.chat_available %}助手会结合当前页面里的选题输入或视频链接一起理解你的问题。{% else %}当前为无 Key 逻辑模式。开启上方开关后，助手才会进入真正的 LLM Agent 链路。{% endif %}</span>
               </div>
             </div>
           </div>
@@ -242,6 +286,9 @@
 
   <div class="toast-stack" id="toastStack"></div>
 
+  <script>
+    window.__INITIAL_RUNTIME__ = {{ initial_runtime | tojson }};
+  </script>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -431,14 +431,27 @@ button {
 
 .mode-banner {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
   flex: none;
+  flex-wrap: wrap;
+}
+
+.mode-banner__content {
+  flex: 1;
+  min-width: min(100%, 420px);
+}
+
+.mode-banner__headline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
 }
 
 .mode-banner h3 {
-  margin-top: 8px;
   font-size: 22px;
 }
 
@@ -446,6 +459,103 @@ button {
   margin-top: 8px;
   color: var(--muted);
   line-height: 1.6;
+}
+
+.mode-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(251, 114, 153, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--text);
+  box-shadow: 0 12px 24px rgba(251, 114, 153, 0.1);
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.mode-switch:hover {
+  transform: translateY(-1px);
+  border-color: rgba(251, 114, 153, 0.28);
+  box-shadow: 0 16px 30px rgba(251, 114, 153, 0.14);
+}
+
+.mode-switch.is-on {
+  background: linear-gradient(135deg, rgba(255, 241, 246, 0.96), rgba(255, 255, 255, 0.94));
+  border-color: rgba(251, 114, 153, 0.3);
+}
+
+.mode-switch.is-shaking {
+  animation: runtime-switch-shake 420ms ease;
+}
+
+.mode-switch__label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--soft);
+}
+
+.mode-switch__text {
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--brand-deep);
+  white-space: nowrap;
+}
+
+.mode-switch__track {
+  position: relative;
+  width: 52px;
+  height: 30px;
+  border-radius: 999px;
+  background: rgba(124, 89, 42, 0.14);
+  transition: background 180ms ease, box-shadow 180ms ease;
+}
+
+.mode-switch.is-on .mode-switch__track {
+  background: linear-gradient(135deg, var(--brand), var(--brand-deep));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.mode-switch__thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 8px 16px rgba(47, 36, 23, 0.18);
+  transition: transform 180ms ease;
+}
+
+.mode-switch.is-on .mode-switch__thumb {
+  transform: translateX(22px);
+}
+
+.runtime-config-form {
+  width: 100%;
+  padding: 18px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, rgba(255, 248, 250, 0.94), rgba(255, 255, 255, 0.88));
+  border: 1px solid rgba(251, 114, 153, 0.16);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+.runtime-config-form__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.runtime-config-form__actions {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.runtime-config-form__submit {
+  width: 100%;
 }
 
 .panel {
@@ -1100,12 +1210,49 @@ button {
   height: calc(100vh - 110px);
   min-height: calc(100vh - 110px);
   max-height: calc(100vh - 110px);
+  overflow: hidden;
 }
 
 .assistant-panel,
 .assistant-layout {
   display: flex;
   flex-direction: column;
+}
+
+.assistant-panel.is-disabled {
+  cursor: not-allowed;
+}
+
+.assistant-panel.is-disabled .assistant-layout,
+.assistant-panel.is-disabled .panel__header {
+  opacity: 0.86;
+  filter: saturate(0.92);
+}
+
+.assistant-lock-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  border: 0;
+  background:
+    linear-gradient(180deg, rgba(247, 244, 238, 0.18), rgba(247, 244, 238, 0.36)),
+    radial-gradient(circle at top right, rgba(251, 114, 153, 0.12), transparent 36%);
+  cursor: not-allowed;
+}
+
+.assistant-lock-overlay::before {
+  content: "请先开启 LLM Agent 模式";
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(251, 114, 153, 0.18);
+  color: var(--brand-deep);
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: 0 12px 24px rgba(251, 114, 153, 0.14);
 }
 
 .assistant-layout {
@@ -1494,6 +1641,15 @@ button {
   50.01%, 100% { opacity: 0; }
 }
 
+@keyframes runtime-switch-shake {
+  0%,
+  100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(6px); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(5px); }
+}
+
 @media (max-width: 1180px) {
   .scroll-stage {
     min-height: auto;
@@ -1569,6 +1725,7 @@ button {
 
   .form-grid,
   .form-grid--compact,
+  .runtime-config-form__grid,
   .summary-strip,
   .summary-strip--metrics,
   .topic-grid,
@@ -1629,6 +1786,11 @@ button {
   .workspace-tab {
     flex: none;
     white-space: nowrap;
+  }
+
+  .mode-banner__headline {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 

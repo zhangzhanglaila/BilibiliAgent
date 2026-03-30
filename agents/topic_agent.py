@@ -15,25 +15,32 @@ from models import TopicIdea, VideoMetrics
 
 
 class TopicAgent:
+    # 初始化选题 Agent，设置请求节流间隔。
     def __init__(self, request_interval: float | None = None) -> None:
         self.request_interval = request_interval or CONFIG.request_interval
 
+    # 在连续请求外部接口之间休眠，避免请求过快。
     def _sleep(self) -> None:
         time.sleep(self.request_interval)
 
+    # 安全执行同步接口调用，失败时返回兜底值。
     def _safe_sync(self, coro, default):
         try:
             return sync(coro)
         except Exception:
             return default
 
+    # 根据互动强度估算平均观看时长。
     def _estimate_avg_view_duration(self, duration: int, view: int, like: int, favorite: int, reply: int) -> float:
         if duration <= 0:
             return 0.0
+        # 这里拿不到真实观看时长，只能用点赞/收藏/评论这些更强的互动信号做启发式估算，
+        # 同时把比例限制住，避免推导出离谱的完播率。
         engagement = (like * 1.0 + favorite * 1.5 + reply * 2.0) / max(view, 1)
         estimated_ratio = min(0.92, 0.25 + engagement * 8)
         return duration * estimated_ratio
 
+    # 把不同来源的视频数据整理成统一的 VideoMetrics 结构。
     def _build_metrics(self, item: Dict[str, Any], source: str) -> VideoMetrics:
         stat = item.get("stat", {})
         duration = int(item.get("duration") or item.get("duration_seconds") or 0)
@@ -70,6 +77,7 @@ class TopicAgent:
             extra={"estimated": True},
         )
 
+    # 从标题里提取一组简化后的关键词。
     def _extract_keywords(self, title: str) -> List[str]:
         clean = re.sub(r"[^\w\u4e00-\u9fff]", " ", title.lower())
         words = [word for word in clean.split() if len(word) >= 2]
@@ -79,6 +87,7 @@ class TopicAgent:
                 unique_words.append(word)
         return unique_words[:6]
 
+    # 按关键词粗略估算每类题材的竞争强度。
     def _competition_scores(self, videos: List[VideoMetrics]) -> None:
         bucket: Dict[str, List[VideoMetrics]] = defaultdict(list)
         for video in videos:
@@ -91,6 +100,7 @@ class TopicAgent:
             for video in group:
                 video.competition_score = competition
 
+    # 根据标题关键词猜测这条视频更像哪种创作风格。
     def _pick_video_type(self, title: str) -> str:
         mapping = {
             "教程": "教学",
@@ -109,18 +119,21 @@ class TopicAgent:
                 return style
         return "干货"
 
+    # 综合流量、互动和竞争度给视频打一个排序分数。
     def _score_video(self, video: VideoMetrics) -> float:
         traffic = math.log10(max(video.view, 1))
         interaction = video.like_rate * 100 + video.completion_rate * 10
         competition_penalty = 1 / max(video.competition_score * 100000 + 1, 1)
         return traffic + interaction + competition_penalty
 
+    # 拉取全站热点视频样本。
     def fetch_hot_videos(self) -> List[VideoMetrics]:
         data = self._safe_sync(hot.get_hot_videos(), [])
         self._sleep()
         items = data if isinstance(data, list) else data.get("list", [])
         return [self._build_metrics(item, "全站热榜") for item in items[:20]]
 
+    # 拉取指定分区的热点样本，并转换成可比较的指标结构。
     def fetch_partition_videos(self, partition_name: str | None = None) -> List[VideoMetrics]:
         tid = CONFIG.partition_tid(partition_name)
         data = self._safe_sync(video_zone.get_zone_hot_tags(tid), [])
@@ -136,6 +149,8 @@ class TopicAgent:
                 if isinstance(search_data, dict):
                     archive_view = int(search_data.get("archive_view", 0))
                     archive_count = int(search_data.get("archive", 0))
+                    # 分区接口更偏聚合数据，没有完整的热榜视频明细，所以这里按热词构造一条
+                    # 可比较的伪样本，供后面的统一打分逻辑复用。
                     pseudo_item = {
                         "bvid": f"tag-{name}",
                         "title": f"{name} 教程/趋势",
@@ -153,6 +168,7 @@ class TopicAgent:
                     results.append(self._build_metrics(pseudo_item, f"分区热榜:{partition_name or CONFIG.default_partition}"))
         return results[:10]
 
+    # 拉取同类 UP 主的近期视频样本。
     def fetch_peer_up_videos(self, up_ids: Iterable[int] | None = None) -> List[VideoMetrics]:
         target_up_ids = list(up_ids or CONFIG.default_peer_ups)
         videos: List[VideoMetrics] = []
@@ -184,6 +200,7 @@ class TopicAgent:
                 self._sleep()
         return videos
 
+    # 把视频时长文本解析成秒数。
     def _parse_duration(self, raw: str) -> int:
         if not raw:
             return 0
@@ -196,6 +213,7 @@ class TopicAgent:
             return parts[0] * 60 + parts[1]
         return parts[0] * 3600 + parts[1] * 60 + parts[2]
 
+    # 基于热点样本生成一组趋势选题建议。
     def _generate_trending_topics(self, videos: List[VideoMetrics]) -> List[TopicIdea]:
         self._competition_scores(videos)
         enriched = sorted(videos, key=self._score_video, reverse=True)
@@ -206,6 +224,7 @@ class TopicAgent:
             if not keywords:
                 continue
             core = " / ".join(keywords[:2])
+            # 用前两个关键词做一层去重，避免前三个选题都挤在同一类近似主题里。
             if core in seen:
                 continue
             seen.add(core)
@@ -226,11 +245,13 @@ class TopicAgent:
                 break
         return ideas
 
+    # 清洗用户输入的种子主题文本。
     def _clean_seed_topic(self, seed_topic: str) -> str:
         cleaned = re.sub(r"[【\[].*?[】\]]", "", seed_topic or "")
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_|")
         return cleaned[:60]
 
+    # 从样本里筛出和种子主题更相关的视频。
     def _find_related_videos(self, seed_topic: str, videos: List[VideoMetrics]) -> List[VideoMetrics]:
         keywords = self._extract_keywords(seed_topic)
         if not keywords:
@@ -242,6 +263,7 @@ class TopicAgent:
                 related.append(video)
         return sorted(related, key=self._score_video, reverse=True)
 
+    # 为种子主题变体生成解释文案，说明为什么值得做。
     def _build_seed_reason(
         self,
         seed_topic: str,
@@ -268,6 +290,7 @@ class TopicAgent:
             f"和 {peer_count} 个同类 UP 样本做延展，避免直接跟全站热榜撞题。"
         )
 
+    # 识别种子主题属于哪种创作场景。
     def _seed_topic_mode(self, cleaned: str) -> str:
         if any(token in cleaned for token in ["第1条、第2条、第3条", "做系列内容时", "做成系列内容时"]):
             return "series_plan"
@@ -279,6 +302,7 @@ class TopicAgent:
             return "first_video"
         return "general"
 
+    # 从种子主题里提取更稳定的主体描述。
     def _seed_topic_subject(self, cleaned: str) -> str:
         markers = [
             "第一条视频",
@@ -301,6 +325,7 @@ class TopicAgent:
             return cleaned.split("：", 1)[0].replace("别直接硬拍", "").strip(" ：，,。")
         return cleaned
 
+    # 围绕种子主题构造几种可执行的选题变体。
     def _build_seed_candidates(self, cleaned: str) -> List[tuple[str, str]]:
         mode = self._seed_topic_mode(cleaned)
         subject = self._seed_topic_subject(cleaned)
@@ -336,6 +361,7 @@ class TopicAgent:
             ("系列规划", f"{cleaned}如果做成系列，下一条最适合拍什么"),
         ]
 
+    # 基于用户种子主题生成优先级更高的选题结果。
     def _generate_seed_topics(
         self,
         seed_topic: str | None,
@@ -350,6 +376,8 @@ class TopicAgent:
         if not cleaned:
             return []
 
+        # 用户已经给了明确方向时，优先保留这个意图，只借市场样本去扩展相邻变体，
+        # 而不是直接被热点结果覆盖掉。
         related_videos = self._find_related_videos(cleaned, videos)
         keywords = self._extract_keywords(cleaned) or [cleaned[:12]]
         base_style = self._pick_video_type(cleaned)
@@ -375,6 +403,7 @@ class TopicAgent:
             )
         return ideas
 
+    # 合并优先结果和补充结果，并按顺序去重截断。
     def _merge_ideas(self, preferred: List[TopicIdea], fallback: List[TopicIdea], limit: int = 3) -> List[TopicIdea]:
         result: List[TopicIdea] = []
         seen = set()
@@ -388,6 +417,7 @@ class TopicAgent:
                 break
         return result
 
+    # 执行完整选题流程，汇总热点、分区和同类账号样本后产出最终建议。
     def run(
         self,
         partition_name: str | None = None,
@@ -401,6 +431,7 @@ class TopicAgent:
 
         preferred = self._generate_seed_topics(seed_topic, all_videos, partition_name, up_ids)
         trending = self._generate_trending_topics(all_videos)
+        # 先用用户种子主题的结果，数量不够时再拿趋势结果补齐前三个建议。
         ideas = self._merge_ideas(preferred, trending, limit=3)
 
         return {

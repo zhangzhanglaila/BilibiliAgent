@@ -24,13 +24,16 @@ STYLE_ENDING = {
 
 
 class CopywritingAgent:
+    # 初始化文案 Agent，并准备可选的 LLM 增强能力。
     def __init__(self) -> None:
         self.llm = LLMClient()
 
+    # 规则模板和 LLM 输出都走同一套清洗逻辑，避免前端拿到两种风格完全不同的脏数据。
     def _clean_text(self, text: str) -> str:
         value = re.sub(r"\s+", " ", text or "")
         return value.strip(" ，,。.;；:：-_")
 
+    # 把自然语言主题归类到几种固定的文案框架里。
     def _topic_mode(self, topic: str) -> str:
         cleaned = self._clean_text(topic)
         if any(token in cleaned for token in ["第1条、第2条、第3条", "做系列内容时", "做成系列内容时"]):
@@ -43,6 +46,7 @@ class CopywritingAgent:
             return "first_video"
         return "general"
 
+    # 从完整主题里抽取更适合作为主语的主体部分。
     def _extract_subject(self, topic: str) -> str:
         cleaned = self._clean_text(topic)
         if not cleaned:
@@ -70,18 +74,21 @@ class CopywritingAgent:
             return self._clean_text(direct_split.removeprefix("别直接硬拍"))
         return cleaned
 
+    # 把主体整理成更像“账号定位”的表达。
     def _account_subject(self, subject: str) -> str:
         cleaned = self._clean_text(subject)
         if not cleaned or cleaned == "这类内容":
             return "这类账号"
         return cleaned if cleaned.endswith("账号") else f"{cleaned}账号"
 
+    # 把主体整理成更像“内容主题”的表达。
     def _content_subject(self, subject: str) -> str:
         cleaned = self._clean_text(subject)
         if not cleaned:
             return "这类内容"
         return cleaned[:-2] if cleaned.endswith("账号") else cleaned
 
+    # 从主题文本里提取标签和标题可复用的关键词。
     def _extract_keywords(self, text: str) -> List[str]:
         words = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", self._clean_text(text))
         keywords: List[str] = []
@@ -91,6 +98,7 @@ class CopywritingAgent:
             keywords.append(word)
         return keywords[:6]
 
+    # 按主题模式和风格生成多组可直接使用的标题。
     def _build_titles(self, topic: str, style: str) -> List[str]:
         mode = self._topic_mode(topic)
         subject = self._extract_subject(topic)
@@ -145,6 +153,7 @@ class CopywritingAgent:
             f"{content_subject}想做成系列，先从这一条开始",
         ]
 
+    # 按主题模式生成分段脚本结构。
     def _build_script(self, topic: str, style: str) -> List[Dict[str, str]]:
         mode = self._topic_mode(topic)
         subject = self._extract_subject(topic)
@@ -267,6 +276,7 @@ class CopywritingAgent:
             },
         ]
 
+    # 生成适合发布页使用的简介文本。
     def _build_description(self, topic: str, style: str) -> str:
         mode = self._topic_mode(topic)
         subject = self._content_subject(self._extract_subject(topic))
@@ -282,6 +292,7 @@ class CopywritingAgent:
             f"{summaries.get(mode, summaries['general'])} 文案风格为「{style}」，可直接按段落改成自己的版本。"
         )
 
+    # 生成一组适合发布时使用的标签。
     def _build_tags(self, topic: str, style: str) -> List[str]:
         mode = self._topic_mode(topic)
         subject = self._content_subject(self._extract_subject(topic))
@@ -300,6 +311,7 @@ class CopywritingAgent:
             tags.append(clean)
         return tags[:12]
 
+    # 生成用于提升互动率的置顶评论。
     def _build_pinned_comment(self, topic: str) -> str:
         mode = self._topic_mode(topic)
         subject = self._content_subject(self._extract_subject(topic))
@@ -311,6 +323,7 @@ class CopywritingAgent:
             return "你现在最卡的是第 1 条、第 2 条还是第 3 条？评论区留数字，我按这个顺序继续拆。"
         return f"如果你也在做 {subject}，评论区告诉我你最想先优化哪一步，我继续按这个方向出下一条。"
 
+    # 在不依赖模型的情况下构造一份完整的文案兜底结果。
     def _fallback(self, topic: str, style: str) -> CopywritingResult:
         return CopywritingResult(
             topic=topic,
@@ -323,6 +336,7 @@ class CopywritingAgent:
             raw_text="fallback",
         )
 
+    # 从模型结果里挑出可用标题，失败时回退到本地兜底标题。
     def _pick_titles(self, data: Dict[str, Any], fallback: CopywritingResult) -> List[str]:
         raw = data.get("titles")
         if not isinstance(raw, list):
@@ -330,6 +344,7 @@ class CopywritingAgent:
         values = [self._clean_text(str(item)) for item in raw if self._clean_text(str(item))]
         return values[:3] or fallback.titles
 
+    # 从模型结果里挑出可用脚本段落，失败时回退到本地兜底脚本。
     def _pick_script(self, data: Dict[str, Any], fallback: CopywritingResult) -> List[Dict[str, str]]:
         raw = data.get("script")
         if not isinstance(raw, list):
@@ -353,6 +368,7 @@ class CopywritingAgent:
             )
         return result or fallback.script
 
+    # 从模型结果里挑出可用标签，失败时回退到本地兜底标签。
     def _pick_tags(self, data: Dict[str, Any], fallback: CopywritingResult) -> List[str]:
         raw = data.get("tags")
         if not isinstance(raw, list):
@@ -366,6 +382,7 @@ class CopywritingAgent:
             result.append(clean)
         return result[:15] or fallback.tags
 
+    # 执行完整文案生成流程，先准备规则兜底，再按需用 LLM 增强。
     def run(self, topic: str | None = None, topic_idea: TopicIdea | None = None, style: str = "干货") -> CopywritingResult:
         final_topic = self._clean_text(topic or (topic_idea.topic if topic_idea else "B站高效运营"))
         fallback = self._fallback(final_topic, style)

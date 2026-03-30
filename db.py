@@ -11,11 +11,13 @@ from models import VideoMetrics
 
 
 class SQLiteStore:
+    # 初始化 SQLite 存储并确保基础表结构存在。
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path or CONFIG.db_path
         self.init_db()
 
     @contextmanager
+    # 打开一个带自动提交和关闭的数据库连接上下文。
     def connect(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -25,6 +27,7 @@ class SQLiteStore:
         finally:
             conn.close()
 
+    # 初始化视频指标快照表，供优化模块记录历史分析数据。
     def init_db(self) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -51,6 +54,7 @@ class SQLiteStore:
                 """
             )
 
+    # 保存一条视频指标快照，按追加方式记录每次分析时刻的数据。
     def save_video_metrics(self, metrics: VideoMetrics) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -77,10 +81,12 @@ class SQLiteStore:
                     metrics.completion_rate,
                     metrics.competition_score,
                     metrics.source,
+                    # 指标快照按追加写入，方便后面回看同一视频在不同时间点的分析结果。
                     datetime.now().isoformat(timespec="seconds"),
                 ),
             )
 
+    # 查询某个 BV 号最近的若干条历史指标快照。
     def get_history(self, bvid: str, limit: int = 10) -> List[Dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -94,6 +100,7 @@ class SQLiteStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    # 读取某个 BV 号最新的一条指标快照。
     def latest_snapshot(self, bvid: str) -> Dict[str, Any] | None:
         history = self.get_history(bvid, limit=1)
         return history[0] if history else None

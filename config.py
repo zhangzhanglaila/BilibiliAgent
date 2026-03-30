@@ -61,17 +61,21 @@ class AppConfig:
         ]
     )
 
+    # 把外部输入的分区名或别名归一化成项目内部使用的主分区标识。
     def normalize_partition(self, partition_name: str | None = None) -> str:
         name = (partition_name or self.default_partition).strip().lower()
         name = PARTITION_ALIASES.get(name, name)
         return name if name in PARTITION_TIDS else "knowledge"
 
+    # 判断当前是否已经配置 LLM Key，从而决定能否启用 LLM 能力。
     def llm_enabled(self) -> bool:
         return bool((self.llm_api_key or "").strip())
 
+    # 根据是否启用 LLM 返回当前运行模式标识。
     def runtime_mode(self) -> str:
         return "llm_agent" if self.llm_enabled() else "rules"
 
+    # 根据归一化后的分区名取出对应的 B 站 tid。
     def partition_tid(self, partition_name: str | None = None) -> int:
         return PARTITION_TIDS[self.normalize_partition(partition_name)]
 

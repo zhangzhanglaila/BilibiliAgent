@@ -19,25 +19,30 @@ DEFAULT_REPLY_TEMPLATES = {
 
 
 class OperationAgent:
+    # 初始化运营 Agent，准备请求节流、LLM 客户端和垃圾评论关键词。
     def __init__(self, request_interval: float | None = None) -> None:
         self.request_interval = request_interval or CONFIG.request_interval
         self.llm = LLMClient()
         self.spam_keywords = ["加V", "兼职", "返利", "私聊", "vx", "微信", "傻", "废物", "引战"]
 
+    # 在连续请求 B 站接口之间做节流，降低触发风控的概率。
     def _sleep(self) -> None:
         time.sleep(self.request_interval)
 
+    # 安全执行 bilibili_api 的同步调用，失败时返回兜底值而不是直接抛异常。
     def _safe_sync(self, coro, default):
         try:
             return sync(coro)
         except Exception:
             return default
 
+    # 用关键词规则快速判断评论是否更像广告、引战或垃圾内容。
     def is_spam(self, text: str, custom_keywords: Iterable[str] | None = None) -> bool:
         words = self.spam_keywords + list(custom_keywords or [])
         lower = text.lower()
         return any(word.lower() in lower for word in words)
 
+    # 根据评论内容生成一条简短回复，优先保证无模型时也能返回自然兜底文本。
     def generate_reply(self, text: str, style: str = "友好", template_map: Dict[str, str] | None = None) -> str:
         templates = {**DEFAULT_REPLY_TEMPLATES, **(template_map or {})}
         if any(key in text for key in ["谢谢", "支持", "喜欢"]):
@@ -50,6 +55,7 @@ class OperationAgent:
         user_prompt = f"评论内容：{text}\n回复风格：{style}\n请生成一条 30 字以内的中文回复。"
         return self.llm.invoke_text(system_prompt, user_prompt, fallback)
 
+    # 拉取目标视频的评论列表，供后续做回复、点赞和关注建议。
     def fetch_comments(self, bv_id: str) -> List[Dict]:
         try:
             target = video.Video(bvid=bv_id)
@@ -63,6 +69,7 @@ class OperationAgent:
         except Exception:
             return []
 
+    # 扫描评论区并产出一组运营建议动作，默认只做 dry-run 不直接执行。
     def process_video_interactions(
         self,
         bv_id: str,
@@ -138,6 +145,7 @@ class OperationAgent:
             summary=summary,
         )
 
+    # 按固定间隔重复执行互动分析，适合做简单轮询监控。
     def monitor_loop(self, bv_id: str, interval_seconds: int = 60, rounds: int = 3, dry_run: bool = True) -> List[OperationResult]:
         results = []
         for _ in range(rounds):

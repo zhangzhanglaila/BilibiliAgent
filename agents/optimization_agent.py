@@ -12,16 +12,19 @@ from models import OptimizationSuggestion, VideoMetrics
 
 
 class OptimizationAgent:
+    # 初始化优化 Agent，准备持久化快照的存储层和可选的 LLM 增强能力。
     def __init__(self, store: SQLiteStore | None = None) -> None:
         self.store = store or SQLiteStore()
         self.llm = LLMClient()
 
+    # 用公开互动数据估算一个近似完播率，供规则诊断和优化建议参考。
     def _estimate_completion_rate(self, duration: int, view: int, like: int, coin: int, favorite: int) -> float:
         if duration <= 0:
             return 0.0
         weighted = (like * 1.0 + coin * 1.2 + favorite * 1.4) / max(view, 1)
         return min(0.95, 0.22 + weighted * 10)
 
+    # 拉取目标视频指标并写入本地快照，失败时返回可比较的兜底样本。
     def fetch_video_metrics(self, bv_id: str) -> VideoMetrics:
         try:
             target = video.Video(bvid=bv_id)
@@ -78,6 +81,7 @@ class OptimizationAgent:
             self.store.save_video_metrics(metrics)
             return metrics
 
+    # 把当前视频和对标样本做规则对比，输出可直接执行的诊断与内容建议。
     def _rule_based_diagnosis(self, current: VideoMetrics, benchmark_videos: List[VideoMetrics]) -> Dict[str, List[str] | str]:
         avg_views = mean([v.view for v in benchmark_videos]) if benchmark_videos else current.view
         avg_like_rate = mean([v.like_rate for v in benchmark_videos]) if benchmark_videos else current.like_rate
@@ -100,6 +104,7 @@ class OptimizationAgent:
             "content_suggestions": content_suggestions,
         }
 
+    # 执行完整优化流程，先走规则兜底，再用 LLM 对建议做结构化增强。
     def run(self, bv_id: str, benchmark_videos: List[VideoMetrics] | None = None) -> OptimizationSuggestion:
         current = self.fetch_video_metrics(bv_id)
         benchmark_videos = benchmark_videos or []

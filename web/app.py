@@ -94,15 +94,133 @@ REFERENCE_STOPWORDS = CREATOR_STOPWORDS | {
 }
 QUESTION_TOKENS = ("怎么", "如何", "为什么", "应该", "什么", "哪种", "哪类", "能不能")
 RUNTIME_MODE_LABELS = {
-    "rules": "无 Key 规则模式",
+    "rules": "无 Key 逻辑模式",
     "llm_agent": "LLM Agent 模式",
 }
 
 RAW_TOPIC_AGENT = TopicAgent()
 RAW_COPY_AGENT = CopywritingAgent()
 LLM_WORKSPACE_AGENT: LLMWorkspaceAgent | None = None
+LLM_WORKSPACE_SIGNATURE: tuple[str, ...] | None = None
+RUNTIME_LLM_ENABLED = CONFIG.llm_enabled()
+RUNTIME_LLM_CONFIG: dict[str, str] | None = (
+    {
+        "provider": (CONFIG.llm_provider or "openai").strip() or "openai",
+        "base_url": (CONFIG.llm_base_url or "").strip(),
+        "api_key": (CONFIG.llm_api_key or "").strip(),
+        "model": (CONFIG.llm_model or "gpt-5.4").strip() or "gpt-5.4",
+        "source": "env",
+    }
+    if CONFIG.llm_enabled()
+    else None
+)
 
 
+# 判断当前是否已经保存了可用于启用 LLM Agent 的运行时配置。
+def has_saved_runtime_llm_config() -> bool:
+    return bool((RUNTIME_LLM_CONFIG or {}).get("api_key", "").strip())
+
+
+# 判断当前开关状态下是否真正启用了 LLM Agent 模式。
+def runtime_llm_enabled() -> bool:
+    return bool(RUNTIME_LLM_ENABLED and has_saved_runtime_llm_config())
+
+
+# 返回当前运行模式标识，优先看页面运行时开关而不是 .env 默认值。
+def runtime_mode() -> str:
+    return "llm_agent" if runtime_llm_enabled() else "rules"
+
+
+# 返回当前处于启用状态的 LLM 配置，没有启用时返回空。
+def get_active_runtime_llm_config() -> dict[str, str] | None:
+    if not runtime_llm_enabled():
+        return None
+    return dict(RUNTIME_LLM_CONFIG or {})
+
+
+# 返回当前保存的 LLM 配置，不论运行模式开关是否已开启。
+def get_saved_runtime_llm_config() -> dict[str, str] | None:
+    if not has_saved_runtime_llm_config():
+        return None
+    return dict(RUNTIME_LLM_CONFIG or {})
+
+
+# 对 API Key 做脱敏，避免把完整密钥直接返回给前端。
+def mask_api_key(value: str) -> str:
+    raw = (value or "").strip()
+    if len(raw) <= 8:
+        return "*" * len(raw)
+    return f"{raw[:4]}{'*' * max(4, len(raw) - 8)}{raw[-4:]}"
+
+
+# 根据当前激活的运行时配置构造 LLMClient 所需参数。
+def build_runtime_llm_client_kwargs() -> dict:
+    config = get_active_runtime_llm_config()
+    if not config:
+        return {}
+    return {
+        "provider": config.get("provider", "openai"),
+        "api_key": config.get("api_key", ""),
+        "base_url": config.get("base_url", ""),
+        "model": config.get("model", "") or (CONFIG.llm_model or "gpt-5.4"),
+        "timeout_seconds": CONFIG.llm_timeout_seconds,
+        "max_retries": CONFIG.llm_max_retries,
+        "retry_backoff_seconds": CONFIG.llm_retry_backoff_seconds,
+    }
+
+
+# 基于当前运行时配置创建一个 LLMClient 实例。
+def build_runtime_llm_client() -> LLMClient:
+    kwargs = build_runtime_llm_client_kwargs()
+    return LLMClient(**kwargs) if kwargs else LLMClient(api_key="", base_url="", model=(CONFIG.llm_model or "gpt-5.4"))
+
+
+# 校验并清洗前端提交的运行时 LLM 配置。
+def sanitize_runtime_llm_config_payload(data: dict) -> dict[str, str]:
+    base_url = str(data.get("base_url") or "").strip()
+    api_key = str(data.get("api_key") or "").strip()
+    provider = str(data.get("provider") or "").strip() or "openai"
+    model = str(data.get("model") or "").strip() or (CONFIG.llm_model or "gpt-5.4")
+
+    if not base_url or not api_key or not provider:
+        raise ValueError("请完整填写 URL、Key 和模型供应商。")
+    if not re.match(r"^https?://", base_url, flags=re.IGNORECASE):
+        raise ValueError("URL 需要以 http:// 或 https:// 开头。")
+
+    return {
+        "provider": provider,
+        "base_url": base_url.rstrip("/"),
+        "api_key": api_key,
+        "model": model,
+        "source": "runtime",
+    }
+
+
+# 清空缓存的 LLM Agent，确保切模式或改配置后会按新参数重建。
+def clear_llm_workspace_agent_cache() -> None:
+    global LLM_WORKSPACE_AGENT, LLM_WORKSPACE_SIGNATURE
+    LLM_WORKSPACE_AGENT = None
+    LLM_WORKSPACE_SIGNATURE = None
+
+
+# 保存新的运行时 LLM 配置，并立即切换到 LLM Agent 模式。
+def save_runtime_llm_config(data: dict) -> dict[str, str]:
+    global RUNTIME_LLM_CONFIG, RUNTIME_LLM_ENABLED
+    config = sanitize_runtime_llm_config_payload(data)
+    RUNTIME_LLM_CONFIG = config
+    RUNTIME_LLM_ENABLED = True
+    clear_llm_workspace_agent_cache()
+    return dict(config)
+
+
+# 根据开关状态切换当前运行模式，但保留已经填写过的 LLM 配置。
+def set_runtime_llm_enabled(enabled: bool) -> None:
+    global RUNTIME_LLM_ENABLED
+    RUNTIME_LLM_ENABLED = bool(enabled)
+    clear_llm_workspace_agent_cache()
+
+
+# 把任意输入尽量安全地转换成整数，失败时返回 0。
 def safe_int(value: object) -> int:
     try:
         return int(value or 0)
@@ -110,6 +228,7 @@ def safe_int(value: object) -> int:
         return 0
 
 
+# 把带“万/亿”等单位的展示数值转换成整数指标。
 def safe_metric_int(value: object) -> int:
     if isinstance(value, (int, float)):
         return int(value)
@@ -133,10 +252,12 @@ def safe_metric_int(value: object) -> int:
         return 0
 
 
+# 复用文案 Agent 的清洗逻辑来清理文本输出。
 def clean_copy_text(value: object) -> str:
     return RAW_COPY_AGENT._clean_text(str(value or ""))
 
 
+# 基于规则兜底文案构造一个适合接口直接返回的 payload。
 def build_fallback_copy_payload(topic: str, style: str) -> dict:
     fallback = RAW_COPY_AGENT._fallback(topic, style)
     return {
@@ -150,6 +271,7 @@ def build_fallback_copy_payload(topic: str, style: str) -> dict:
     }
 
 
+# 统一清洗文案结果结构，确保前端拿到完整可用的字段。
 def normalize_copy_result_payload(copy_result: object, topic: str, style: str) -> dict:
     clean_topic = clean_copy_text(topic) or "B站内容策划"
     clean_style = clean_copy_text(style) or "干货"
@@ -203,12 +325,14 @@ def normalize_copy_result_payload(copy_result: object, topic: str, style: str) -
     }
 
 
+# 发起 HTTP 请求并返回文本响应内容。
 def fetch_text(url: str, timeout: int = 10) -> str:
     request_obj = Request(url, headers=DEFAULT_HEADERS)
     with urlopen(request_obj, timeout=timeout) as response:
         return response.read().decode("utf-8", errors="ignore")
 
 
+# 请求 JSON 接口并校验返回体是字典结构。
 def fetch_json(url: str) -> dict:
     payload = json.loads(fetch_text(url))
     if not isinstance(payload, dict):
@@ -216,6 +340,7 @@ def fetch_json(url: str) -> dict:
     return payload
 
 
+# 展开 b23.tv 这类短链，得到最终跳转后的完整链接。
 def resolve_short_link(url: str) -> str:
     if not url or not any(host in url for host in SHORT_LINK_HOSTS):
         return url
@@ -228,6 +353,7 @@ def resolve_short_link(url: str) -> str:
         return url
 
 
+# 从任意 B 站视频链接里提取标准 BV 号。
 def extract_bvid(url: str) -> str:
     raw_url = (url or "").strip()
     candidate = resolve_short_link(raw_url)
@@ -240,6 +366,7 @@ def extract_bvid(url: str) -> str:
     return "BV" + value[2:]
 
 
+# 把 B 站原始分区信息映射成项目内部统一使用的分区标识。
 def map_partition(tname: str, tid: int) -> str:
     text = (tname or "").lower()
     if any(keyword in text for keyword in ["知识", "科普", "学习", "校园", "职业"]):
@@ -266,6 +393,7 @@ def map_partition(tname: str, tid: int) -> str:
     return "knowledge"
 
 
+# 根据标题和分区特征猜测更适合的内容风格。
 def guess_style(title: str, partition: str, tname: str) -> str:
     text = f"{title} {tname}".lower()
     if any(keyword in text for keyword in ["教程", "教学", "保姆级", "入门", "攻略", "怎么", "如何"]):
@@ -279,12 +407,14 @@ def guess_style(title: str, partition: str, tname: str) -> str:
     return "干货"
 
 
+# 从视频标题里提炼出更适合作为分析主题的短文本。
 def build_topic(title: str) -> str:
     cleaned = re.sub(r"[【\[].*?[】\]]", "", title or "")
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_|")
     return (cleaned or title or "B站内容选题拆解").strip()
 
 
+# 把创作者输入的领域、方向和想法合成为一个种子主题。
 def build_seed_topic(field_name: str, direction: str, idea: str) -> str:
     field_name = normalize_creator_text(field_name)
     direction = normalize_creator_direction(direction, idea)
@@ -309,12 +439,14 @@ def build_seed_topic(field_name: str, direction: str, idea: str) -> str:
     return idea_tail or profile
 
 
+# 统一清洗创作者输入文本，去掉多余分隔符和空白。
 def normalize_creator_text(text: str) -> str:
     value = re.sub(r"[/|｜]+", " ", text or "")
     value = re.sub(r"\s+", " ", value).strip(" -_|，,。.;；:")
     return value
 
 
+# 对创作方向做额外归一化，处理一些项目里常见的表述别名。
 def normalize_creator_direction(direction: str, idea: str) -> str:
     value = normalize_creator_text(direction)
     combined = f"{value} {idea}"
@@ -325,6 +457,7 @@ def normalize_creator_direction(direction: str, idea: str) -> str:
     return normalize_creator_text(value)
 
 
+# 把领域和方向合并成一个更稳定的创作者画像描述。
 def merge_creator_profile(field_name: str, direction: str) -> str:
     if field_name and direction:
         if field_name in direction:
@@ -335,6 +468,7 @@ def merge_creator_profile(field_name: str, direction: str) -> str:
     return field_name or direction
 
 
+# 进一步修正创作者画像，处理颜值向、舞蹈向等特殊场景。
 def refine_creator_profile(field_name: str, direction: str, idea: str) -> str:
     profile = merge_creator_profile(field_name, direction)
     combined = normalize_creator_text(f"{field_name} {direction} {idea}")
@@ -350,6 +484,7 @@ def refine_creator_profile(field_name: str, direction: str, idea: str) -> str:
     return profile
 
 
+# 从文本前缀中剥离已经在上下文里表达过的重复信息。
 def strip_leading_context(text: str, contexts: list[str]) -> str:
     result = text
     for context in contexts:
@@ -360,6 +495,7 @@ def strip_leading_context(text: str, contexts: list[str]) -> str:
     return result
 
 
+# 从创作者输入中抽取关键词，供趋势聚合和题目拼装使用。
 def extract_creator_keywords(text: str) -> list[str]:
     clean = normalize_creator_text(text).lower()
     words = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", clean)
@@ -372,6 +508,7 @@ def extract_creator_keywords(text: str) -> list[str]:
     return keywords
 
 
+# 从样本视频标题里聚合出当前方向更常见的趋势关键词。
 def collect_creator_trending_keywords(videos: list[dict], partition_name: str) -> list[str]:
     counts: dict[str, int] = {}
     for item in videos[:12]:
@@ -385,6 +522,7 @@ def collect_creator_trending_keywords(videos: list[dict], partition_name: str) -
     return CREATOR_PARTITION_ANGLES.get(partition_name, CREATOR_PARTITION_ANGLES["knowledge"])[:3]
 
 
+# 为创作者选题结果生成一段“为什么推荐这个方向”的解释。
 def build_creator_reason(
     question_topic: str,
     partition_name: str,
@@ -401,6 +539,7 @@ def build_creator_reason(
     )
 
 
+# 把基础选题结果改写成更贴近创作者输入语境的结果结构。
 def build_creator_topic_result(
     field_name: str,
     direction: str,
@@ -461,6 +600,7 @@ def build_creator_topic_result(
     }
 
 
+# 在大段文本里找到某个标记后面的 JSON 对象片段。
 def find_json_object(text: str, marker: str) -> str | None:
     index = text.find(marker)
     if index < 0:
@@ -498,17 +638,20 @@ def find_json_object(text: str, marker: str) -> str | None:
     return None
 
 
+# 从 HTML 的 meta 标签里提取指定属性的 content。
 def extract_meta(html: str, attr_name: str, attr_value: str) -> str:
     pattern = rf'<meta[^>]+{attr_name}="{re.escape(attr_value)}"[^>]+content="([^"]*)"'
     match = re.search(pattern, html, flags=re.IGNORECASE)
     return unescape(match.group(1)).strip() if match else ""
 
 
+# 按正则提取第一个匹配结果并做 HTML 反转义。
 def extract_first_match(text: str, pattern: str) -> str:
     match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
     return unescape(match.group(1)).strip() if match else ""
 
 
+# 从 B 站页面源码里提取 __INITIAL_STATE__ 初始化数据。
 def extract_initial_state(html: str) -> dict:
     for marker in ("window.__INITIAL_STATE__=", "__INITIAL_STATE__="):
         raw = find_json_object(html, marker)
@@ -523,6 +666,7 @@ def extract_initial_state(html: str) -> dict:
     return {}
 
 
+# 把 HTML 页面和初始化状态里的信息整理成统一视频信息结构。
 def normalize_html_info(html: str, state: dict, bvid: str) -> dict:
     video_data = state.get("videoData") or state.get("videoInfo") or state.get("archive") or {}
     owner = video_data.get("owner") or state.get("upData") or {}
@@ -583,6 +727,7 @@ def normalize_html_info(html: str, state: dict, bvid: str) -> dict:
     }
 
 
+# 通过 B 站公开视频接口拉取视频详情。
 def fetch_video_info_via_public_api(bvid: str) -> dict:
     query = urlencode({"bvid": bvid})
     payload = fetch_json(f"https://api.bilibili.com/x/web-interface/view?{query}")
@@ -595,6 +740,7 @@ def fetch_video_info_via_public_api(bvid: str) -> dict:
     return info
 
 
+# 在 API 不可用时，通过页面源码解析视频详情。
 def fetch_video_info_via_html(url: str, bvid: str) -> dict:
     candidates = [url.strip(), f"https://www.bilibili.com/video/{bvid}"]
     errors: list[str] = []
@@ -612,9 +758,11 @@ def fetch_video_info_via_html(url: str, bvid: str) -> dict:
     raise ValueError("网页源码解析失败: " + "；".join(errors))
 
 
+# 按多级回退策略拉取视频信息，尽量保证解析成功。
 def fetch_video_info(url: str, bvid: str) -> dict:
     errors: list[str] = []
 
+    # 先走结构化程度最高的来源，失败后再逐级回退到库调用和 HTML 解析。
     try:
         return fetch_video_info_via_public_api(bvid)
     except Exception as exc:
@@ -633,6 +781,7 @@ def fetch_video_info(url: str, bvid: str) -> dict:
     raise ValueError("；".join(errors))
 
 
+# 从视频详情里抽取前端和分析链路要用的核心指标。
 def extract_video_stats(info: dict) -> dict:
     stat = info.get("stat") or {}
     view = safe_int(stat.get("view") or info.get("play"))
@@ -654,6 +803,7 @@ def extract_video_stats(info: dict) -> dict:
     }
 
 
+# 把原始视频详情整理成项目内部统一的 resolved 结构。
 def build_resolved_payload(info: dict, bvid: str) -> dict:
     owner = info.get("owner", {})
     mid = safe_int(owner.get("mid"))
@@ -667,6 +817,7 @@ def build_resolved_payload(info: dict, bvid: str) -> dict:
     style = guess_style(title, partition, tname)
     partition_label = PARTITION_LABELS.get(partition, partition)
 
+    # 不管上游信息来自哪个渠道，这里都整理成前端和两条分析链路共用的统一结构。
     return {
         "bv_id": bvid,
         "mid": mid,
@@ -686,12 +837,14 @@ def build_resolved_payload(info: dict, bvid: str) -> dict:
     }
 
 
+# 从链接出发完成 BV 提取、视频信息解析和统一结构构建。
 def resolve_video_payload(url: str) -> dict:
     bvid = extract_bvid(url)
     info = fetch_video_info(url, bvid)
     return build_resolved_payload(info, bvid)
 
 
+# 判断前端缓存的 resolved 结果是否还能用于当前链接。
 def is_resolved_payload_usable(payload: object, url: str) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -706,9 +859,11 @@ def is_resolved_payload_usable(payload: object, url: str) -> bool:
     except Exception:
         expected_bv = ""
 
+    # 前端会缓存一次解析结果，用户继续改链接时要及时丢掉已经过期的 resolved 数据。
     return not expected_bv or bv_id.upper() == expected_bv.upper()
 
 
+# 从标题文本本身提炼出几个强弱点分析结论。
 def inspect_title_strength(title: str) -> list[str]:
     points: list[str] = []
     if re.search(r"\d", title):
@@ -724,6 +879,7 @@ def inspect_title_strength(title: str) -> list[str]:
     return points
 
 
+# 把不同链路产出的分数统一映射到前端展示使用的分数区间。
 def uplift_performance_score(raw_score: object, is_hot: bool) -> int:
     try:
         value = float(raw_score or 0)
@@ -733,20 +889,21 @@ def uplift_performance_score(raw_score: object, is_hot: bool) -> int:
     value = max(0.0, value)
     floor = 82 if is_hot else 50
 
-    # Some chains may still return a coarse 0-5 score.
+    # 某些链路可能还会返回 0-5 这种粗粒度分数，这里统一抬到前端使用的分数带。
     if value <= 5:
         step = 3 if is_hot else 4
         return min(96, floor + int(round(value * step)))
 
-    # Some chains return a 0-10 style score.
+    # 也兼容 0-10 这类中间分数带。
     if value <= 10:
         step = 1.4 if is_hot else 2.0
         return min(96, floor + int(round(value * step)))
 
-    # If the model already returns a 0-100 score, keep it but allow low-performance videos to stay lower.
+    # 如果已经是 0-100，就直接沿用，但仍然保留热门/低表现各自的下限语义。
     return min(96, max(floor, int(round(value))))
 
 
+# 统一整理视频表现判断结果，补齐默认字段。
 def normalize_performance_payload(performance: object) -> dict:
     if not isinstance(performance, dict):
         return {
@@ -766,6 +923,7 @@ def normalize_performance_payload(performance: object) -> dict:
     return normalized
 
 
+# 用规则方式根据播放、点赞、投币、收藏等指标判断视频表现。
 def classify_video_performance(resolved: dict) -> dict:
     stats = resolved.get("stats", {})
     view = safe_int(stats.get("view"))
@@ -864,6 +1022,7 @@ def classify_video_performance(resolved: dict) -> dict:
     )
 
 
+# 为热门视频生成“为什么会火”和“还能怎么延展”的分析结果。
 def build_hot_analysis(resolved: dict, performance: dict, topic_result: dict) -> dict:
     stats = resolved.get("stats", {})
     followup_topics = [idea.get("topic", "") for idea in topic_result.get("ideas", []) if idea.get("topic")]
@@ -880,6 +1039,7 @@ def build_hot_analysis(resolved: dict, performance: dict, topic_result: dict) ->
     }
 
 
+# 为低表现视频生成“哪里弱”和“下一步怎么改”的分析结果。
 def build_low_performance_analysis(resolved: dict, performance: dict, optimize_result: dict, topic_result: dict) -> dict:
     next_topics = [idea.get("topic", "") for idea in topic_result.get("ideas", []) if idea.get("topic")]
     return {
@@ -891,25 +1051,43 @@ def build_low_performance_analysis(resolved: dict, performance: dict, optimize_r
     }
 
 
+# 构建当前运行模式信息，供前端初始化页面状态。
 def build_runtime_payload() -> dict:
-    mode = CONFIG.runtime_mode()
-    llm_enabled = CONFIG.llm_enabled()
+    mode = runtime_mode()
+    llm_enabled = runtime_llm_enabled()
+    saved_config = get_saved_runtime_llm_config() or {}
+    config_source = saved_config.get("source", "")
+    switch_checked = bool(RUNTIME_LLM_ENABLED)
+    has_saved_config = bool(saved_config)
     return {
         "mode": mode,
         "mode_label": RUNTIME_MODE_LABELS.get(mode, mode),
         "llm_enabled": llm_enabled,
         "chat_available": llm_enabled,
+        "switch_checked": switch_checked,
+        "has_saved_llm_config": has_saved_config,
+        "saved_config_source": config_source,
+        "saved_provider": saved_config.get("provider", ""),
+        "saved_model": saved_config.get("model", ""),
+        "saved_base_url": saved_config.get("base_url", ""),
+        "saved_api_key_masked": mask_api_key(saved_config.get("api_key", "")),
+        "requires_config": False,
         "mode_title": "当前运行中：LLM Agent 模式" if llm_enabled else "当前运行中：无 Key 逻辑模式",
         "mode_description": "已切换到 LLM Agent 中枢，分析、决策和生成全部由大模型实时完成。"
         if llm_enabled
-        else "当前未配置 LLM_API_KEY，系统运行在纯代码规则模式，不会消耗 token。",
+        else "当前运行在无 Key 逻辑模式，分析和生成走规则链路，不会消耗 token。",
         "token_policy": "会消耗 token，聊天助手已启用。" if llm_enabled else "不会消耗 token，聊天助手当前关闭。",
-        "switch_hint": "如果要切回逻辑模式，清空 .env 里的 LLM_API_KEY 后重启服务。"
+        "switch_hint": "关闭右侧开关即可立即切回无 Key 逻辑模式。"
         if llm_enabled
-        else "如果要切到 LLM 模式，填写 .env 里的 LLM_API_KEY、LLM_BASE_URL、LLM_MODEL 后重启服务。",
+        else (
+            "当前已保存 LLM 配置，打开右侧开关即可切回 LLM Agent 模式。"
+            if has_saved_config
+            else "当前还没有可用 LLM 配置，打开右侧开关后需要先填写 URL、Key 和模型供应商。"
+        ),
     }
 
 
+# 把 VideoMetrics 或同结构对象展开成普通字典。
 def serialize_video_metric(video_metric: object) -> dict:
     payload = video_metric.to_dict() if hasattr(video_metric, "to_dict") else dict(video_metric)
     return {
@@ -935,6 +1113,7 @@ def serialize_video_metric(video_metric: object) -> dict:
     }
 
 
+# 汇总全站、分区和同类账号样本，生成一份市场快照。
 def build_market_snapshot(partition_name: str, up_ids: list[int] | None = None) -> dict:
     normalized_partition = CONFIG.normalize_partition(partition_name)
 
@@ -969,6 +1148,7 @@ def build_market_snapshot(partition_name: str, up_ids: list[int] | None = None) 
     }
 
 
+# 把单条市场样本压缩成更适合放进提示词的轻量结构。
 def compact_market_item_for_llm(item: dict) -> dict:
     return {
         "bvid": item.get("bvid", ""),
@@ -988,6 +1168,7 @@ def compact_market_item_for_llm(item: dict) -> dict:
     }
 
 
+# 把完整市场快照压缩成更适合提供给 LLM 的输入。
 def compact_market_snapshot_for_llm(market_snapshot: dict, limit: int = 4) -> dict:
     return {
         "partition": market_snapshot.get("partition", ""),
@@ -1001,6 +1182,7 @@ def compact_market_snapshot_for_llm(market_snapshot: dict, limit: int = 4) -> di
     }
 
 
+# 判断一条候选样本是否是真实可打开的参考视频。
 def is_real_reference_video(item: dict) -> bool:
     bvid = (item.get("bvid") or "").strip()
     url = (item.get("url") or "").strip()
@@ -1009,11 +1191,13 @@ def is_real_reference_video(item: dict) -> bool:
     return bool(re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE))
 
 
+# 归一化参考视频检索文本，方便后续做关键词拆分。
 def normalize_reference_text(text: str) -> str:
     value = re.sub(r"[【】\[\]（）()<>《》\"'`~!@#$%^&*_+=|\\/:;,.?？！，。、“”·-]+", " ", text or "")
     return re.sub(r"\s+", " ", value).strip().lower()
 
 
+# 把一个候选检索词按规则追加到去重后的词表里。
 def append_reference_term(terms: list[str], term: str) -> None:
     value = (term or "").strip().lower()
     if len(value) < 2 or value.isdigit() or value in REFERENCE_STOPWORDS or value in terms:
@@ -1021,6 +1205,7 @@ def append_reference_term(terms: list[str], term: str) -> None:
     terms.append(value)
 
 
+# 从文本里抽取可用于搜索参考视频的一组关键词。
 def extract_reference_terms(text: str) -> list[str]:
     clean = normalize_reference_text(text)
     chunks = re.findall(r"[\u4e00-\u9fff]+|[A-Za-z0-9]+", clean)
@@ -1039,6 +1224,7 @@ def extract_reference_terms(text: str) -> list[str]:
     return terms[:32]
 
 
+# 组合视频上下文和额外输入，生成参考视频检索文本。
 def build_reference_query_text(resolved: dict | None = None, extra_text: str = "") -> str:
     parts: list[str] = []
     if isinstance(resolved, dict):
@@ -1053,10 +1239,12 @@ def build_reference_query_text(resolved: dict | None = None, extra_text: str = "
     return " ".join(parts)
 
 
+# 返回筛选参考视频时使用的最低播放门槛。
 def build_reference_view_floor(resolved: dict | None = None) -> int:
     return 100000
 
 
+# 从工具调用观测结果里抽取可用于参考视频检索的查询文本。
 def extract_reference_query_from_observation(observation: dict) -> str:
     if not isinstance(observation, dict):
         return ""
@@ -1093,10 +1281,12 @@ def extract_reference_query_from_observation(observation: dict) -> str:
     return ""
 
 
+# 去掉参考搜索结果里的 HTML 标签和转义字符。
 def strip_reference_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", unescape(text or "")).strip()
 
 
+# 根据上下文组合多组参考视频搜索词，提升召回率。
 def build_reference_search_queries(query_text: str = "", resolved: dict | None = None) -> list[str]:
     queries: list[str] = []
 
@@ -1130,6 +1320,7 @@ def build_reference_search_queries(query_text: str = "", resolved: dict | None =
     return deduped[:5]
 
 
+# 通过 B 站相关推荐接口直接拉取一批相关参考视频。
 def fetch_direct_related_reference_videos(bvid: str, limit: int = 10) -> list[dict]:
     clean_bvid = (bvid or "").strip()
     if not re.fullmatch(r"BV[0-9A-Za-z]{10}", clean_bvid, flags=re.IGNORECASE):
@@ -1176,6 +1367,7 @@ def fetch_direct_related_reference_videos(bvid: str, limit: int = 10) -> list[di
     return results
 
 
+# 通过搜索接口按关键词拉取参考视频候选集。
 def fetch_search_reference_videos(query: str, limit: int = 8) -> list[dict]:
     if not query:
         return []
@@ -1229,6 +1421,7 @@ def fetch_search_reference_videos(query: str, limit: int = 8) -> list[dict]:
     return results
 
 
+# 用搜索结果扩充参考视频候选集，补足直连相关推荐不够的情况。
 def enrich_reference_sources_with_search(
     sources: list[dict],
     query_text: str = "",
@@ -1249,6 +1442,7 @@ def enrich_reference_sources_with_search(
     return combined
 
 
+# 为参考视频构造排序键，综合相关性、播放量和互动质量排序。
 def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict | None = None) -> tuple[tuple, dict]:
     normalized_title = normalize_reference_text(item.get("title", ""))
     title_terms = set(extract_reference_terms(item.get("title", "")))
@@ -1298,6 +1492,7 @@ def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict 
     }
 
 
+# 从候选集里筛出最适合前端展示的参考视频。
 def select_reference_videos(
     sources: list[dict],
     exclude_bvid: str = "",
@@ -1361,6 +1556,7 @@ def select_reference_videos(
     return result
 
 
+# 从市场快照里提炼并筛出一组最终参考视频。
 def build_reference_videos_from_market_snapshot(
     market_snapshot: dict,
     exclude_bvid: str = "",
@@ -1381,6 +1577,7 @@ def build_reference_videos_from_market_snapshot(
     )
 
 
+# 从 Agent 工具调用记录里提取可直接展示的参考视频链接。
 def extract_reference_links_from_tool_observations(
     observations: list[dict],
     exclude_bvid: str = "",
@@ -1419,6 +1616,7 @@ def extract_reference_links_from_tool_observations(
     )
 
 
+# 把视频详情整理成更适合 LLM 分析的视频输入结构。
 def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
     owner = info.get("owner", {})
     mid = safe_int(owner.get("mid"))
@@ -1444,6 +1642,7 @@ def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
     }
 
 
+# 为内容创作模块构造一份供 LLM 使用的完整简报。
 def build_creator_briefing(field_name: str, direction: str, idea: str, partition_name: str) -> dict:
     normalized_partition = CONFIG.normalize_partition(partition_name)
     return {
@@ -1458,6 +1657,7 @@ def build_creator_briefing(field_name: str, direction: str, idea: str, partition
     }
 
 
+# 把创作简报压缩成更适合放入提示词的轻量结构。
 def compact_creator_briefing_for_llm(briefing: dict) -> dict:
     return {
         "user_input": briefing.get("user_input", {}),
@@ -1465,6 +1665,7 @@ def compact_creator_briefing_for_llm(briefing: dict) -> dict:
     }
 
 
+# 根据视频链接构造一份供 LLM 使用的视频分析简报。
 def build_video_briefing(url: str) -> dict:
     bvid = extract_bvid(url)
     info = fetch_video_info(url, bvid)
@@ -1476,6 +1677,7 @@ def build_video_briefing(url: str) -> dict:
     }
 
 
+# 构造指定分区的热点看板快照，供聊天和分析工具复用。
 def build_hot_board_snapshot(partition_name: str) -> dict:
     market_snapshot = build_market_snapshot(partition_name)
     return {
@@ -1486,18 +1688,28 @@ def build_hot_board_snapshot(partition_name: str) -> dict:
     }
 
 
+# 从任意文本里抓取第一条 B 站相关 URL。
 def extract_first_bili_url(text: str) -> str:
     match = re.search(r"https?://[^\s]+", text or "", flags=re.IGNORECASE)
     return match.group(0).strip() if match else ""
 
 
+# 懒加载并返回全局 LLMWorkspaceAgent 实例。
 def get_llm_workspace_agent() -> LLMWorkspaceAgent:
-    global LLM_WORKSPACE_AGENT
-    if not CONFIG.llm_enabled():
-        raise RuntimeError("当前未配置 LLM_API_KEY，LLM Agent 模式不可用。")
+    global LLM_WORKSPACE_AGENT, LLM_WORKSPACE_SIGNATURE
+    active_config = get_active_runtime_llm_config()
+    if not active_config:
+        raise RuntimeError("当前未开启 LLM Agent 模式，或还没有可用的 LLM 配置。")
 
-    if LLM_WORKSPACE_AGENT is None:
+    signature = (
+        active_config.get("provider", ""),
+        active_config.get("base_url", ""),
+        active_config.get("api_key", ""),
+        active_config.get("model", ""),
+    )
+    if LLM_WORKSPACE_AGENT is None or LLM_WORKSPACE_SIGNATURE != signature:
         LLM_WORKSPACE_AGENT = LLMWorkspaceAgent(
+            llm_client=build_runtime_llm_client(),
             tools=[
                 AgentTool(
                     name="creator_briefing",
@@ -1521,9 +1733,11 @@ def get_llm_workspace_agent() -> LLMWorkspaceAgent:
                 ),
             ]
         )
+        LLM_WORKSPACE_SIGNATURE = signature
     return LLM_WORKSPACE_AGENT
 
 
+# 在 LLM Agent 模式下执行内容创作模块的完整生成流程。
 def run_llm_module_create(data: dict) -> dict:
     agent = get_llm_workspace_agent()
     default_style = (data.get("style") or "干货").strip() or "干货"
@@ -1584,8 +1798,9 @@ def run_llm_module_create(data: dict) -> dict:
             ) from fallback_exc
 
 
+# 当 Agent 中枢不可用时，直接用单次 LLM 调用回退生成创作结果。
 def run_llm_module_create_fallback(data: dict) -> dict:
-    llm = LLMClient()
+    llm = build_runtime_llm_client()
     llm.require_available()
 
     field_name = (data.get("field") or "").strip()
@@ -1626,6 +1841,7 @@ def run_llm_module_create_fallback(data: dict) -> dict:
     return result
 
 
+# 在 LLM Agent 模式下执行视频分析模块的完整分析流程。
 def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     agent = get_llm_workspace_agent()
     reference_query = build_reference_query_text(resolved)
@@ -1674,8 +1890,9 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
     return result
 
 
+# 当分析 Agent 中枢不可用时，直接用单次 LLM 调用回退生成分析结果。
 def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot: dict) -> dict:
-    llm = LLMClient()
+    llm = build_runtime_llm_client()
     llm.require_available()
     reference_query = build_reference_query_text(resolved)
     compact_snapshot = compact_market_snapshot_for_llm(market_snapshot)
@@ -1729,6 +1946,7 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
     return result
 
 
+# 运行聊天助手，让 LLM Agent 按需调工具后返回自然语言答复。
 def run_llm_chat(data: dict) -> dict:
     agent = get_llm_workspace_agent()
     message = (data.get("message") or "").strip()
@@ -1783,16 +2001,55 @@ def run_llm_chat(data: dict) -> dict:
 
 
 @app.get("/api/runtime-info")
+# 返回当前运行模式、聊天可用性和页面展示所需状态。
 def api_runtime_info():
     return jsonify({"success": True, "data": build_runtime_payload()})
 
 
+@app.post("/api/runtime-mode")
+# 切换运行模式开关；开启时优先复用已保存配置，没有配置则提示前端展示表单。
+def api_runtime_mode():
+    data = request.get_json(silent=True) or {}
+    enabled = bool(data.get("enabled"))
+
+    if not enabled:
+        set_runtime_llm_enabled(False)
+        return jsonify({"success": True, "data": build_runtime_payload()})
+
+    if not has_saved_runtime_llm_config():
+        set_runtime_llm_enabled(False)
+        payload = build_runtime_payload()
+        payload["requires_config"] = True
+        return jsonify({"success": True, "data": payload})
+
+    set_runtime_llm_enabled(True)
+    payload = build_runtime_payload()
+    payload["requires_config"] = False
+    return jsonify({"success": True, "data": payload})
+
+
+@app.post("/api/runtime-llm-config")
+# 保存前端填写的运行时 LLM 配置，并立即切换到 LLM Agent 模式。
+def api_runtime_llm_config():
+    data = request.get_json(silent=True) or {}
+    try:
+        save_runtime_llm_config(data)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    payload = build_runtime_payload()
+    payload["requires_config"] = False
+    return jsonify({"success": True, "data": payload})
+
+
 @app.get("/")
+# 渲染工作台首页。
 def index():
-    return render_template("index.html")
+    return render_template("index.html", initial_runtime=build_runtime_payload())
 
 
 @app.post("/api/resolve-bili-link")
+# 解析视频链接并返回前端预览所需的统一视频信息。
 def api_resolve_bili_link():
     data = request.get_json(silent=True) or {}
     url = (data.get("url") or "").strip()
@@ -1810,6 +2067,7 @@ def api_resolve_bili_link():
 
 
 @app.post("/api/module-create")
+# 执行内容创作模块，根据运行模式返回规则或 LLM 生成结果。
 def api_module_create():
     data = request.get_json(silent=True) or {}
     field_name = (data.get("field") or "").strip()
@@ -1818,7 +2076,7 @@ def api_module_create():
     if not field_name and not direction and not idea:
         return jsonify({"success": False, "error": "请至少输入领域、方向、想法中的一项"}), 400
 
-    if CONFIG.llm_enabled():
+    if runtime_llm_enabled():
         try:
             return jsonify({"success": True, "data": run_llm_module_create(data)})
         except Exception as exc:
@@ -1861,6 +2119,7 @@ def api_module_create():
 
 
 @app.post("/api/module-analyze")
+# 执行视频分析模块，根据运行模式返回规则或 LLM 分析结果。
 def api_module_analyze():
     data = request.get_json(silent=True) or {}
     url = (data.get("url") or "").strip()
@@ -1872,7 +2131,7 @@ def api_module_analyze():
     except Exception as exc:
         return jsonify({"success": False, "error": f"链接解析失败：{exc}"}), 400
 
-    if CONFIG.llm_enabled():
+    if runtime_llm_enabled():
         try:
             market_snapshot = build_market_snapshot(resolved.get("partition"), resolved.get("up_ids"))
             return jsonify({"success": True, "data": run_llm_module_analyze(data, resolved, market_snapshot)})
@@ -1950,9 +2209,10 @@ def api_module_analyze():
 
 
 @app.post("/api/chat")
+# 处理聊天助手请求，仅在 LLM Agent 模式下开放。
 def api_chat():
-    if not CONFIG.llm_enabled():
-        return jsonify({"success": False, "error": "当前是无 Key 规则模式，智能对话助手仅在配置 LLM_API_KEY 后可用。"}), 400
+    if not runtime_llm_enabled():
+        return jsonify({"success": False, "error": "当前是无 Key 逻辑模式，请先开启 LLM Agent 模式后再使用智能对话助手。"}), 400
 
     data = request.get_json(silent=True) or {}
     message = (data.get("message") or "").strip()
@@ -1967,6 +2227,7 @@ def api_chat():
 
 
 @app.post("/api/topic")
+# 提供独立的选题接口，便于单模块调用和调试。
 def api_topic():
     data = request.get_json(silent=True) or {}
     result = run_topic(
@@ -1978,6 +2239,7 @@ def api_topic():
 
 
 @app.post("/api/copy")
+# 提供独立的文案接口，便于单模块调用和调试。
 def api_copy():
     data = request.get_json(silent=True) or {}
     topic = data.get("topic", "B站内容提效")
@@ -1987,6 +2249,7 @@ def api_copy():
 
 
 @app.post("/api/operate")
+# 提供独立的运营建议接口，便于单模块调用和调试。
 def api_operate():
     data = request.get_json(silent=True) or {}
     bv_id = data.get("bv_id", "BV1Demo411111")
@@ -1996,6 +2259,7 @@ def api_operate():
 
 
 @app.post("/api/optimize")
+# 提供独立的优化接口，便于单模块调用和调试。
 def api_optimize():
     data = request.get_json(silent=True) or {}
     bv_id = data.get("bv_id", "BV1Demo411111")
@@ -2004,6 +2268,7 @@ def api_optimize():
 
 
 @app.post("/api/pipeline")
+# 提供完整流水线接口，一次性返回多阶段结果。
 def api_pipeline():
     data = request.get_json(silent=True) or {}
     result = run_pipeline(
@@ -2017,6 +2282,7 @@ def api_pipeline():
 
 
 @app.errorhandler(Exception)
+# 兜底捕获未处理异常，并以统一 JSON 结构返回给前端。
 def handle_error(exc):
     return jsonify({"success": False, "error": str(exc)}), 500
 
