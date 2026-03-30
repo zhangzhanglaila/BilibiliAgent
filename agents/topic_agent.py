@@ -5,6 +5,7 @@ import math
 import re
 import time
 from collections import defaultdict
+from copy import deepcopy
 from statistics import mean
 from typing import Any, Dict, Iterable, List
 
@@ -16,8 +17,11 @@ from models import TopicIdea, VideoMetrics
 
 class TopicAgent:
     # 初始化选题 Agent，设置请求节流间隔。
+    _sample_cache: Dict[tuple[Any, ...], tuple[float, List[VideoMetrics]]] = {}
+
     def __init__(self, request_interval: float | None = None) -> None:
         self.request_interval = request_interval or CONFIG.request_interval
+        self.cache_ttl_seconds = max(int(CONFIG.topic_cache_ttl_seconds), 0)
 
     # 在连续请求外部接口之间休眠，避免请求过快。
     def _sleep(self) -> None:
@@ -29,6 +33,25 @@ class TopicAgent:
             return sync(coro)
         except Exception:
             return default
+
+    # 返回缓存命中的样本副本，避免后续打分逻辑污染缓存里的原始对象。
+    def _get_cached_videos(self, cache_key: tuple[Any, ...]) -> List[VideoMetrics] | None:
+        if self.cache_ttl_seconds <= 0:
+            return None
+        cached = self._sample_cache.get(cache_key)
+        if not cached:
+            return None
+        expires_at, videos = cached
+        if expires_at <= time.time():
+            self._sample_cache.pop(cache_key, None)
+            return None
+        return deepcopy(videos)
+
+    # 写入共享短时缓存，供 Web / CLI 多次请求复用同一批样本。
+    def _set_cached_videos(self, cache_key: tuple[Any, ...], videos: List[VideoMetrics]) -> None:
+        if self.cache_ttl_seconds <= 0:
+            return
+        self._sample_cache[cache_key] = (time.time() + self.cache_ttl_seconds, deepcopy(videos))
 
     # 根据互动强度估算平均观看时长。
     def _estimate_avg_view_duration(self, duration: int, view: int, like: int, favorite: int, reply: int) -> float:
@@ -128,49 +151,67 @@ class TopicAgent:
 
     # 拉取全站热点视频样本。
     def fetch_hot_videos(self) -> List[VideoMetrics]:
+        cached = self._get_cached_videos(("hot",))
+        if cached is not None:
+            return cached
+
         data = self._safe_sync(hot.get_hot_videos(), [])
         self._sleep()
         items = data if isinstance(data, list) else data.get("list", [])
-        return [self._build_metrics(item, "全站热榜") for item in items[:20]]
+        results = [self._build_metrics(item, "全站热榜") for item in items[:20]]
+        self._set_cached_videos(("hot",), results)
+        return deepcopy(results)
 
     # 拉取指定分区的热点样本，并转换成可比较的指标结构。
     def fetch_partition_videos(self, partition_name: str | None = None) -> List[VideoMetrics]:
-        tid = CONFIG.partition_tid(partition_name)
+        normalized_partition = CONFIG.normalize_partition(partition_name)
+        cache_key = ("partition", normalized_partition)
+        cached = self._get_cached_videos(cache_key)
+        if cached is not None:
+            return cached
+
+        tid = CONFIG.partition_tid(normalized_partition)
         data = self._safe_sync(video_zone.get_zone_hot_tags(tid), [])
         self._sleep()
         results: List[VideoMetrics] = []
         if isinstance(data, list):
+            summary_data = self._safe_sync(video_zone.get_zone_videos_count_today(tid), {})
+            self._sleep()
+            archive_view = int(summary_data.get("archive_view", 0)) if isinstance(summary_data, dict) else 0
+            archive_count = int(summary_data.get("archive", 0)) if isinstance(summary_data, dict) else 0
             for tag in data[:5]:
                 name = tag.get("tag_name")
                 if not name:
                     continue
-                search_data = self._safe_sync(video_zone.get_zone_videos_count_today(tid), {})
-                self._sleep()
-                if isinstance(search_data, dict):
-                    archive_view = int(search_data.get("archive_view", 0))
-                    archive_count = int(search_data.get("archive", 0))
-                    # 分区接口更偏聚合数据，没有完整的热榜视频明细，所以这里按热词构造一条
-                    # 可比较的伪样本，供后面的统一打分逻辑复用。
-                    pseudo_item = {
-                        "bvid": f"tag-{name}",
-                        "title": f"{name} 教程/趋势",
-                        "owner": {"name": "分区热点", "mid": 0},
-                        "stat": {
-                            "view": int(archive_view / max(len(data), 1)),
-                            "like": int(archive_view * 0.04 / max(len(data), 1)),
-                            "coin": int(archive_view * 0.01 / max(len(data), 1)),
-                            "favorite": int(archive_view * 0.02 / max(len(data), 1)),
-                            "reply": archive_count * 3,
-                            "share": archive_count,
-                        },
-                        "duration": 300,
-                    }
-                    results.append(self._build_metrics(pseudo_item, f"分区热榜:{partition_name or CONFIG.default_partition}"))
-        return results[:10]
+                # 分区接口更偏聚合数据，没有完整的热榜视频明细，所以这里按热词构造一条
+                # 可比较的伪样本，供后面的统一打分逻辑复用。
+                pseudo_item = {
+                    "bvid": f"tag-{name}",
+                    "title": f"{name} 教程/趋势",
+                    "owner": {"name": "分区热点", "mid": 0},
+                    "stat": {
+                        "view": int(archive_view / max(len(data), 1)),
+                        "like": int(archive_view * 0.04 / max(len(data), 1)),
+                        "coin": int(archive_view * 0.01 / max(len(data), 1)),
+                        "favorite": int(archive_view * 0.02 / max(len(data), 1)),
+                        "reply": archive_count * 3,
+                        "share": archive_count,
+                    },
+                    "duration": 300,
+                }
+                results.append(self._build_metrics(pseudo_item, f"分区热榜:{normalized_partition}"))
+        trimmed = results[:10]
+        self._set_cached_videos(cache_key, trimmed)
+        return deepcopy(trimmed)
 
     # 拉取同类 UP 主的近期视频样本。
     def fetch_peer_up_videos(self, up_ids: Iterable[int] | None = None) -> List[VideoMetrics]:
         target_up_ids = list(up_ids or CONFIG.default_peer_ups)
+        cache_key = ("peer", tuple(target_up_ids))
+        cached = self._get_cached_videos(cache_key)
+        if cached is not None:
+            return cached
+
         videos: List[VideoMetrics] = []
         for up_id in target_up_ids:
             try:
@@ -198,7 +239,8 @@ class TopicAgent:
                 continue
             finally:
                 self._sleep()
-        return videos
+        self._set_cached_videos(cache_key, videos)
+        return deepcopy(videos)
 
     # 把视频时长文本解析成秒数。
     def _parse_duration(self, raw: str) -> int:

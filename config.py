@@ -42,6 +42,7 @@ PARTITION_ALIASES = {
 @dataclass
 class AppConfig:
     request_interval: float = float(os.getenv("REQUEST_INTERVAL", "1.2"))
+    topic_cache_ttl_seconds: int = int(os.getenv("TOPIC_CACHE_TTL_SECONDS", "180"))
     db_path: str = os.getenv("DB_PATH", "bilibili_agents.db")
     llm_provider: str = os.getenv("LLM_PROVIDER", "openai")
     llm_api_key: str = os.getenv("LLM_API_KEY", "")

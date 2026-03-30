@@ -70,6 +70,28 @@ CREATOR_STOPWORDS = {
     "自己",
     "账号",
 }
+CREATOR_KEYWORD_NOISE_FRAGMENTS = (
+    "第一条视频",
+    "第1条",
+    "第2条",
+    "第3条",
+    "做成系列内容时",
+    "做系列内容时",
+    "先做什么",
+    "先拍什么",
+    "先跳什么",
+    "更容易起量",
+    "更容易进推荐",
+    "分别拍什么",
+    "分别跳什么",
+    "别直接硬拍",
+    "别一上来就",
+    "先做哪种切口",
+    "哪种切口",
+    "开场动作",
+    "前三秒先放什么",
+    "镜头顺序",
+)
 REFERENCE_STOPWORDS = CREATOR_STOPWORDS | {
     "这个",
     "那个",
@@ -512,30 +534,102 @@ def strip_leading_context(text: str, contexts: list[str]) -> str:
     return result
 
 
+def is_creator_keyword_noise(keyword: str, strict: bool = False) -> bool:
+    if not keyword or len(keyword) < 2:
+        return True
+    if keyword in REFERENCE_STOPWORDS:
+        return True
+    if any(char.isdigit() for char in keyword):
+        return True
+    if strict and re.fullmatch(r"[\u4e00-\u9fff]+", keyword) and len(keyword) > 6:
+        return True
+    if strict and re.fullmatch(r"[a-z]+", keyword) and len(keyword) <= 3:
+        return True
+    return False
+
+
 # 从创作者输入中抽取关键词，供趋势聚合和题目拼装使用。
-def extract_creator_keywords(text: str) -> list[str]:
+def extract_creator_keywords(text: str, strict: bool = False) -> list[str]:
     clean = normalize_creator_text(text).lower()
-    words = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]{2,}", clean)
+    for fragment in CREATOR_KEYWORD_NOISE_FRAGMENTS:
+        clean = clean.replace(fragment, " ")
+    clean = re.sub(r"(?<=[A-Za-z])(?=[\u4e00-\u9fff])|(?<=[\u4e00-\u9fff])(?=[A-Za-z])", " ", clean)
+    clean = re.sub(r"(?<=[0-9])(?=[A-Za-z\u4e00-\u9fff])|(?<=[A-Za-z\u4e00-\u9fff])(?=[0-9])", " ", clean)
+    words = re.findall(r"[\u4e00-\u9fff]{2,12}|[A-Za-z]{2,16}", clean)
     keywords: list[str] = []
     for word in words:
-        if word in CREATOR_STOPWORDS:
+        if is_creator_keyword_noise(word, strict=strict):
             continue
         if word not in keywords:
             keywords.append(word)
     return keywords
 
 
+def merge_creator_keywords(*groups: list[str]) -> list[str]:
+    merged: list[str] = []
+    for group in groups:
+        for keyword in group:
+            if keyword and keyword not in merged:
+                merged.append(keyword)
+    pruned: list[str] = []
+    for keyword in merged:
+        if any(existing != keyword and existing in keyword for existing in pruned):
+            continue
+        pruned = [existing for existing in pruned if not (keyword != existing and keyword in existing)]
+        pruned.append(keyword)
+    return pruned
+
+
+def build_creator_context_keywords(*texts: str) -> list[str]:
+    return merge_creator_keywords(*[extract_creator_keywords(text) for text in texts if text])[:8]
+
+
+def keyword_matches_creator_context(keyword: str, context_keywords: list[str]) -> bool:
+    if not context_keywords:
+        return True
+    return any(keyword == context or keyword in context or context in keyword for context in context_keywords)
+
+
+def title_matches_creator_context(title: str, title_keywords: list[str], context_keywords: list[str]) -> bool:
+    if not context_keywords:
+        return bool(title_keywords)
+    normalized_title = normalize_creator_text(title).lower()
+    if any(context in normalized_title for context in context_keywords):
+        return True
+    return any(keyword_matches_creator_context(keyword, context_keywords) for keyword in title_keywords)
+
+
 # 从样本视频标题里聚合出当前方向更常见的趋势关键词。
-def collect_creator_trending_keywords(videos: list[dict], partition_name: str) -> list[str]:
+def collect_creator_trending_keywords(
+    videos: list[dict],
+    partition_name: str,
+    context_keywords: list[str] | None = None,
+) -> list[str]:
+    context_keywords = context_keywords or []
     counts: dict[str, int] = {}
-    for item in videos[:12]:
+    for item in videos[:18]:
         title = item.get("title", "")
-        for keyword in extract_creator_keywords(title):
+        normalized_title = normalize_creator_text(title).lower()
+        for context_keyword in context_keywords:
+            if context_keyword and context_keyword not in REFERENCE_STOPWORDS and context_keyword in normalized_title:
+                counts[context_keyword] = counts.get(context_keyword, 0) + 1
+        title_keywords = extract_creator_keywords(title, strict=True)
+        if not title_matches_creator_context(title, title_keywords, context_keywords):
+            continue
+        for keyword in title_keywords:
+            if context_keywords and not keyword_matches_creator_context(keyword, context_keywords):
+                continue
             counts[keyword] = counts.get(keyword, 0) + 1
 
     if counts:
         ranked = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
-        return [keyword for keyword, _ in ranked[:4]]
+        filtered = [
+            keyword
+            for keyword, count in ranked
+            if count > 1 or keyword_matches_creator_context(keyword, context_keywords)
+        ]
+        if filtered:
+            return filtered[:4]
     return CREATOR_PARTITION_ANGLES.get(partition_name, CREATOR_PARTITION_ANGLES["knowledge"])[:3]
 
 
@@ -574,36 +668,42 @@ def build_creator_topic_result(
     )
     videos = base_topic_result.get("videos", []) or []
     source_count = int(base_topic_result.get("source_count") or 0)
-    trending_keywords = collect_creator_trending_keywords(videos, normalized_partition)
     angle_labels = CREATOR_PARTITION_ANGLES.get(normalized_partition, CREATOR_PARTITION_ANGLES["knowledge"])
-
     question_topic = seed_topic or profile or normalize_creator_text(idea) or "这类内容第一条该怎么做"
-    is_dance_case = any(token in f"{profile} {idea}" for token in ["跳", "舞", "舞蹈"])
+    context_keywords = build_creator_context_keywords(field_name, direction, idea, profile, seed_topic, question_topic)
+    trending_keywords = collect_creator_trending_keywords(videos, normalized_partition, context_keywords=context_keywords)
 
-    if is_dance_case:
-        topics = [
-            f"{profile or '这类账号'}第一条视频跳什么更容易起量",
-            f"{profile or '这类账号'}别一上来就硬跳：先做哪种开场动作更容易进推荐",
-            f"{profile or '这类账号'}做系列内容时，第1条、第2条、第3条分别跳什么",
-        ]
-    else:
-        topics = [
-            f"{profile or question_topic}第一条视频先做什么更容易起量",
-            f"别直接硬拍 {profile or question_topic}：先做哪种切口更容易进推荐",
-            f"{profile or question_topic}做成系列内容时，第1条、第2条、第3条分别拍什么",
+    raw_ideas = [item for item in (base_topic_result.get("ideas") or []) if isinstance(item, dict)]
+    if not raw_ideas and question_topic:
+        raw_ideas = [
+            {
+                "topic": topic,
+                "reason": "",
+                "video_type": style or "干货",
+                "keywords": [],
+                "score": 100 - index * 3,
+            }
+            for index, (_, topic) in enumerate(RAW_TOPIC_AGENT._build_seed_candidates(question_topic))
         ]
 
     ideas = []
-    base_keywords = extract_creator_keywords(profile or question_topic)[:3]
-    for index, topic in enumerate(topics):
-        idea_keywords = list(dict.fromkeys(base_keywords + trending_keywords[:3] + [angle_labels[index % len(angle_labels)]]))[:6]
+    for index, raw_idea in enumerate(raw_ideas[:3]):
+        topic = normalize_creator_text(str(raw_idea.get("topic") or "")) or question_topic
+        angle_label = angle_labels[index % len(angle_labels)]
+        topic_keywords = extract_creator_keywords(topic)
+        idea_keywords = merge_creator_keywords(
+            context_keywords[:3],
+            topic_keywords[:2],
+            trending_keywords[:2],
+            [angle_label],
+        )[:6]
         ideas.append(
             {
                 "topic": topic,
-                "reason": build_creator_reason(question_topic, normalized_partition, source_count, trending_keywords, angle_labels[index % len(angle_labels)]),
-                "video_type": style or "干货",
+                "reason": build_creator_reason(topic, normalized_partition, source_count, trending_keywords, angle_label),
+                "video_type": raw_idea.get("video_type") or style or "干货",
                 "keywords": idea_keywords,
-                "score": 100 - index * 3,
+                "score": float(raw_idea.get("score") or (100 - index * 3)),
             }
         )
 
