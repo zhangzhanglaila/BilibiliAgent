@@ -367,40 +367,137 @@ class TopicAgent:
             return cleaned.split("：", 1)[0].replace("别直接硬拍", "").strip(" ：，,。")
         return cleaned
 
+    # 把策略型种子主题整理成更适合扩写新方向的主体表达。
+    def _seed_title_subject(self, cleaned: str) -> str:
+        base = self._seed_topic_subject(cleaned)
+        patterns = [
+            r"第一条(?:视频)?",
+            r"第[1一二三123]+条",
+            r"做成系列内容时",
+            r"做系列内容时",
+            r"别一上来就",
+            r"先做哪种切口",
+            r"哪种切口",
+            r"先做",
+            r"先(?:做|拍|跳)什么",
+            r"更容易(?:起量|进推荐)",
+            r"更容易被点进来",
+            r"下一条最适合拍什么",
+            r"同样是",
+            r"怎么(?:排|拍|做)?",
+            r"如何",
+            r"为什么",
+            r"哪(?:种|类|一条)",
+            r"切口",
+            r"表达",
+            r"镜头顺序",
+            r"开场动作",
+            r"前三秒",
+            r"教程",
+            r"攻略",
+        ]
+        for pattern in patterns:
+            base = re.sub(pattern, " ", base, flags=re.IGNORECASE)
+        base = re.sub(r"(视频|内容|账号)$", "", base)
+        base = re.sub(r"\s+", " ", base).strip(" ：，,。")
+        if base in {"先做", "切口", "表达", "先做 切口"}:
+            return ""
+        return base
+
+    # 判断当前种子主题是否更接近日常记录型内容。
+    def _is_life_seed_topic(self, cleaned: str) -> bool:
+        text = f"{cleaned} {self._seed_title_subject(cleaned)}".lower()
+        return any(
+            token in text
+            for token in [
+                "异地恋",
+                "报备",
+                "情侣",
+                "恋爱",
+                "日常",
+                "生活",
+                "vlog",
+                "记录",
+                "下班",
+                "回家",
+                "通勤",
+                "碎碎念",
+            ]
+        )
+
+    # 为生活区 / 日常型主题构造更自然的新方向。
+    def _build_life_seed_candidates(self, cleaned: str, subject: str) -> List[tuple[str, str]]:
+        base = subject or "日常"
+        text = f"{cleaned} {base}"
+        if "异地恋" in text and "报备" in text:
+            return [
+                ("日常片段", "异地恋报备里最有共鸣的一段日常记录"),
+                ("流程拆分", "把异地恋报备拆成早安、下班、晚安三段连续记录"),
+                ("细节放大", "异地恋里那些会反复分享的小事记录"),
+            ]
+        if "异地恋" in text:
+            return [
+                ("日常片段", "异地恋里最容易让人代入的一段日常"),
+                ("情绪细节", "把异地恋里最有情绪起伏的一刻单独放大"),
+                ("连续记录", "把异地恋日常拆成三条连续更新的小记录"),
+            ]
+        if "报备" in text:
+            return [
+                ("日常片段", "报备日常里最容易让人代入的一段生活流程"),
+                ("流程拆分", "把一天的报备拆成固定三个时间点连续记录"),
+                ("细节放大", "报备里那些最容易被记住的小细节"),
+            ]
+        return [
+            ("日常片段", f"{base}里最容易让人代入的一段日常"),
+            ("流程拆分", f"把{base}拆成三个固定更新的小片段"),
+            ("细节放大", f"{base}里最值得单独放大的一处细节"),
+        ]
+
     # 围绕种子主题构造几种可执行的选题变体。
     def _build_seed_candidates(self, cleaned: str) -> List[tuple[str, str]]:
         mode = self._seed_topic_mode(cleaned)
         subject = self._seed_topic_subject(cleaned)
-        base_subject = subject or cleaned or "这类内容"
+        title_subject = self._seed_title_subject(cleaned)
+        defaults = {
+            "dance_first_video": "这条舞蹈内容",
+            "opening_hook": "这条内容的开场",
+            "series_plan": "这个系列",
+            "first_video": "第一条内容",
+            "general": "这条内容",
+        }
+        base_subject = title_subject or defaults.get(mode, "这条内容")
+
+        if self._is_life_seed_topic(cleaned):
+            return self._build_life_seed_candidates(cleaned, title_subject or subject)
 
         if mode == "dance_first_video":
             return [
-                ("第一条起号", f"{base_subject}第一条视频先跳什么更容易起量"),
-                ("开场动作", f"{base_subject}别一上来就硬跳：先做哪种开场动作更容易进推荐"),
-                ("系列规划", f"{base_subject}做系列内容时，第1条、第2条、第3条分别跳什么"),
+                ("第一条起号", f"{base_subject}先发最轻松好跟上的版本"),
+                ("开场动作", f"{base_subject}先做近景表情更强的一版"),
+                ("系列规划", f"把{base_subject}拆成完整动作、高光切片、互动返场三条连续更新"),
             ]
         if mode == "opening_hook":
             return [
-                ("开场动作", f"{base_subject}前三秒先放什么，更容易把人留下来"),
-                ("镜头顺序", f"{base_subject}别一上来就铺满信息：镜头顺序怎么排更容易进推荐"),
-                ("系列规划", f"{base_subject}想做成系列时，哪一条最适合先发"),
+                ("开场动作", f"{base_subject}先做结果先出的开场版"),
+                ("镜头顺序", f"{base_subject}换成前三秒更近的镜头版本"),
+                ("系列规划", f"把{base_subject}里开头反差最强的部分单独放大成一条"),
             ]
         if mode == "series_plan":
             return [
-                ("系列规划", f"{base_subject}做成系列内容时，第1条、第2条、第3条分别拍什么"),
-                ("起量切口", f"{base_subject}做系列别乱发，先从哪一条开始最容易起量"),
-                ("互动放大", f"{base_subject}做系列时，哪一类互动点最容易带下一条"),
+                ("系列规划", f"{base_subject}先发最容易建立记忆点的第一条"),
+                ("起量切口", f"把{base_subject}拆成三条连续更新的系列版"),
+                ("互动放大", f"{base_subject}里互动感最强的片段单独做一条"),
             ]
         if mode == "first_video":
             return [
-                ("第一条起号", f"{base_subject}第一条视频先做什么更容易起量"),
-                ("切口测试", f"别直接硬拍 {base_subject}：先做哪种切口更容易进推荐"),
-                ("系列规划", f"{base_subject}做成系列内容时，第1条、第2条、第3条分别拍什么"),
+                ("第一条起号", f"{base_subject}先发最容易看懂的起步版"),
+                ("切口测试", f"把{base_subject}拆成一个单点更强的小版本"),
+                ("系列规划", f"{base_subject}先做连续三条的轻量更新"),
             ]
         return [
-            ("起量切口", f"{cleaned}先做哪种切口更容易起量"),
-            ("表达角度", f"同样是 {cleaned}，哪种表达更容易被点进来"),
-            ("系列规划", f"{cleaned}如果做成系列，下一条最适合拍什么"),
+            ("起量切口", f"{base_subject}里最容易让人记住的一个具体片段"),
+            ("表达角度", f"把{base_subject}换成结果先出的新版本"),
+            ("系列规划", f"{base_subject}拆成三条连续更新会更清楚"),
         ]
 
     # 基于用户种子主题生成优先级更高的选题结果。

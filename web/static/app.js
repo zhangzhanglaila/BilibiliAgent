@@ -16,6 +16,7 @@ const state = {
   chatPending: false,
   chatTyping: false,
   chatHistory: [],
+  pendingRuntimeRetryAction: null,
   runtime: {
     mode: INITIAL_RUNTIME.mode || 'rules',
     llmEnabled: Boolean(INITIAL_RUNTIME.llm_enabled),
@@ -33,6 +34,8 @@ const state = {
     modeDescription: INITIAL_RUNTIME.mode_description || '',
     tokenPolicy: INITIAL_RUNTIME.token_policy || '',
     switchHint: INITIAL_RUNTIME.switch_hint || '',
+    forceConfigPrompt: false,
+    runtimeErrorMessage: '',
   },
   recognition: null,
   isListening: false,
@@ -398,7 +401,11 @@ async function requestJson(url, payload) {
       body: JSON.stringify(payload),
     });
     const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || '请求失败');
+    if (!res.ok || !data.success) {
+      const error = new Error(data.error || '请求失败');
+      error.payload = data.data || {};
+      throw error;
+    }
     return data.data;
   } catch (error) {
     if (error instanceof Error && /Failed to fetch/i.test(error.message)) {
@@ -843,6 +850,8 @@ function applyRuntimePayload(data = {}) {
     modeDescription: data.mode_description || '',
     tokenPolicy: data.token_policy || '',
     switchHint: data.switch_hint || '',
+    forceConfigPrompt: Boolean(data.force_config_prompt),
+    runtimeErrorMessage: data.runtime_error_message || '',
   };
 }
 
@@ -851,6 +860,7 @@ function setRuntimeConfigFormVisible(visible) {
   const form = $('#runtimeConfigForm');
   if (!form) return;
   form.hidden = !visible;
+  form.classList.toggle('is-visible', Boolean(visible));
 }
 
 // 让运行模式开关做一次震动提示，强调需要用户先开启或配置模式。
@@ -861,6 +871,38 @@ function shakeRuntimeModeToggle() {
   void toggle.offsetWidth;
   toggle.classList.add('is-shaking');
   window.setTimeout(() => toggle.classList.remove('is-shaking'), 450);
+}
+
+// 让运行模式配置表单做一次震动提示，强调当前需要用户立即修正配置。
+function shakeRuntimeConfigForm() {
+  const form = $('#runtimeConfigForm');
+  if (!form) return;
+  form.classList.remove('is-shaking');
+  void form.offsetWidth;
+  form.classList.add('is-shaking');
+  window.setTimeout(() => form.classList.remove('is-shaking'), 450);
+}
+
+// 判断当前错误是否应该直接引导用户重新填写 LLM 配置。
+function shouldPromptRuntimeConfig(error) {
+  const message = String(error?.message || error || '');
+  if (error?.payload?.show_runtime_config) return true;
+  return /connection error|api key|鉴权|认证|provider|quota|rate limit|llm/i.test(message);
+}
+
+// 在 LLM 配置不可用时，拉起运行模式配置表单并记录待重试动作。
+function promptRuntimeConfigFromError(error, retryAction = null) {
+  const payload = error?.payload || {};
+  if (payload.runtime_payload) applyRuntimePayload(payload.runtime_payload);
+  state.runtime.forceConfigPrompt = true;
+  state.runtime.runtimeErrorMessage = payload.reason || String(error?.message || '当前 LLM 配置不可用，请重新填写。');
+  state.pendingRuntimeRetryAction = typeof retryAction === 'function' ? retryAction : null;
+  updateRuntimeUi();
+  shakeRuntimeModeToggle();
+  shakeRuntimeConfigForm();
+  document.getElementById('runtimeModePanel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const focusTarget = state.runtime.savedBaseUrl ? $('#runtimeConfigKey') : ($('#runtimeConfigUrl') || $('#runtimeConfigKey'));
+  focusTarget?.focus();
 }
 
 // 处理无 Key 逻辑模式下点击智能助手面板的提示逻辑。
@@ -907,11 +949,13 @@ function updateRuntimeUi() {
     }
   }
 
-  const formVisible = Boolean(state.runtime.requiresConfig && !state.runtime.chatAvailable);
+  const formVisible = Boolean(state.runtime.forceConfigPrompt || (state.runtime.requiresConfig && !state.runtime.chatAvailable));
   setRuntimeConfigFormVisible(formVisible);
-  $('#runtimeConfigHint').textContent = state.runtime.hasSavedConfig
-    ? '当前已经保存过一组配置，关闭开关后再次打开会直接复用。'
-    : '当前没有已保存配置，打开开关时需要先填写 URL、Key 和模型供应商。';
+  $('#runtimeConfigHint').textContent = state.runtime.runtimeErrorMessage
+    ? `当前 LLM 配置调用失败：${state.runtime.runtimeErrorMessage}。请改填可用的 URL、Key 和模型供应商后重试。`
+    : state.runtime.hasSavedConfig
+      ? '当前已经保存过一组配置，关闭开关后再次打开会直接复用。'
+      : '当前没有已保存配置，打开开关时需要先填写 URL、Key 和模型供应商。';
 
   const assistantPanel = $('#assistantPanel');
   const assistantOverlay = $('#assistantLockOverlay');
@@ -945,6 +989,7 @@ async function toggleRuntimeMode() {
       showToast('已开启', '当前已经切到 LLM Agent 模式。');
       setStatus('已切换到 LLM Agent 模式', 'success');
     } else {
+      state.pendingRuntimeRetryAction = null;
       showToast('已关闭', '当前已经切回无 Key 逻辑模式。');
       setStatus('已切换到无 Key 逻辑模式', 'success');
     }
@@ -973,11 +1018,19 @@ async function submitRuntimeConfig(event) {
   try {
     const data = await requestJson('/api/runtime-llm-config', payload);
     applyRuntimePayload(data);
+    state.runtime.forceConfigPrompt = false;
+    state.runtime.runtimeErrorMessage = '';
     updateRuntimeUi();
     $('#runtimeConfigKey').value = '';
     showToast('配置已保存', '已保存当前 LLM 配置，并切到 LLM Agent 模式。');
     setStatus('已切换到 LLM Agent 模式', 'success');
+    const retryAction = state.pendingRuntimeRetryAction;
+    state.pendingRuntimeRetryAction = null;
+    if (typeof retryAction === 'function') {
+      window.setTimeout(() => retryAction(), 160);
+    }
   } catch (error) {
+    shakeRuntimeConfigForm();
     showToast('保存失败', error.message, 'error');
     setStatus('LLM 配置保存失败', 'error');
   } finally {
@@ -1619,6 +1672,9 @@ async function runCreatorModule() {
     renderWorkspaceOutline();
     setStatus('选题与文案生成失败', 'error');
     showToast('生成失败', error.message, 'error');
+    if (shouldPromptRuntimeConfig(error)) {
+      promptRuntimeConfigFromError(error, () => runCreatorModule());
+    }
   } finally {
     stopProgressJob('creator');
     setButtonLoading('creatorRunBtn', false);
@@ -1667,6 +1723,9 @@ async function runAnalyzeModule() {
     renderWorkspaceOutline();
     setStatus('视频分析失败', 'error');
     showToast('分析失败', error.message, 'error');
+    if (shouldPromptRuntimeConfig(error)) {
+      promptRuntimeConfigFromError(error, () => runAnalyzeModule());
+    }
   } finally {
     stopProgressJob('analyze');
     setButtonLoading('videoAnalyzeBtn', false);
@@ -1729,6 +1788,9 @@ async function sendAssistantMessage(forced = '') {
     state.chatHistory.push({ role: 'assistant', content: `请求失败：${error.message}`, error: true });
     setStatus('智能助手请求失败', 'error');
     showToast('智能助手失败', error.message, 'error');
+    if (shouldPromptRuntimeConfig(error)) {
+      promptRuntimeConfigFromError(error);
+    }
     renderAssistant();
   } finally {
     stopProgressJob('assistant');

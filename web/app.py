@@ -1140,7 +1140,7 @@ def classify_video_performance(resolved: dict) -> dict:
 # 为热门视频生成“为什么会火”和“还能怎么延展”的分析结果。
 def build_hot_analysis(resolved: dict, performance: dict, topic_result: dict) -> dict:
     stats = resolved.get("stats", {})
-    followup_topics = [idea.get("topic", "") for idea in topic_result.get("ideas", []) if idea.get("topic")]
+    followup_topics = normalize_analysis_topics(topic_result, resolved.get("title", ""), limit=3)
     analysis_points = performance["reasons"] + inspect_title_strength(resolved.get("title", ""))
     analysis_points.append(
         f"当前分区为 {resolved.get('partition_label', resolved.get('partition', '未知分区'))}，"
@@ -1150,20 +1150,45 @@ def build_hot_analysis(resolved: dict, performance: dict, topic_result: dict) ->
         analysis_points.append("围绕当前视频继续延展，仍然有可继续放大的选题空间。")
     return {
         "analysis_points": analysis_points,
-        "followup_topics": followup_topics[:3],
+        "followup_topics": followup_topics,
     }
 
 
 # 为低表现视频生成“哪里弱”和“下一步怎么改”的分析结果。
 def build_low_performance_analysis(resolved: dict, performance: dict, optimize_result: dict, topic_result: dict) -> dict:
-    next_topics = [idea.get("topic", "") for idea in topic_result.get("ideas", []) if idea.get("topic")]
+    next_topics = normalize_analysis_topics(topic_result, resolved.get("title", ""), limit=3)
     return {
         "analysis_points": performance["reasons"] + [optimize_result.get("diagnosis", "")],
-        "next_topics": next_topics[:3],
+        "next_topics": next_topics,
         "title_suggestions": optimize_result.get("optimized_titles", [])[:2],
         "cover_suggestion": optimize_result.get("cover_suggestion", ""),
         "content_suggestions": optimize_result.get("content_suggestions", [])[:5],
     }
+
+
+# 对分析页里展示的后续题材做去重和基础清洗，避免重复项或与原题完全相同。
+def normalize_analysis_topics(topic_result: dict, current_title: str = "", limit: int = 3) -> list[str]:
+    ideas = topic_result.get("ideas", []) if isinstance(topic_result, dict) else []
+    current_norm = normalize_creator_text(current_title).lower()
+    result: list[str] = []
+    seen: set[str] = set()
+
+    for item in ideas:
+        if not isinstance(item, dict):
+            continue
+        topic = normalize_creator_text(str(item.get("topic") or ""))
+        if not topic:
+            continue
+        topic_norm = topic.lower()
+        if topic_norm in seen:
+            continue
+        if current_norm and topic_norm == current_norm:
+            continue
+        seen.add(topic_norm)
+        result.append(topic)
+        if len(result) >= limit:
+            break
+    return result
 
 
 # 构建当前运行模式信息，供前端初始化页面状态。
@@ -1199,6 +1224,17 @@ def build_runtime_payload() -> dict:
             if has_saved_config
             else "当前还没有可用 LLM 配置，打开右侧开关后需要先填写 URL、Key 和模型供应商。"
         ),
+    }
+
+
+# 当 LLM 当前配置不可用时，构造一份前端可直接用来拉起重配表单的提示数据。
+def build_llm_runtime_reconfigure_data(reason: str) -> dict:
+    runtime_payload = build_runtime_payload()
+    runtime_payload["requires_config"] = True
+    return {
+        "show_runtime_config": True,
+        "reason": reason,
+        "runtime_payload": runtime_payload,
     }
 
 
@@ -1607,6 +1643,25 @@ def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict 
     }
 
 
+# 为参考视频生成去重标识，避免同一条视频经不同来源重复出现在前端。
+def build_reference_identity_keys(item: dict) -> list[str]:
+    keys: list[str] = []
+    bvid = (item.get("bvid") or "").strip().lower()
+    url = (item.get("url") or "").strip().rstrip("/")
+    title = normalize_reference_text(item.get("title", ""))
+    author = normalize_reference_text(item.get("author", ""))
+
+    if bvid:
+        keys.append(f"bvid:{bvid}")
+    if url:
+        keys.append(f"url:{url}")
+    if title and author:
+        keys.append(f"title_author:{title}|{author}")
+    elif title:
+        keys.append(f"title:{title}")
+    return keys
+
+
 # 从候选集里筛出最适合前端展示的参考视频。
 def select_reference_videos(
     sources: list[dict],
@@ -1650,11 +1705,13 @@ def select_reference_videos(
         for item in pool:
             bvid = (item.get("bvid") or "").strip()
             url = (item.get("url") or "").strip()
-            if not url or url in seen:
+            identity_keys = build_reference_identity_keys(item)
+            if not url or any(key in seen for key in identity_keys):
                 continue
             if exclude_bvid and bvid.lower() == exclude_bvid.lower():
                 continue
-            seen.add(url)
+            for key in identity_keys:
+                seen.add(key)
             result.append(
                 {
                     "title": item.get("title", ""),
@@ -1863,7 +1920,7 @@ def run_llm_module_create(data: dict) -> dict:
         "- partition: 字符串，分区名\n"
         "- style: 字符串，文案风格\n"
         "- chosen_topic: 字符串，最终主选题\n"
-        "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords\n"
+        "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords；topic 必须是具体的新方向，不要提问句，不要把原题后面机械接“哪种切口/哪种表达/下一条拍什么”\n"
         "- copy_result: 对象，包含 topic, style, titles(3个), script(至少4段，含 section/duration/content), description, tags, pinned_comment\n"
     )
     try:
@@ -1938,7 +1995,7 @@ def run_llm_module_create_fallback(data: dict) -> dict:
         "Rules:\n"
         "1. partition and style must reuse the current input.\n"
         "2. chosen_topic must be concrete and natural, not generic template wording.\n"
-        "3. topic_result.ideas must contain 3 items, each with topic, reason, video_type, keywords.\n"
+        "3. topic_result.ideas must contain 3 items, each with topic, reason, video_type, keywords, and each topic must be a concrete new direction instead of a question template.\n"
         "4. copy_result must include topic, style, titles(3), script(at least 4 sections with section/duration/content), description, tags, pinned_comment.\n"
         "5. copy_result.titles must be narrative, statement-style Bilibili titles with a natural vlog / daily-record feeling when the topic fits; no question titles, no teaching tone.\n"
         "6. Avoid repetitive phrases like a universal '高效做法' template unless the topic really demands it."
@@ -1965,10 +2022,10 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
         "返回一个 JSON 对象，字段必须包含：\n"
         "- resolved: 对象，包含 bv_id, title, up_name, tname, partition, partition_label, stats\n"
         "- performance: 对象，包含 label, is_hot, score, reasons, summary\n"
-        "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords\n"
+        "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords；topic 必须是具体的新方向，不要提问句，不要把原视频标题后面机械接模板尾巴\n"
         "- optimize_result: 对象，包含 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions\n"
         "- copy_result: 对象或 null；如果你判断视频表现偏低，则必须返回一套新的标题/脚本/简介/标签/置顶评论，其中 titles 要用陈述型、叙事型、生活化表达，不要提问句和教学口吻\n"
-        "- analysis: 对象，包含 analysis_points，并根据判断补充 followup_topics 或 next_topics、title_suggestions、cover_suggestion、content_suggestions\n"
+        "- analysis: 对象，包含 analysis_points，并根据判断补充 followup_topics 或 next_topics、title_suggestions、cover_suggestion、content_suggestions；followup_topics / next_topics 也必须是新的具体方向，不要提问句\n"
     )
     result = agent.run_structured(
         task_name="module_analyze",
@@ -2025,11 +2082,12 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
         "要求：\n"
         "1. resolved 直接复用当前视频真实信息，不要改 BV、标题、播放等字段。\n"
         "2. performance 必须包含 label, is_hot, score, reasons, summary。\n"
-        "3. topic_result.ideas 输出 3 个后续选题，每项包含 topic, reason, video_type, keywords。\n"
+        "3. topic_result.ideas 输出 3 个后续选题，每项包含 topic, reason, video_type, keywords；topic 必须是新的具体方向，不要提问句。\n"
         "4. optimize_result 输出 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions。\n"
         "5. 如果你判断 is_hot=true，则 copy_result 返回 null，analysis 重点输出 analysis_points 和 followup_topics。\n"
         "6. 如果你判断 is_hot=false，则 copy_result 必须输出一版新文案，analysis 重点输出 analysis_points, next_topics, title_suggestions, cover_suggestion, content_suggestions。\n"
-        "7. copy_result.titles 必须是陈述型、叙事型、生活化标题，不要提问句，不要教学口吻，不要出现“为什么 / 怎么 / 哪种 / 更容易起量 / 更容易进推荐”这类模板。"
+        "7. copy_result.titles 必须是陈述型、叙事型、生活化标题，不要提问句，不要教学口吻，不要出现“为什么 / 怎么 / 哪种 / 更容易起量 / 更容易进推荐”这类模板。\n"
+        "8. analysis 里的 followup_topics / next_topics 也必须是具体新方向，不要把原视频标题后面机械加问题后缀。"
     )
     result = llm.invoke_json_required(system_prompt, user_prompt)
     if not isinstance(result, dict):
@@ -2197,7 +2255,17 @@ def api_module_create():
         try:
             return jsonify({"success": True, "data": run_llm_module_create(data)})
         except Exception as exc:
-            return jsonify({"success": False, "error": f"LLM Agent 生成失败：{format_llm_error(exc)}"}), llm_error_http_status(exc)
+            message = f"LLM Agent 生成失败：{format_llm_error(exc)}"
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": message,
+                        "data": build_llm_runtime_reconfigure_data(message),
+                    }
+                ),
+                llm_error_http_status(exc),
+            )
 
     seed_topic = build_seed_topic(field_name, direction, idea)
     partition_name = CONFIG.normalize_partition((data.get("partition") or "knowledge").strip() or "knowledge")
@@ -2254,14 +2322,16 @@ def api_module_analyze():
             return jsonify({"success": True, "data": run_llm_module_analyze(data, resolved, market_snapshot)})
         except Exception as exc:
             if should_skip_same_provider_fallback(exc):
+                message = (
+                    f"LLM Agent 分析失败：{format_llm_error(exc)} "
+                    "当前不会继续尝试同 provider 的 fallback，请稍后重试。"
+                )
                 return (
                     jsonify(
                         {
                             "success": False,
-                            "error": (
-                                f"LLM Agent 分析失败：{format_llm_error(exc)} "
-                                "当前不会继续尝试同 provider 的 fallback，请稍后重试。"
-                            ),
+                            "error": message,
+                            "data": build_llm_runtime_reconfigure_data(message),
                         }
                     ),
                     llm_error_http_status(exc),
@@ -2272,14 +2342,16 @@ def api_module_analyze():
                 fallback_result["llm_warning"] = f"Agent 中枢执行失败，已切换到 LLM 直出分析：{format_llm_error(exc)}"
                 return jsonify({"success": True, "data": fallback_result})
             except Exception as fallback_exc:
+                message = (
+                    f"LLM Agent 分析失败：{format_llm_error(exc)}；"
+                    f"LLM fallback 也失败：{format_llm_error(fallback_exc)}"
+                )
                 return (
                     jsonify(
                         {
                             "success": False,
-                            "error": (
-                                f"LLM Agent 分析失败：{format_llm_error(exc)}；"
-                                f"LLM fallback 也失败：{format_llm_error(fallback_exc)}"
-                            ),
+                            "error": message,
+                            "data": build_llm_runtime_reconfigure_data(message),
                         }
                     ),
                     llm_error_http_status(fallback_exc),
@@ -2346,7 +2418,17 @@ def api_chat():
         result = run_llm_chat(data)
         return jsonify({"success": True, "data": result})
     except Exception as exc:
-        return jsonify({"success": False, "error": f"智能对话失败：{format_llm_error(exc)}"}), llm_error_http_status(exc)
+        message = f"智能对话失败：{format_llm_error(exc)}"
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "error": message,
+                    "data": build_llm_runtime_reconfigure_data(message),
+                }
+            ),
+            llm_error_http_status(exc),
+        )
 
 
 @app.post("/api/topic")
