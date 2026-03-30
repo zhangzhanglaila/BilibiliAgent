@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import time
+from types import SimpleNamespace
 from typing import Any
 
+import requests
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from config import CONFIG
@@ -38,6 +41,8 @@ def classify_llm_error(exc: Exception) -> str:
     text = _error_text(exc).lower()
     if "billing_service_error" in text or "billing service temporarily unavailable" in text:
         return "billing_service_unavailable"
+    if "winerror 10013" in text or "unable to connect to the remote server" in text:
+        return "connection_blocked"
     if "503" in text and ("temporarily unavailable" in text or "service unavailable" in text):
         return "service_unavailable"
     if "502" in text or "bad gateway" in text:
@@ -59,6 +64,7 @@ def classify_llm_error(exc: Exception) -> str:
 def is_retryable_llm_error(exc: Exception) -> bool:
     return classify_llm_error(exc) in {
         "billing_service_unavailable",
+        "connection_blocked",
         "service_unavailable",
         "bad_gateway",
         "gateway_timeout",
@@ -87,6 +93,8 @@ def format_llm_error(exc: Exception) -> str:
     category = classify_llm_error(exc)
     if category == "billing_service_unavailable":
         return "上游 LLM 服务暂时不可用（503 / billing_service_error）。这是服务提供方的计费或网关故障，请稍后重试。"
+    if category == "connection_blocked":
+        return "当前运行进程的网络连接被系统或环境拦截，LLM 请求没能真正发出去。请检查本机代理、防火墙，或 Python 进程的出网权限。"
     if category == "service_unavailable":
         return "上游 LLM 服务暂时不可用（503）。请稍后重试。"
     if category in {"bad_gateway", "gateway_timeout"}:
@@ -129,9 +137,9 @@ class LLMClient:
         self.retry_backoff_seconds = float(
             retry_backoff_seconds if retry_backoff_seconds is not None else CONFIG.llm_retry_backoff_seconds
         )
-        self.enabled = bool(self.api_key and ChatOpenAI)
+        self.enabled = bool(self.api_key and (ChatOpenAI or self.base_url))
         self.model = None
-        if self.enabled:
+        if self.enabled and ChatOpenAI:
             self.model = ChatOpenAI(
                 model=self.model_name,
                 api_key=self.api_key,
@@ -149,6 +157,107 @@ class LLMClient:
     def require_available(self) -> None:
         if not self.available():
             raise RuntimeError("LLM 不可用：请检查当前运行模式里的 API Key 配置，以及 LangChain/OpenAI 依赖是否已安装。")
+
+    # 判断当前是否可以走 OpenAI 兼容的直接 HTTP 调用兜底。
+    def _http_fallback_available(self) -> bool:
+        return bool(self.api_key and (self.base_url or self.provider == "openai"))
+
+    # 直接调用 OpenAI 兼容接口，绕过部分 LangChain 兼容性问题。
+    def _invoke_via_http(self, system_prompt: str, user_prompt: str):
+        if not self._http_fallback_available():
+            raise RuntimeError("LLM HTTP fallback unavailable")
+
+        endpoint = f"{(self.base_url or 'https://api.openai.com/v1').rstrip('/')}/chat/completions"
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.7,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            message = str(exc)
+            if "WinError 10013" in message:
+                return self._invoke_via_powershell_http(endpoint, payload)
+            raise RuntimeError(message) from exc
+
+        if response.status_code >= 400:
+            raise RuntimeError(response.text.strip() or f"HTTP {response.status_code}")
+
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise RuntimeError("LLM HTTP fallback returned invalid JSON") from exc
+
+        content = (
+            (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+            or (((data.get("choices") or [{}])[0]).get("delta") or {}).get("content")
+            or ""
+        )
+        if isinstance(content, list):
+            content = "\n".join(
+                str(item.get("text") or item.get("content") or "")
+                for item in content
+                if isinstance(item, dict)
+            ).strip()
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("LLM HTTP fallback returned empty content")
+        return SimpleNamespace(content=content)
+
+    # 在部分 Windows 环境里，Python 套接字会被拦，但 PowerShell 的 Web 请求还能正常走。
+    def _invoke_via_powershell_http(self, endpoint: str, payload: dict[str, Any]):
+        body_json = json.dumps(payload, ensure_ascii=False)
+        escaped_body = body_json.replace("'", "''")
+        escaped_endpoint = endpoint.replace("'", "''")
+        escaped_key = self.api_key.replace("'", "''")
+        command = (
+            "$ProgressPreference='SilentlyContinue'; "
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+            f"$body = @'\n{escaped_body}\n'@; "
+            f"$resp = Invoke-RestMethod -Method Post -Uri '{escaped_endpoint}' "
+            f"-Headers @{{ Authorization = 'Bearer {escaped_key}'; 'Content-Type' = 'application/json' }} "
+            f"-Body $body -TimeoutSec {max(1, int(self.timeout_seconds))}; "
+            "$content = $resp.choices[0].message.content; "
+            "if ($content -is [System.Array]) { "
+            "  $content = ($content | ForEach-Object { if ($_ -is [string]) { $_ } elseif ($_.text) { $_.text } elseif ($_.content) { $_.content } else { $_.ToString() } }) -join \"`n\" "
+            "}; "
+            "Write-Output $content"
+        )
+        try:
+            completed = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", command],
+                capture_output=True,
+                text=True,
+                timeout=max(1, int(self.timeout_seconds)) + 5,
+                check=False,
+            )
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
+
+        if completed.returncode != 0:
+            error_text = (completed.stderr or completed.stdout or "").strip()
+            raise RuntimeError(error_text or "PowerShell HTTP fallback failed")
+
+        if (completed.stderr or "").strip() and not (completed.stdout or "").strip():
+            raise RuntimeError((completed.stderr or "").strip())
+
+        content = (completed.stdout or "").strip()
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("PowerShell HTTP fallback returned empty content")
+        return SimpleNamespace(content=content)
 
     # 把不同 SDK 形态的返回内容统一抽成纯文本。
     def _coerce_result_text(self, result: Any) -> str:
@@ -217,8 +326,15 @@ class LLMClient:
 
         for attempt in range(1, attempts + 1):
             try:
-                return self.model.invoke(messages)
+                if self.model is not None:
+                    return self.model.invoke(messages)
+                return self._invoke_via_http(system_prompt, user_prompt)
             except Exception as exc:
+                if self._http_fallback_available() and self.model is not None:
+                    try:
+                        return self._invoke_via_http(system_prompt, user_prompt)
+                    except Exception as http_exc:
+                        exc = http_exc
                 category = classify_llm_error(exc)
                 wrapped = LLMInvocationError(
                     format_llm_error(exc),

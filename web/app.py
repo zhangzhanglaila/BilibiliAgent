@@ -390,17 +390,49 @@ def resolve_short_link(url: str) -> str:
         return url
 
 
-# 从任意 B 站视频链接里提取标准 BV 号。
+# 根据 av 号调用公开视频接口换取标准 BV 号。
+def resolve_bvid_from_aid(aid: int) -> str:
+    if aid <= 0:
+        raise ValueError("B站 av 链接解析失败: 无效 av 号")
+
+    try:
+        bvid = str(video.aid2bvid(aid)).strip()
+        if re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE):
+            return "BV" + bvid[2:]
+    except Exception:
+        pass
+
+    payload = fetch_json(f"https://api.bilibili.com/x/web-interface/view?{urlencode({'aid': aid})}")
+    if payload.get("code") != 0:
+        message = payload.get("message") or payload.get("msg") or "official api failed"
+        raise ValueError(f"B站 av 链接解析失败: {message}")
+    data = payload.get("data") or {}
+    bvid = str(data.get("bvid") or "").strip()
+    if not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE):
+        raise ValueError("B站 av 链接解析失败: 未返回有效 BV 号")
+    return "BV" + bvid[2:]
+
+
+# 从任意 B 站视频链接里提取标准 BV 号；支持 BV、av 和短链。
 def extract_bvid(url: str) -> str:
     raw_url = (url or "").strip()
     candidate = resolve_short_link(raw_url)
     match = re.search(r"(BV[0-9A-Za-z]{10})", candidate, flags=re.IGNORECASE)
-    if not match:
-        if any(host in raw_url for host in SHORT_LINK_HOSTS):
-            raise ValueError("短链接展开失败，请改用包含 BV 号的完整视频链接重试")
-        raise ValueError("未识别到有效的 B 站视频 BV 号")
-    value = match.group(1)
-    return "BV" + value[2:]
+    if match:
+        value = match.group(1)
+        return "BV" + value[2:]
+
+    av_match = re.search(r"(?:^|/)(?:av)(\d+)(?:/|$|[?#])", candidate, flags=re.IGNORECASE)
+    if av_match:
+        return resolve_bvid_from_aid(safe_int(av_match.group(1)))
+
+    aid_match = re.search(r"[?&]aid=(\d+)", candidate, flags=re.IGNORECASE)
+    if aid_match:
+        return resolve_bvid_from_aid(safe_int(aid_match.group(1)))
+
+    if any(host in raw_url for host in SHORT_LINK_HOSTS):
+        raise ValueError("短链接展开失败，请改用包含 BV 号或 av 号的完整视频链接重试")
+    raise ValueError("未识别到有效的 B 站视频 BV 号或 av 号")
 
 
 # 把 B 站原始分区信息映射成项目内部统一使用的分区标识。
@@ -1647,18 +1679,13 @@ def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict 
 def build_reference_identity_keys(item: dict) -> list[str]:
     keys: list[str] = []
     bvid = (item.get("bvid") or "").strip().lower()
-    url = (item.get("url") or "").strip().rstrip("/")
-    title = normalize_reference_text(item.get("title", ""))
-    author = normalize_reference_text(item.get("author", ""))
+    url = (item.get("url") or "").strip()
+    canonical_url = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
 
     if bvid:
         keys.append(f"bvid:{bvid}")
-    if url:
-        keys.append(f"url:{url}")
-    if title and author:
-        keys.append(f"title_author:{title}|{author}")
-    elif title:
-        keys.append(f"title:{title}")
+    if canonical_url:
+        keys.append(f"url:{canonical_url}")
     return keys
 
 
