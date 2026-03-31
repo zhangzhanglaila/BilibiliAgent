@@ -50,6 +50,14 @@ PARTITION_LABELS = {
     "game": "游戏",
     "ent": "娱乐",
 }
+VIDEO_KEYWORD_STOPWORDS = {
+    "哔哩哔哩",
+    "bilibili",
+    "b站",
+    "视频",
+    "原创",
+    "弹幕",
+}
 CREATOR_PARTITION_ANGLES = {
     "knowledge": ["问题拆解", "保姆级步骤", "避坑清单", "实测对比"],
     "tech": ["结果对比", "真实实测", "省钱替代", "新手避坑"],
@@ -332,31 +340,22 @@ def build_fallback_copy_payload(topic: str, style: str) -> dict:
 def normalize_copy_result_payload(copy_result: object, topic: str, style: str) -> dict:
     clean_topic = clean_copy_text(topic) or "B站内容策划"
     clean_style = clean_copy_text(style) or "干货"
-    fallback = build_fallback_copy_payload(clean_topic, clean_style)
+    fallback_result = RAW_COPY_AGENT._fallback(clean_topic, clean_style)
+    fallback = {
+        "topic": clean_topic,
+        "style": clean_style,
+        "titles": fallback_result.titles,
+        "script": fallback_result.script,
+        "description": fallback_result.description,
+        "tags": fallback_result.tags,
+        "pinned_comment": fallback_result.pinned_comment,
+    }
 
     if not isinstance(copy_result, dict):
         return fallback
 
     titles = RAW_COPY_AGENT._normalize_titles(copy_result.get("titles"), fallback["titles"])
-
-    script_raw = copy_result.get("script")
-    script: list[dict] = []
-    if isinstance(script_raw, list):
-        for item in script_raw:
-            if not isinstance(item, dict):
-                continue
-            content = clean_copy_text(item.get("content", ""))
-            if not content:
-                continue
-            script.append(
-                {
-                    "section": clean_copy_text(item.get("section", "")) or "片段",
-                    "duration": clean_copy_text(item.get("duration", "")),
-                    "content": content,
-                }
-            )
-    if len(script) < 4:
-        script = fallback["script"]
+    script = RAW_COPY_AGENT._pick_script(copy_result, fallback_result)
 
     tags_raw = copy_result.get("tags")
     tags: list[str] = []
@@ -526,14 +525,16 @@ def extract_bvid(url: str) -> str:
 
 
 # 把 B 站原始分区信息映射成项目内部统一使用的分区标识。
-def map_partition(tname: str, tid: int) -> str:
-    text = (tname or "").lower()
+def map_partition(tname: str, tid: int, context_text: str = "") -> str:
+    text = f"{tname or ''} {context_text or ''}".lower()
     if any(keyword in text for keyword in ["知识", "科普", "学习", "校园", "职业"]):
         return "knowledge"
     if any(keyword in text for keyword in ["科技", "数码", "软件", "计算机", "程序"]):
         return "tech"
     if any(keyword in text for keyword in ["游戏", "电竞"]):
         return "game"
+    if any(keyword in text for keyword in ["舞蹈", "卡点", "变速卡点", "热舞", "变装", "颜值", "美女", "身材", "小姐姐"]):
+        return "ent"
     if any(keyword in text for keyword in ["生活", "美食", "日常", "家居"]):
         return "life"
     if any(keyword in text for keyword in ["娱乐", "影视", "综艺", "明星", "音乐"]):
@@ -553,13 +554,13 @@ def map_partition(tname: str, tid: int) -> str:
 
 
 # 根据标题和分区特征猜测更适合的内容风格。
-def guess_style(title: str, partition: str, tname: str) -> str:
-    text = f"{title} {tname}".lower()
+def guess_style(title: str, partition: str, tname: str, context_text: str = "") -> str:
+    text = f"{title} {tname} {context_text}".lower()
     if any(keyword in text for keyword in ["教程", "教学", "保姆级", "入门", "攻略", "怎么", "如何"]):
         return "教学"
     if any(keyword in text for keyword in ["搞笑", "整活", "沙雕", "鬼畜", "吐槽", "抽象"]):
         return "搞笑"
-    if any(keyword in text for keyword in ["混剪", "高燃", "踩点", "mad", "剪辑", "卡点"]):
+    if any(keyword in text for keyword in ["混剪", "高燃", "踩点", "mad", "剪辑", "卡点", "变速卡点", "舞蹈", "热舞"]):
         return "混剪"
     if partition == "game" and "攻略" in text:
         return "教学"
@@ -567,9 +568,18 @@ def guess_style(title: str, partition: str, tname: str) -> str:
 
 
 # 从视频标题里提炼出更适合作为分析主题的短文本。
-def build_topic(title: str) -> str:
+def build_topic(title: str, keywords: list[str] | None = None) -> str:
     cleaned = re.sub(r"[【\[].*?[】\]]", "", title or "")
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_|")
+    keyword_list = extract_video_keywords(" ".join(keywords or []))
+    text = f"{cleaned} {' '.join(keyword_list)}".lower()
+
+    if any(keyword in text for keyword in ["变速卡点", "舞蹈", "热舞"]):
+        return "变速卡点舞蹈展示"
+    if any(keyword in text for keyword in ["颜值", "美女", "身材", "小姐姐", "变装"]):
+        return "颜值展示视频"
+    if any(keyword in text for keyword in ["异地恋", "情侣", "约会", "vlog", "日常"]):
+        return cleaned or "情侣日常记录"
     return (cleaned or title or "B站内容选题拆解").strip()
 
 
@@ -933,6 +943,22 @@ def extract_meta(html: str, attr_name: str, attr_value: str) -> str:
     return unescape(match.group(1)).strip() if match else ""
 
 
+# 从页面关键词或标签文本里抽取可用于内容判断的一组关键词。
+def extract_video_keywords(raw: object) -> list[str]:
+    text = str(raw or "")
+    parts = re.split(r"[,，/|｜]+", text)
+    keywords: list[str] = []
+    for part in parts:
+        clean = normalize_creator_text(part)
+        if len(clean) < 2:
+            continue
+        lowered = clean.lower()
+        if lowered in VIDEO_KEYWORD_STOPWORDS or clean in keywords:
+            continue
+        keywords.append(clean)
+    return keywords[:8]
+
+
 # 按正则提取第一个匹配结果并做 HTML 反转义。
 def extract_first_match(text: str, pattern: str) -> str:
     match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
@@ -993,6 +1019,7 @@ def normalize_html_info(html: str, state: dict, bvid: str) -> dict:
         "title": title,
         "tid": tid,
         "tname": tname,
+        "keywords": extract_video_keywords(extract_meta(html, "name", "keywords")),
         "pic": (
             video_data.get("pic")
             or video_data.get("cover")
@@ -1013,6 +1040,31 @@ def normalize_html_info(html: str, state: dict, bvid: str) -> dict:
             "share": safe_int(stat.get("share") or extract_first_match(html, r'"share"\s*:\s*(\d+)')),
         },
     }
+
+
+# 当公开视频接口缺少有效分区线索时，再从页面关键词补一层语义信息。
+def enrich_video_info_with_html_hints(info: dict, url: str, bvid: str) -> dict:
+    enriched = dict(info or {})
+    existing_keywords = extract_video_keywords(enriched.get("keywords"))
+    if str(enriched.get("tname") or "").strip():
+        enriched["keywords"] = existing_keywords
+        return enriched
+
+    try:
+        html_info = fetch_video_info_via_html(url, bvid)
+    except Exception:
+        enriched["keywords"] = existing_keywords
+        return enriched
+
+    merged_keywords: list[str] = []
+    for keyword in existing_keywords + extract_video_keywords(html_info.get("keywords")):
+        if keyword not in merged_keywords:
+            merged_keywords.append(keyword)
+
+    enriched["keywords"] = merged_keywords[:8]
+    if not enriched.get("tname") and html_info.get("tname"):
+        enriched["tname"] = html_info.get("tname")
+    return enriched
 
 
 # 通过 B 站公开视频接口拉取视频详情。
@@ -1052,12 +1104,14 @@ def fetch_video_info(url: str, bvid: str) -> dict:
 
     # 先走结构化程度最高的来源，失败后再逐级回退到库调用和 HTML 解析。
     try:
-        return fetch_video_info_via_public_api(bvid)
+        info = fetch_video_info_via_public_api(bvid)
+        return enrich_video_info_with_html_hints(info, url, bvid)
     except Exception as exc:
         errors.append(f"public api: {exc}")
 
     try:
-        return sync(video.Video(bvid=bvid).get_info())
+        info = sync(video.Video(bvid=bvid).get_info())
+        return enrich_video_info_with_html_hints(info, url, bvid)
     except Exception as exc:
         errors.append(f"bilibili_api: {exc}")
 
@@ -1099,10 +1153,12 @@ def build_resolved_payload(info: dict, bvid: str) -> dict:
     title = info.get("title", "")
     tid = safe_int(info.get("tid"))
     tname = info.get("tname", "")
+    keywords = extract_video_keywords(info.get("keywords"))
+    context_text = " ".join([title, tname, *keywords])
     stats = extract_video_stats(info)
-    partition = map_partition(tname, tid)
-    topic = build_topic(title)
-    style = guess_style(title, partition, tname)
+    partition = map_partition(tname, tid, context_text=context_text)
+    topic = build_topic(title, keywords=keywords)
+    style = guess_style(title, partition, tname, context_text=" ".join(keywords))
     partition_label = PARTITION_LABELS.get(partition, partition)
 
     # 不管上游信息来自哪个渠道，这里都整理成前端和两条分析链路共用的统一结构。
@@ -1117,6 +1173,7 @@ def build_resolved_payload(info: dict, bvid: str) -> dict:
         "tid": tid,
         "tname": tname,
         "title": title,
+        "keywords": keywords,
         "topic": topic,
         "style": style,
         "duration": safe_int(info.get("duration")),
@@ -2051,12 +2108,14 @@ def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
     title = info.get("title", "")
     tid = safe_int(info.get("tid"))
     tname = info.get("tname", "")
-    retrieval_partition = map_partition(tname, tid)
+    keywords = extract_video_keywords(info.get("keywords"))
+    retrieval_partition = map_partition(tname, tid, context_text=" ".join([title, tname, *keywords]))
 
     return {
         "bv_id": bvid,
         "url": url.strip(),
         "title": title,
+        "keywords": keywords,
         "up_name": up_name,
         "mid": mid,
         "up_ids": [mid] if mid else [],
@@ -2279,7 +2338,7 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
         "- performance: 对象，包含 label, is_hot, score, reasons, summary\n"
         "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords；topic 必须是具体的新方向，不要提问句，不要把原视频标题后面机械接模板尾巴\n"
         "- optimize_result: 对象，包含 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions\n"
-        "- copy_result: 对象或 null；如果你判断视频表现偏低，则必须返回一套新的标题/脚本/简介/标签/置顶评论，其中 titles 要用陈述型、叙事型、生活化表达，不要提问句和教学口吻\n"
+        "- copy_result: 对象或 null；如果你判断视频表现偏低，则必须返回一套新的标题/脚本/简介/标签/置顶评论，其中 titles 要用陈述型、叙事型、生活化表达，不要提问句和教学口吻；如果当前标题属于异地恋 / 情侣约会 / 520 日常 vlog，script 必须是短视频口播，严格按开头钩子、核心画面1、核心画面2、结尾互动写，内容要贴合酒店、早午餐、逛街拍照、小清吧、见面日常这些场景，不要出现切口、测反馈、完播、方向跑偏、实战拆解等运营词\n"
         "- analysis: 对象，包含 analysis_points，并根据判断补充 followup_topics 或 next_topics、title_suggestions、cover_suggestion、content_suggestions；followup_topics / next_topics 也必须是新的具体方向，不要提问句\n"
     )
     result = agent.run_structured(
@@ -2342,7 +2401,8 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
         "5. 如果你判断 is_hot=true，则 copy_result 返回 null，analysis 重点输出 analysis_points 和 followup_topics。\n"
         "6. 如果你判断 is_hot=false，则 copy_result 必须输出一版新文案，analysis 重点输出 analysis_points, next_topics, title_suggestions, cover_suggestion, content_suggestions。\n"
         "7. copy_result.titles 必须是陈述型、叙事型、生活化标题，不要提问句，不要教学口吻，不要出现“为什么 / 怎么 / 哪种 / 更容易起量 / 更容易进推荐”这类模板。\n"
-        "8. analysis 里的 followup_topics / next_topics 也必须是具体新方向，不要把原视频标题后面机械加问题后缀。"
+        "8. 如果当前标题属于异地恋 / 情侣约会 / 520 日常 vlog，copy_result.script 必须写成可直接对镜口播的生活化脚本，严格保留 0-8s 开头钩子、8-28s 核心画面1、28-56s 核心画面2、56-75s 结尾互动；内容必须贴合酒店、早午餐、逛街拍照、小清吧、异地恋见面这些场景，禁止出现切口、测反馈、完播、方向跑偏、实战拆解等运营词。\n"
+        "9. analysis 里的 followup_topics / next_topics 也必须是具体新方向，不要把原视频标题后面机械加问题后缀。"
     )
     result = llm.invoke_json_required(system_prompt, user_prompt)
     if not isinstance(result, dict):
