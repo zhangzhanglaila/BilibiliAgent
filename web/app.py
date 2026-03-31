@@ -4,9 +4,10 @@ from __future__ import annotations
 import json
 import re
 import sys
+from base64 import b64decode
 from html import unescape
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, render_template, request
@@ -33,6 +34,7 @@ app = Flask(
 )
 
 SHORT_LINK_HOSTS = ("b23.tv", "bili2233.cn")
+TRACKING_LINK_HOSTS = ("cm.bilibili.com",)
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -406,6 +408,73 @@ def resolve_short_link(url: str) -> str:
         return url
 
 
+# 从一段文本里直接提取可用的 B 站视频 URL。
+def extract_embedded_bili_video_url(text: str) -> str:
+    raw = str(text or "")
+    if not raw:
+        return ""
+    match = re.search(r"https?://(?:www\.)?bilibili\.com/video/[^\s\"'<>]+", raw, flags=re.IGNORECASE)
+    return match.group(0) if match else ""
+
+
+# 从一段查询参数文本里递归拆出被编码的 B 站视频 URL。
+def decode_embedded_bili_video_url(text: str, depth: int = 0) -> str:
+    if depth > 2:
+        return ""
+
+    raw = str(text or "")
+    if not raw:
+        return ""
+
+    direct_url = extract_embedded_bili_video_url(raw)
+    if direct_url:
+        return direct_url
+
+    decoded = unquote(raw)
+    if decoded != raw:
+        nested_url = decode_embedded_bili_video_url(decoded, depth + 1)
+        if nested_url:
+            return nested_url
+
+    for token in re.findall(r"[A-Za-z0-9+/=]{24,}", raw):
+        for suffix in ("", "=", "==", "==="):
+            try:
+                decoded_text = b64decode(token + suffix, validate=False).decode("utf-8", errors="ignore")
+            except Exception:
+                continue
+            nested_url = decode_embedded_bili_video_url(decoded_text, depth + 1)
+            if nested_url:
+                return nested_url
+    return ""
+
+
+# 从追踪类链接的查询参数里提取真实视频地址。
+def resolve_embedded_bili_video_url(url: str) -> str:
+    raw_url = (url or "").strip()
+    if not raw_url:
+        return ""
+
+    parsed = urlparse(raw_url)
+    host = (parsed.netloc or "").lower()
+    if not host:
+        return ""
+
+    values = [value for _, value in parse_qsl(parsed.query, keep_blank_values=True)]
+    if parsed.fragment:
+        values.append(parsed.fragment)
+
+    for value in values:
+        nested_url = decode_embedded_bili_video_url(value)
+        if nested_url:
+            return nested_url
+
+    if any(host.endswith(tracking_host) for tracking_host in TRACKING_LINK_HOSTS):
+        nested_url = decode_embedded_bili_video_url(raw_url)
+        if nested_url:
+            return nested_url
+    return ""
+
+
 # 根据 av 号调用公开视频接口换取标准 BV 号。
 def resolve_bvid_from_aid(aid: int) -> str:
     if aid <= 0:
@@ -433,6 +502,11 @@ def resolve_bvid_from_aid(aid: int) -> str:
 def extract_bvid(url: str) -> str:
     raw_url = (url or "").strip()
     candidate = resolve_short_link(raw_url)
+
+    embedded_url = resolve_embedded_bili_video_url(candidate)
+    if embedded_url and embedded_url != candidate:
+        return extract_bvid(embedded_url)
+
     match = re.search(r"(BV[0-9A-Za-z]{10})", candidate, flags=re.IGNORECASE)
     if match:
         value = match.group(1)
