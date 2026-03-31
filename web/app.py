@@ -149,6 +149,10 @@ RUNTIME_LLM_CONFIG: dict[str, str] | None = (
     else None
 )
 REFERENCE_VIDEO_DETAIL_CACHE: dict[str, dict] = {}
+RESOLVED_PAYLOAD_VERSION = 2
+VIDEO_TNAME_HINTS = {
+    255: "颜值·网红舞",
+}
 
 
 # 判断当前是否已经保存了可用于启用 LLM Agent 的运行时配置。
@@ -548,7 +552,7 @@ def map_partition(tname: str, tid: int, context_text: str = "") -> str:
         return "game"
     if tid in {21, 76, 138, 160}:
         return "life"
-    if tid in {5, 71, 137, 181}:
+    if tid in {5, 71, 137, 181, 255}:
         return "ent"
     return "knowledge"
 
@@ -567,12 +571,37 @@ def guess_style(title: str, partition: str, tname: str, context_text: str = "") 
     return "干货"
 
 
+# 统一补齐公开接口里偶尔缺失的 tname，避免后续分区判断和参考视频召回过度依赖原标题。
+def normalize_video_tname(tname: str, tid: int, keywords: object = None, title: str = "") -> str:
+    clean_tname = normalize_creator_text(tname or "")
+    if clean_tname:
+        return clean_tname
+
+    hinted_tname = VIDEO_TNAME_HINTS.get(safe_int(tid), "")
+    if hinted_tname:
+        return hinted_tname
+
+    keyword_list = extract_video_keywords(keywords)
+    text = f"{title} {' '.join(keyword_list)}".lower()
+    if any(token in text for token in ["颜值", "美女", "身材", "小姐姐", "变装"]):
+        return "颜值"
+    if any(token in text for token in ["变速卡点", "卡点", "舞蹈", "热舞"]):
+        return "舞蹈"
+    return clean_tname
+
+
 # 从视频标题里提炼出更适合作为分析主题的短文本。
-def build_topic(title: str, keywords: list[str] | None = None) -> str:
+def build_topic(title: str, keywords: list[str] | None = None, tname: str = "", tid: int = 0) -> str:
     cleaned = re.sub(r"[【\[].*?[】\]]", "", title or "")
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_|")
-    keyword_list = extract_video_keywords(" ".join(keywords or []))
-    text = f"{cleaned} {' '.join(keyword_list)}".lower()
+    keyword_list = extract_video_keywords(keywords)
+    normalized_tname = normalize_video_tname(tname, tid, keyword_list, cleaned or title or "")
+    text = f"{cleaned} {normalized_tname} {' '.join(keyword_list)}".lower()
+
+    if any(keyword in text for keyword in ["颜值", "美女", "身材", "小姐姐", "变装"]) and any(
+        keyword in text for keyword in ["变速卡点", "卡点", "舞蹈", "热舞"]
+    ):
+        return "颜值卡点展示"
 
     if any(keyword in text for keyword in ["变速卡点", "舞蹈", "热舞"]):
         return "变速卡点舞蹈展示"
@@ -943,19 +972,45 @@ def extract_meta(html: str, attr_name: str, attr_value: str) -> str:
     return unescape(match.group(1)).strip() if match else ""
 
 
+# 把关键词输入统一展开成字符串片段，避免列表被直接序列化成 "['xx']" 这种脏文本。
+def iter_video_keyword_fragments(raw: object) -> list[str]:
+    if raw in (None, ""):
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    if isinstance(raw, dict):
+        fragments: list[str] = []
+        for key in ("tag_name", "keyword", "name", "title", "text"):
+            value = raw.get(key)
+            if value not in (None, ""):
+                fragments.extend(iter_video_keyword_fragments(value))
+        if fragments:
+            return fragments
+        return [str(value) for value in raw.values() if value not in (None, "")]
+    if isinstance(raw, (list, tuple, set)):
+        fragments: list[str] = []
+        for item in raw:
+            fragments.extend(iter_video_keyword_fragments(item))
+        return fragments
+    return [str(raw)]
+
+
 # 从页面关键词或标签文本里抽取可用于内容判断的一组关键词。
 def extract_video_keywords(raw: object) -> list[str]:
-    text = str(raw or "")
-    parts = re.split(r"[,，/|｜]+", text)
     keywords: list[str] = []
-    for part in parts:
-        clean = normalize_creator_text(part)
-        if len(clean) < 2:
-            continue
-        lowered = clean.lower()
-        if lowered in VIDEO_KEYWORD_STOPWORDS or clean in keywords:
-            continue
-        keywords.append(clean)
+    for fragment in iter_video_keyword_fragments(raw):
+        parts = re.split(r"[,，/|｜]+", str(fragment or ""))
+        for part in parts:
+            clean = normalize_creator_text(part).strip("[](){}'\"")
+            clean = normalize_creator_text(clean)
+            if len(clean) < 2:
+                continue
+            lowered = clean.lower()
+            if lowered in VIDEO_KEYWORD_STOPWORDS or clean in keywords:
+                continue
+            keywords.append(clean)
+            if len(keywords) >= 8:
+                return keywords
     return keywords[:8]
 
 
@@ -1042,22 +1097,49 @@ def normalize_html_info(html: str, state: dict, bvid: str) -> dict:
     }
 
 
+# 通过公开视频标签接口补充题材关键词。
+def fetch_video_tags(bvid: str) -> list[str]:
+    clean_bvid = (bvid or "").strip()
+    if not re.fullmatch(r"BV[0-9A-Za-z]{10}", clean_bvid, flags=re.IGNORECASE):
+        return []
+
+    payload = fetch_json(f"https://api.bilibili.com/x/tag/archive/tags?{urlencode({'bvid': clean_bvid})}")
+    if safe_int(payload.get("code")) != 0:
+        return []
+
+    data = payload.get("data")
+    items = data if isinstance(data, list) else [data] if isinstance(data, dict) else []
+    tags: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        tag_name = normalize_creator_text(item.get("tag_name") or "")
+        if len(tag_name) < 2 or tag_name in tags:
+            continue
+        tags.append(tag_name)
+    return tags[:8]
+
+
 # 当公开视频接口缺少有效分区线索时，再从页面关键词补一层语义信息。
 def enrich_video_info_with_html_hints(info: dict, url: str, bvid: str) -> dict:
     enriched = dict(info or {})
     existing_keywords = extract_video_keywords(enriched.get("keywords"))
+    tag_keywords = fetch_video_tags(bvid)
+    merged_keywords: list[str] = []
+    for keyword in existing_keywords + tag_keywords:
+        if keyword not in merged_keywords:
+            merged_keywords.append(keyword)
     if str(enriched.get("tname") or "").strip():
-        enriched["keywords"] = existing_keywords
+        enriched["keywords"] = merged_keywords[:8]
         return enriched
 
     try:
         html_info = fetch_video_info_via_html(url, bvid)
     except Exception:
-        enriched["keywords"] = existing_keywords
+        enriched["keywords"] = merged_keywords[:8]
         return enriched
 
-    merged_keywords: list[str] = []
-    for keyword in existing_keywords + extract_video_keywords(html_info.get("keywords")):
+    for keyword in extract_video_keywords(html_info.get("keywords")):
         if keyword not in merged_keywords:
             merged_keywords.append(keyword)
 
@@ -1152,17 +1234,18 @@ def build_resolved_payload(info: dict, bvid: str) -> dict:
     up_name = owner.get("name") or owner.get("uname") or ""
     title = info.get("title", "")
     tid = safe_int(info.get("tid"))
-    tname = info.get("tname", "")
     keywords = extract_video_keywords(info.get("keywords"))
+    tname = normalize_video_tname(info.get("tname", ""), tid, keywords, title)
     context_text = " ".join([title, tname, *keywords])
     stats = extract_video_stats(info)
     partition = map_partition(tname, tid, context_text=context_text)
-    topic = build_topic(title, keywords=keywords)
+    topic = build_topic(title, keywords=keywords, tname=tname, tid=tid)
     style = guess_style(title, partition, tname, context_text=" ".join(keywords))
     partition_label = PARTITION_LABELS.get(partition, partition)
 
     # 不管上游信息来自哪个渠道，这里都整理成前端和两条分析链路共用的统一结构。
     return {
+        "resolved_version": RESOLVED_PAYLOAD_VERSION,
         "bv_id": bvid,
         "mid": mid,
         "up_ids": [mid] if mid else [],
@@ -1193,10 +1276,15 @@ def resolve_video_payload(url: str) -> dict:
 def is_resolved_payload_usable(payload: object, url: str) -> bool:
     if not isinstance(payload, dict):
         return False
+    if safe_int(payload.get("resolved_version")) < RESOLVED_PAYLOAD_VERSION:
+        return False
     bv_id = str(payload.get("bv_id") or "").strip()
     title = str(payload.get("title") or "").strip()
     stats = payload.get("stats")
-    if not bv_id or not title or not isinstance(stats, dict):
+    partition = str(payload.get("partition") or "").strip()
+    topic = str(payload.get("topic") or "").strip()
+    style = str(payload.get("style") or "").strip()
+    if not bv_id or not title or not isinstance(stats, dict) or not partition or not topic or not style:
         return False
 
     try:
@@ -1605,12 +1693,53 @@ def extract_reference_terms(text: str) -> list[str]:
     return terms[:32]
 
 
+# 判断原标题是否真的带有内容语义，而不是抽象情绪句或短梗。
+def has_semantic_reference_title(title: str, keywords: list[str] | None = None) -> bool:
+    clean_title = normalize_reference_text(title)
+    if not clean_title:
+        return False
+
+    keyword_list = extract_video_keywords(keywords)
+    if keyword_list and any(keyword.lower() in clean_title for keyword in keyword_list):
+        return True
+
+    semantic_tokens = ["舞蹈", "卡点", "变速", "颜值", "美女", "身材", "穿搭", "约会", "异地恋", "vlog", "教程"]
+    if any(token in clean_title for token in semantic_tokens):
+        return True
+    return False
+
+
+# 判断当前视频是否已经拿到了足够明确的内容语义，可对参考视频启用严格相关性过滤。
+def has_strict_reference_signal(resolved: dict | None = None, query_text: str = "") -> bool:
+    resolved = resolved or {}
+    keywords = extract_video_keywords(resolved.get("keywords"))
+    if keywords:
+        return True
+    topic = str(resolved.get("topic") or "")
+    title = str(resolved.get("title") or "")
+    return has_semantic_reference_title(topic) or has_semantic_reference_title(title) or has_semantic_reference_title(query_text)
+
+
 # 组合视频上下文和额外输入，生成参考视频检索文本。
 def build_reference_query_text(resolved: dict | None = None, extra_text: str = "") -> str:
     parts: list[str] = []
     if isinstance(resolved, dict):
-        for key in ("title", "topic", "tname", "partition_label"):
+        keywords = extract_video_keywords(resolved.get("keywords"))
+        semantic_values: list[str] = []
+
+        for key in ("topic", "tname", "partition_label"):
             value = (resolved.get(key) or "").strip()
+            if value:
+                semantic_values.append(value)
+
+        if keywords:
+            semantic_values.append(" ".join(keywords[:3]))
+
+        title = (resolved.get("title") or "").strip()
+        if title and has_semantic_reference_title(title, keywords=keywords):
+            semantic_values.append(title)
+
+        for value in semantic_values:
             if value and value not in parts:
                 parts.append(value)
 
@@ -1634,7 +1763,8 @@ def extract_reference_query_from_observation(observation: dict) -> str:
         return build_reference_query_text(
             {
                 "title": observation["video"].get("title", ""),
-                "topic": observation["video"].get("title", ""),
+                "topic": observation["video"].get("topic", "") or observation["video"].get("title", ""),
+                "keywords": observation["video"].get("keywords", []),
                 "tname": observation["video"].get("tname", ""),
                 "partition_label": observation["video"].get("retrieval_partition_label", ""),
             }
@@ -1670,27 +1800,39 @@ def strip_reference_html(text: str) -> str:
 # 根据上下文组合多组参考视频搜索词，提升召回率。
 def build_reference_search_queries(query_text: str = "", resolved: dict | None = None) -> list[str]:
     queries: list[str] = []
+    has_semantic_keywords = False
 
     if isinstance(resolved, dict):
         base_topic = (resolved.get("topic") or resolved.get("title") or "").strip()
         partition_label = (resolved.get("partition_label") or resolved.get("tname") or "").strip()
+        keywords = extract_video_keywords(resolved.get("keywords"))
+
+        if keywords:
+            has_semantic_keywords = True
+            queries.append(" ".join(keywords[:2]))
+            if len(keywords) >= 3:
+                queries.append(" ".join(keywords[:3]))
+
         if base_topic:
             queries.append(base_topic[:50])
-            if partition_label and partition_label not in base_topic:
+            if keywords:
+                queries.append(f"{base_topic[:28]} {' '.join(keywords[:2])}".strip())
+            if partition_label and partition_label not in base_topic and not has_semantic_keywords:
                 queries.append(f"{base_topic[:40]} {partition_label}")
 
-    compact_query = " ".join(extract_reference_terms(query_text))[:60].strip()
-    if compact_query:
-        queries.append(compact_query)
+    if not has_semantic_keywords:
+        compact_query = " ".join(extract_reference_terms(query_text))[:60].strip()
+        if compact_query:
+            queries.append(compact_query)
 
-    core_terms = sorted(
-        [term for term in extract_reference_terms(query_text) if len(term) >= 2],
-        key=lambda item: (-len(item), item),
-    )
-    if core_terms:
-        queries.append(" ".join(core_terms[:2]))
-        if len(core_terms) >= 3:
-            queries.append(" ".join(core_terms[:3]))
+        core_terms = sorted(
+            [term for term in extract_reference_terms(query_text) if len(term) >= 2],
+            key=lambda item: (-len(item), item),
+        )
+        if core_terms:
+            queries.append(" ".join(core_terms[:2]))
+            if len(core_terms) >= 3:
+                queries.append(" ".join(core_terms[:3]))
 
     deduped: list[str] = []
     for item in queries:
@@ -1698,7 +1840,7 @@ def build_reference_search_queries(query_text: str = "", resolved: dict | None =
         if len(value) < 2 or value in deduped:
             continue
         deduped.append(value)
-    return deduped[:5]
+    return deduped[:3] if has_semantic_keywords else deduped[:5]
 
 
 # 通过 B 站相关推荐接口直接拉取一批相关参考视频。
@@ -1812,6 +1954,7 @@ def enrich_reference_sources_with_search(
     resolved: dict | None = None,
 ) -> list[dict]:
     combined: list[dict] = []
+    strict_related_only = has_strict_reference_signal(resolved, query_text)
     if isinstance(resolved, dict):
         try:
             combined.extend(fetch_direct_related_reference_videos(resolved.get("bv_id", "")))
@@ -1820,7 +1963,7 @@ def enrich_reference_sources_with_search(
     combined.extend(list(sources or []))
     for query in build_reference_search_queries(query_text=query_text, resolved=resolved):
         try:
-            combined.extend(fetch_search_reference_videos(query))
+            combined.extend(fetch_search_reference_videos(query, limit=6 if strict_related_only else 8))
         except Exception:
             continue
     return combined
@@ -1838,35 +1981,82 @@ def fetch_reference_video_detail(bvid: str, url: str = "") -> dict | None:
         return dict(cached)
 
     info: dict | None = None
+    reference_url = url or f"https://www.bilibili.com/video/{clean_bvid}"
+    used_public_api = False
     try:
         info = fetch_video_info_via_public_api(clean_bvid)
+        used_public_api = True
     except Exception:
-        if url:
+        if reference_url:
             try:
-                info = fetch_video_info_via_html(url, clean_bvid)
+                info = fetch_video_info_via_html(reference_url, clean_bvid)
             except Exception:
                 info = None
 
     if not isinstance(info, dict) or not info:
         return None
 
-    owner = info.get("owner") or {}
-    stats = extract_video_stats(info)
+    enriched_info = dict(info)
+    title = enriched_info.get("title", "")
+    tid = safe_int(enriched_info.get("tid"))
+    merged_keywords = extract_video_keywords(enriched_info.get("keywords"))
+
+    if used_public_api:
+        for keyword in fetch_video_tags(clean_bvid):
+            if keyword not in merged_keywords:
+                merged_keywords.append(keyword)
+
+    tname = normalize_video_tname(enriched_info.get("tname", ""), tid, merged_keywords, title)
+    if not tname and reference_url:
+        try:
+            html_info = fetch_video_info_via_html(reference_url, clean_bvid)
+        except Exception:
+            html_info = None
+        if isinstance(html_info, dict) and html_info:
+            if not title:
+                title = html_info.get("title", "")
+            if not tid:
+                tid = safe_int(html_info.get("tid"))
+            for keyword in extract_video_keywords(html_info.get("keywords")):
+                if keyword not in merged_keywords:
+                    merged_keywords.append(keyword)
+            tname = normalize_video_tname(html_info.get("tname", ""), tid, merged_keywords, title)
+            if html_info.get("pic") and not enriched_info.get("pic"):
+                enriched_info["pic"] = html_info.get("pic")
+
+    enriched_info["keywords"] = merged_keywords[:8]
+    if tname:
+        enriched_info["tname"] = tname
+
+    owner = enriched_info.get("owner") or {}
+    stats = extract_video_stats(enriched_info)
+    keywords = extract_video_keywords(enriched_info.get("keywords"))
+    context_text = " ".join([title, tname, *keywords])
+    partition = map_partition(tname, tid, context_text=context_text)
+    topic = build_topic(title, keywords=keywords, tname=tname, tid=tid)
+    style = guess_style(title, partition, tname, context_text=" ".join(keywords))
     detail = {
         "bvid": clean_bvid,
-        "title": info.get("title", ""),
+        "title": title,
         "author": owner.get("name") or owner.get("uname") or "",
-        "cover": info.get("pic") or info.get("cover") or "",
+        "cover": enriched_info.get("pic") or enriched_info.get("cover") or "",
         "mid": safe_int(owner.get("mid") or owner.get("mid_id")),
+        "tid": tid,
+        "tname": tname,
+        "partition": partition,
+        "partition_label": PARTITION_LABELS.get(partition, partition),
+        "keywords": keywords,
+        "topic": topic,
+        "style": style,
         "view": stats.get("view"),
         "like": stats.get("like"),
         "coin": stats.get("coin"),
         "favorite": stats.get("favorite"),
         "reply": stats.get("reply"),
         "share": stats.get("share"),
-        "duration": safe_int(info.get("duration")),
+        "duration": safe_int(enriched_info.get("duration")),
         "like_rate": float(stats.get("like_rate") or 0.0),
-        "url": url or f"https://www.bilibili.com/video/{clean_bvid}",
+        "url": reference_url,
     }
     REFERENCE_VIDEO_DETAIL_CACHE[cache_key] = detail
     return dict(detail)
@@ -1880,17 +2070,61 @@ def reference_video_needs_metric_refresh(item: dict) -> bool:
     return view is None or view <= 0 or like is None or (like <= 0 and like_rate <= 0.0)
 
 
+def reference_video_needs_semantic_refresh(item: dict) -> bool:
+    partition = str(item.get("partition") or "").strip()
+    topic = str(item.get("topic") or "").strip()
+    tname = str(item.get("tname") or "").strip()
+    keywords = extract_video_keywords(item.get("keywords"))
+    return not partition or not topic or (not tname and not keywords)
+
+
+def build_reference_semantic_text(item: dict) -> str:
+    parts = [
+        str(item.get("title") or ""),
+        str(item.get("topic") or ""),
+        str(item.get("tname") or ""),
+        str(item.get("partition") or ""),
+        str(item.get("partition_label") or ""),
+        str(item.get("style") or ""),
+        " ".join(extract_video_keywords(item.get("keywords"))),
+    ]
+    return normalize_reference_text(" ".join(part for part in parts if part))
+
+
 # 为最终展示前的参考视频补齐播放、点赞和基础信息。
-def enrich_reference_video_for_display(item: dict) -> dict:
+def enrich_reference_video_for_display(item: dict, require_semantics: bool = False) -> dict:
     enriched = dict(item or {})
-    if not reference_video_needs_metric_refresh(enriched):
+    need_refresh = reference_video_needs_metric_refresh(enriched) or (
+        require_semantics and reference_video_needs_semantic_refresh(enriched)
+    )
+    if not need_refresh:
         return enriched
 
     detail = fetch_reference_video_detail(enriched.get("bvid", ""), enriched.get("url", ""))
     if not detail:
         return enriched
 
-    for key in ("title", "author", "cover", "mid", "view", "like", "coin", "favorite", "reply", "share", "duration", "url"):
+    for key in (
+        "title",
+        "author",
+        "cover",
+        "mid",
+        "tid",
+        "tname",
+        "partition",
+        "partition_label",
+        "topic",
+        "keywords",
+        "style",
+        "view",
+        "like",
+        "coin",
+        "favorite",
+        "reply",
+        "share",
+        "duration",
+        "url",
+    ):
         value = detail.get(key)
         if value not in (None, ""):
             enriched[key] = value
@@ -1908,19 +2142,31 @@ def has_complete_reference_display_metrics(item: dict) -> bool:
 
 # 为参考视频构造排序键，综合相关性、播放量和互动质量排序。
 def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict | None = None) -> tuple[tuple, dict]:
-    normalized_title = normalize_reference_text(item.get("title", ""))
+    normalized_semantic_text = build_reference_semantic_text(item)
     title_terms = set(extract_reference_terms(item.get("title", "")))
+    semantic_terms = set(extract_reference_terms(normalized_semantic_text))
     query_terms = extract_reference_terms(query_text)
     matched_terms: list[str] = []
 
     for term in query_terms:
-        if term in title_terms or term in normalized_title:
+        if term in title_terms or term in semantic_terms or term in normalized_semantic_text:
             matched_terms.append(term)
+
+    resolved = resolved or {}
+    target_keywords = extract_video_keywords(resolved.get("keywords"))
+    matched_keywords: list[str] = []
+    for keyword in target_keywords:
+        normalized_keyword = normalize_reference_text(keyword)
+        if normalized_keyword and normalized_keyword in normalized_semantic_text:
+            matched_keywords.append(keyword)
 
     overlap_score = sum(len(term) * len(term) for term in matched_terms)
     strong_match_count = sum(1 for term in matched_terms if len(term) >= 4)
-    same_up = 1 if resolved and safe_int(item.get("mid")) and safe_int(item.get("mid")) == safe_int(resolved.get("mid")) else 0
-    same_author = 1 if resolved and (item.get("author") or "").strip() == (resolved.get("up_name") or "").strip() else 0
+    same_up = 1 if safe_int(item.get("mid")) and safe_int(item.get("mid")) == safe_int(resolved.get("mid")) else 0
+    same_author = 1 if (item.get("author") or "").strip() == (resolved.get("up_name") or "").strip() else 0
+    target_partition = str(resolved.get("partition") or "").strip()
+    item_partition = str(item.get("partition") or "").strip()
+    same_partition = 1 if target_partition and item_partition and item_partition == target_partition else 0
     source = item.get("source", "")
     source_priority = 0
     if "当前视频相关推荐" in source:
@@ -1936,11 +2182,16 @@ def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict 
     elif "热榜" in source:
         source_priority = -1
 
-    is_related = bool(matched_terms) or bool(same_up) or bool(same_author)
+    strict_signal = has_strict_reference_signal(resolved, query_text)
+    partition_aligned = not strict_signal or not target_partition or not item_partition or same_partition == 1
+    keyword_aligned = not strict_signal or not target_keywords or bool(matched_keywords)
+    is_related = (bool(matched_terms) and partition_aligned and keyword_aligned) or bool(same_up) or bool(same_author)
     rank_key = (
         1 if is_related else 0,
+        len(matched_keywords),
         strong_match_count,
         overlap_score,
+        same_partition,
         same_up,
         same_author,
         source_priority,
@@ -1952,6 +2203,8 @@ def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict 
     return rank_key, {
         "is_related": is_related,
         "matched_terms": matched_terms,
+        "matched_keywords": matched_keywords,
+        "same_partition": same_partition,
         "source_priority": source_priority,
     }
 
@@ -1979,14 +2232,35 @@ def select_reference_videos(
     resolved: dict | None = None,
 ) -> list[dict]:
     sources = enrich_reference_sources_with_search(sources, query_text=query_text, resolved=resolved)
+    rough_entries = []
     entries = []
+    candidate_seen: set[str] = set()
     view_floor = build_reference_view_floor(resolved)
     soft_view_floor = 50000
+    strict_related_only = has_strict_reference_signal(resolved, query_text)
     for item in sources:
         if not is_real_reference_video(item):
             continue
-        rank_key, meta = build_reference_rank_entry(item, query_text=query_text, resolved=resolved)
-        entries.append((rank_key, meta, item))
+        identity_keys = build_reference_identity_keys(item)
+        if identity_keys and any(key in candidate_seen for key in identity_keys):
+            continue
+        for key in identity_keys:
+            candidate_seen.add(key)
+        if strict_related_only:
+            rough_rank, rough_meta = build_reference_rank_entry(item, query_text=query_text, resolved={})
+            rough_entries.append((rough_rank, rough_meta, item))
+            continue
+        candidate = enrich_reference_video_for_display(item, require_semantics=False)
+        rank_key, meta = build_reference_rank_entry(candidate, query_text=query_text, resolved=resolved)
+        entries.append((rank_key, meta, candidate))
+
+    if strict_related_only:
+        for index, (_, rough_meta, item) in enumerate(sorted(rough_entries, key=lambda entry: entry[0], reverse=True)):
+            source = item.get("source", "")
+            should_enrich = bool(rough_meta.get("is_related")) or "当前视频相关推荐" in source or index < 8
+            candidate = enrich_reference_video_for_display(item, require_semantics=should_enrich)
+            rank_key, meta = build_reference_rank_entry(candidate, query_text=query_text, resolved=resolved)
+            entries.append((rank_key, meta, candidate))
 
     ranked = sorted(entries, key=lambda entry: entry[0], reverse=True)
     result: list[dict] = []
@@ -2009,7 +2283,13 @@ def select_reference_videos(
         item for _, meta, item in ranked if not meta.get("is_related") and safe_int(item.get("view")) < soft_view_floor
     ]
 
-    for pool in (strong_related_pool, medium_related_pool, fallback_high_pool, related_pool, fallback_pool):
+    pools = (
+        (strong_related_pool, medium_related_pool, related_pool)
+        if strict_related_only
+        else (strong_related_pool, medium_related_pool, fallback_high_pool, related_pool, fallback_pool)
+    )
+
+    for pool in pools:
         for item in pool:
             item = enrich_reference_video_for_display(item)
             bvid = (item.get("bvid") or "").strip()
@@ -2107,15 +2387,19 @@ def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
     up_name = owner.get("name") or owner.get("uname") or ""
     title = info.get("title", "")
     tid = safe_int(info.get("tid"))
-    tname = info.get("tname", "")
     keywords = extract_video_keywords(info.get("keywords"))
+    tname = normalize_video_tname(info.get("tname", ""), tid, keywords, title)
     retrieval_partition = map_partition(tname, tid, context_text=" ".join([title, tname, *keywords]))
+    topic = build_topic(title, keywords=keywords, tname=tname, tid=tid)
+    style = guess_style(title, retrieval_partition, tname, context_text=" ".join(keywords))
 
     return {
         "bv_id": bvid,
         "url": url.strip(),
         "title": title,
         "keywords": keywords,
+        "topic": topic,
+        "style": style,
         "up_name": up_name,
         "mid": mid,
         "up_ids": [mid] if mid else [],
