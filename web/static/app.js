@@ -67,6 +67,11 @@ function num(value) {
   return Number.isFinite(n) ? n.toLocaleString('zh-CN') : '0';
 }
 
+// 判断一个指标是否为“明确数值”，用于区分真实的 0 和缺失字段。
+function hasMetricValue(value) {
+  return value !== null && value !== undefined && String(value).trim() !== '' && Number.isFinite(Number(value));
+}
+
 // 把比例值格式化成百分比字符串。
 function pct(value) {
   return `${(Number(value || 0) * 100).toFixed(2)}%`;
@@ -510,13 +515,15 @@ function referenceGrid(items = [], compact = false) {
   return `<div class="reference-grid ${compact ? 'reference-grid--chat' : ''}">${list.map(item => {
     const cover = coverUrl(item.cover);
     const title = item.title || '未命名视频';
+    const viewText = hasMetricValue(item.view) ? num(item.view) : '暂缺';
+    const likeText = hasMetricValue(item.like) ? num(item.like) : '暂缺';
     return `
       <a class="reference-card ${compact ? 'reference-card--chat' : ''}" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">
         <div class="reference-card__thumb">${renderCoverMedia(cover, title, compact ? 'reference-chat' : 'reference')}</div>
         <div class="reference-card__body">
           <h4>${escapeHtml(title)}</h4>
           <p>${escapeHtml(item.author || '未知 UP')}</p>
-          <div class="reference-card__meta"><span>播放 ${num(item.view)}</span><span>点赞 ${item.like ? num(item.like) : '暂缺'}</span></div>
+          <div class="reference-card__meta"><span>播放 ${viewText}</span><span>点赞 ${likeText}</span></div>
         </div>
       </a>
     `;

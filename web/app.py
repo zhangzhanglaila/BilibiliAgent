@@ -138,6 +138,7 @@ RUNTIME_LLM_CONFIG: dict[str, str] | None = (
     if CONFIG.llm_enabled()
     else None
 )
+REFERENCE_VIDEO_DETAIL_CACHE: dict[str, dict] = {}
 
 
 # 判断当前是否已经保存了可用于启用 LLM Agent 的运行时配置。
@@ -265,6 +266,21 @@ def safe_int(value: object) -> int:
         return int(value or 0)
     except Exception:
         return 0
+
+
+# 把可选数值安全转成整数；空值返回 None，便于前端区分“未知”和“0”。
+def safe_optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        return int(value)
+    except Exception:
+        try:
+            return int(float(str(value).strip()))
+        except Exception:
+            return None
 
 
 # 把带“万/亿”等单位的展示数值转换成整数指标。
@@ -1628,6 +1644,9 @@ def fetch_search_reference_videos(query: str, limit: int = 8) -> list[dict]:
         bvid = (item.get("bvid") or "").strip()
         if not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE):
             continue
+        search_like_raw = item.get("like")
+        search_like = safe_metric_int(search_like_raw) if search_like_raw not in (None, "") else None
+        view = safe_metric_int(item.get("play"))
 
         results.append(
             {
@@ -1636,15 +1655,15 @@ def fetch_search_reference_videos(query: str, limit: int = 8) -> list[dict]:
                 "author": strip_reference_html(item.get("author", "")),
                 "cover": item.get("pic") or item.get("cover") or "",
                 "mid": safe_int(item.get("mid")),
-                "view": safe_metric_int(item.get("play")),
-                "like": 0,
+                "view": view,
+                "like": search_like,
                 "coin": 0,
                 "favorite": safe_metric_int(item.get("favorites")),
                 "reply": safe_metric_int(item.get("review")),
                 "share": 0,
                 "duration": safe_int(item.get("duration")),
                 "avg_view_duration": 0.0,
-                "like_rate": 0.0,
+                "like_rate": (search_like or 0) / max(view, 1),
                 "completion_rate": 0.0,
                 "competition_score": 0.0,
                 "source": f"相关搜索:{query}",
@@ -1674,6 +1693,86 @@ def enrich_reference_sources_with_search(
         except Exception:
             continue
     return combined
+
+
+# 按需补齐参考视频的公开详情，主要用于把搜索候选补成明确播放和点赞数据。
+def fetch_reference_video_detail(bvid: str, url: str = "") -> dict | None:
+    clean_bvid = (bvid or "").strip()
+    if not re.fullmatch(r"BV[0-9A-Za-z]{10}", clean_bvid, flags=re.IGNORECASE):
+        return None
+
+    cache_key = clean_bvid.lower()
+    cached = REFERENCE_VIDEO_DETAIL_CACHE.get(cache_key)
+    if isinstance(cached, dict):
+        return dict(cached)
+
+    info: dict | None = None
+    try:
+        info = fetch_video_info_via_public_api(clean_bvid)
+    except Exception:
+        if url:
+            try:
+                info = fetch_video_info_via_html(url, clean_bvid)
+            except Exception:
+                info = None
+
+    if not isinstance(info, dict) or not info:
+        return None
+
+    owner = info.get("owner") or {}
+    stats = extract_video_stats(info)
+    detail = {
+        "bvid": clean_bvid,
+        "title": info.get("title", ""),
+        "author": owner.get("name") or owner.get("uname") or "",
+        "cover": info.get("pic") or info.get("cover") or "",
+        "mid": safe_int(owner.get("mid") or owner.get("mid_id")),
+        "view": stats.get("view"),
+        "like": stats.get("like"),
+        "coin": stats.get("coin"),
+        "favorite": stats.get("favorite"),
+        "reply": stats.get("reply"),
+        "share": stats.get("share"),
+        "duration": safe_int(info.get("duration")),
+        "like_rate": float(stats.get("like_rate") or 0.0),
+        "url": url or f"https://www.bilibili.com/video/{clean_bvid}",
+    }
+    REFERENCE_VIDEO_DETAIL_CACHE[cache_key] = detail
+    return dict(detail)
+
+
+# 判断当前候选是否还缺少前端展示所需的明确指标。
+def reference_video_needs_metric_refresh(item: dict) -> bool:
+    view = safe_optional_int(item.get("view"))
+    like = safe_optional_int(item.get("like"))
+    like_rate = float(item.get("like_rate") or 0.0)
+    return view is None or view <= 0 or like is None or (like <= 0 and like_rate <= 0.0)
+
+
+# 为最终展示前的参考视频补齐播放、点赞和基础信息。
+def enrich_reference_video_for_display(item: dict) -> dict:
+    enriched = dict(item or {})
+    if not reference_video_needs_metric_refresh(enriched):
+        return enriched
+
+    detail = fetch_reference_video_detail(enriched.get("bvid", ""), enriched.get("url", ""))
+    if not detail:
+        return enriched
+
+    for key in ("title", "author", "cover", "mid", "view", "like", "coin", "favorite", "reply", "share", "duration", "url"):
+        value = detail.get(key)
+        if value not in (None, ""):
+            enriched[key] = value
+    enriched["like_rate"] = float(detail.get("like_rate") or enriched.get("like_rate") or 0.0)
+    return enriched
+
+
+# 判断参考视频卡片所需的播放和点赞是否都已经拿到明确数据。
+def has_complete_reference_display_metrics(item: dict) -> bool:
+    view = safe_optional_int(item.get("view"))
+    like = safe_optional_int(item.get("like"))
+    like_rate = float(item.get("like_rate") or 0.0)
+    return bool(view and view > 0 and like is not None and (like > 0 or like_rate > 0.0))
 
 
 # 为参考视频构造排序键，综合相关性、播放量和互动质量排序。
@@ -1781,12 +1880,15 @@ def select_reference_videos(
 
     for pool in (strong_related_pool, medium_related_pool, fallback_high_pool, related_pool, fallback_pool):
         for item in pool:
+            item = enrich_reference_video_for_display(item)
             bvid = (item.get("bvid") or "").strip()
             url = (item.get("url") or "").strip()
             identity_keys = build_reference_identity_keys(item)
             if not url or any(key in seen for key in identity_keys):
                 continue
             if exclude_bvid and bvid.lower() == exclude_bvid.lower():
+                continue
+            if not has_complete_reference_display_metrics(item):
                 continue
             for key in identity_keys:
                 seen.add(key)
@@ -1797,7 +1899,7 @@ def select_reference_videos(
                     "author": item.get("author", ""),
                     "cover": item.get("cover", ""),
                     "view": safe_int(item.get("view")),
-                    "like": safe_int(item.get("like")),
+                    "like": safe_optional_int(item.get("like")),
                     "like_rate": float(item.get("like_rate") or 0.0),
                     "source": item.get("source", ""),
                 }

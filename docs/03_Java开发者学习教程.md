@@ -338,7 +338,7 @@ topic -> copy -> operate -> optimize
 - 分别运行：
 
 ```bash
-python main.py copy --topic "AI 剪辑第一条视频先拍什么更容易起量" --style 干货
+python main.py copy --topic "AI 剪辑从找素材到出片的完整记录" --style 干货
 python main.py optimize --bv BV1xx411c7mD
 python main.py operate --bv BV1xx411c7mD --dry-run
 ```
