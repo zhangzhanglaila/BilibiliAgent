@@ -13,6 +13,14 @@ const state = {
   sceneTicking: false,
   progressJobs: {},
   activeModule: 'analyze',
+  knowledgeActiveSubtab: 'upload',
+  knowledgeStatus: null,
+  knowledgeResults: {
+    upload: '',
+    sync: '',
+    view: '',
+    search: '',
+  },
   chatPending: false,
   chatTyping: false,
   chatHistory: [],
@@ -482,20 +490,6 @@ function tags(items = []) {
     : '<p class="section-note">暂无标签</p>';
 }
 
-// 生成通用加载卡片，用于模块请求中的占位展示。
-function loadingCard(title, desc, steps = []) {
-  return `
-    <section class="loading-card">
-      <div class="block-title">
-        <div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div>
-        <span class="type-badge">处理中</span>
-      </div>
-      <div class="bili-progress"><div class="bili-progress__bar bili-progress__bar--indeterminate"></div></div>
-      ${steps.length ? `<div class="bili-progress__steps">${steps.map((step, i) => `<div class="progress-step ${i === 0 ? 'is-active' : ''}"><span class="progress-step__dot"></span><span>${escapeHtml(step)}</span></div>`).join('')}</div>` : ''}
-    </section>
-  `;
-}
-
 // 生成一个简洁的信息提示卡片。
 function infoCard(title, text, tone = '') {
   return `<div class="info-card ${tone ? `info-card--${tone}` : ''}"><h4>${escapeHtml(title)}</h4><p>${escapeHtml(text)}</p></div>`;
@@ -512,6 +506,9 @@ function knowledgeStatusView(payload = {}, summaryHtml = '') {
   const errorHtml = payload.init_error
     ? `<div class="info-card info-card--danger"><h4>初始化错误</h4><p>${escapeHtml(payload.init_error)}</p></div>`
     : '';
+  const embeddingHtml = payload.embedding_model
+    ? `<div class="info-card"><h4>Embedding 模型</h4><p>${escapeHtml(payload.embedding_model)}${payload.embedding_fallback ? '（当前处于 fallback）' : ''}</p></div>`
+    : '';
 
   return `
     <section class="copy-block">
@@ -525,11 +522,21 @@ function knowledgeStatusView(payload = {}, summaryHtml = '') {
         ${metricCard('记忆后端', memoryText, '长期记忆同样走 Chroma，不再写本地 JSON')}
       </div>
       <div class="info-card"><h4>向量库路径</h4><p>${escapeHtml(pathText)}</p></div>
+      ${embeddingHtml}
       ${uploadTypes.length ? `<div><div class="meta-line">支持上传格式</div>${tags(uploadTypes)}</div>` : ''}
       ${summaryHtml}
       ${errorHtml}
     </section>
   `;
+}
+
+// 渲染知识库顶部状态条。
+function knowledgeStatusBarView(payload = {}) {
+  const available = Boolean(payload.available);
+  const dot = available ? '✅' : '⚠️';
+  const count = num(payload.document_count || 0);
+  const lastUpdated = payload.last_updated_at || '未知';
+  return `${dot} Chroma向量库${available ? '可用' : '不可用'} | 当前文档总数：${count} | 最后更新时间：${escapeHtml(lastUpdated)}`;
 }
 
 // 把知识库文档列表渲染成可读卡片。
@@ -557,7 +564,10 @@ function knowledgeDocumentsView(items = [], options = {}) {
                   <div class="meta-line">DOC ${index + 1}</div>
                   <h4>${escapeHtml(item.id || metadata.document_id || '未命名文档')}</h4>
                 </div>
-                <button class="copy-btn" type="button" data-copy="${escapeHtml(item.text || '')}" data-copy-label="知识内容">复制内容</button>
+                <div class="knowledge-doc-item__actions">
+                  ${item.score !== undefined ? `<span class="result-badge">相关性 ${escapeHtml(String(Number(item.score).toFixed(4)))}</span>` : ''}
+                  <button class="copy-btn" type="button" data-copy="${escapeHtml(item.text || '')}" data-copy-label="知识内容">复制内容</button>
+                </div>
               </div>
               ${tagsList.length ? tags(tagsList) : '<p class="section-note">暂无元数据</p>'}
               <pre>${escapeHtml(item.text || '')}</pre>
@@ -569,17 +579,18 @@ function knowledgeDocumentsView(items = [], options = {}) {
   `;
 }
 
-// 把知识库状态或执行结果渲染进面板。
-function renderKnowledgeStatus(payload = {}, summaryHtml = '') {
-  const box = $('#knowledgeResult');
+// 渲染知识库顶部状态条。
+function renderKnowledgeStatusBar(payload = {}) {
+  const box = $('#knowledgeStatusBar');
   if (!box) return;
-  box.innerHTML = knowledgeStatusView(payload, summaryHtml);
-  bindCopyButtons(box);
+  box.innerHTML = knowledgeStatusBarView(payload);
 }
 
-// 把知识库样本或检索结果渲染到内容区域。
-function renderKnowledgeContent(html) {
-  const box = $('#knowledgeContentResult');
+// 统一渲染知识库结果展示区。
+function renderKnowledgeResult(html, tab = state.knowledgeActiveSubtab) {
+  state.knowledgeResults[tab] = html;
+  if (state.knowledgeActiveSubtab !== tab) return;
+  const box = $('#knowledgeStageResult');
   if (!box) return;
   box.innerHTML = html;
   bindCopyButtons(box);
@@ -590,31 +601,81 @@ function knowledgeViewLimit() {
   return Math.max(1, Math.min(20, Number($('#knowledgeViewLimit')?.value || 6) || 6));
 }
 
+// 切换知识库子 Tab。
+function setKnowledgeSubtab(tab) {
+  const next = ['upload', 'sync', 'view', 'search'].includes(tab) ? tab : 'upload';
+  state.knowledgeActiveSubtab = next;
+  $$('[data-knowledge-subtab]').forEach(button => {
+    button.classList.toggle('is-active', button.dataset.knowledgeSubtab === next);
+  });
+  $$('[data-knowledge-pane]').forEach(pane => {
+    const visible = pane.dataset.knowledgePane === next;
+    pane.hidden = !visible;
+    pane.classList.toggle('is-active', visible);
+  });
+  const box = $('#knowledgeStageResult');
+  if (!box) return;
+  box.innerHTML = state.knowledgeResults[next] || knowledgePlaceholder(next);
+  bindCopyButtons(box);
+}
+
+// 各知识库子 Tab 的默认占位内容。
+function knowledgePlaceholder(tab) {
+  if (tab === 'upload') return infoCard('等待上传', '选择本地资料文件后，点击“上传到知识库”，结果会在这里显示。');
+  if (tab === 'sync') return infoCard('等待同步', '点击“自动更新热门知识库”后，这里会展示各榜单写入情况和完整 Chroma 状态总览。');
+  if (tab === 'view') return infoCard('等待查看', '点击“查看知识库内容”后，这里会展示向量库中的最新文档。');
+  if (tab === 'search') return infoCard('等待检索', '输入关键词并点击“按关键词检索知识库”后，这里会展示命中的文档和相关性。');
+  return infoCard('等待操作', '请选择知识库子功能。');
+}
+
+// 生成“同步热门样本”子 Tab 的默认总览结果。
+function knowledgeSyncDefaultResult(payload = {}) {
+  return knowledgeStatusView(
+    payload,
+    infoCard('等待同步', '点击“自动更新热门知识库”后，这里会展示各榜单写入情况和完整 Chroma 状态总览。'),
+  );
+}
+
 // 页面加载时读取知识库状态。
 async function loadKnowledgeBaseStatus() {
-  if (!$('#knowledgeResult')) return;
+  if (!$('#knowledgeStatusBar')) return;
   try {
     const data = await requestGetJson('/api/knowledge/status');
-    renderKnowledgeStatus(data);
+    state.knowledgeStatus = data;
+    renderKnowledgeStatusBar(data);
+    state.knowledgeResults.sync = knowledgeSyncDefaultResult(data);
+    if (state.knowledgeActiveSubtab === 'sync') {
+      renderKnowledgeResult(state.knowledgeResults.sync, 'sync');
+    }
   } catch (error) {
-    $('#knowledgeResult').innerHTML = infoCard('知识库状态读取失败', error.message || '请检查后端服务', 'danger');
+    renderKnowledgeStatusBar({ available: false, document_count: 0, last_updated_at: '读取失败' });
+    state.knowledgeResults.sync = infoCard('知识库状态读取失败', error.message || '请检查后端服务', 'danger');
+    if (state.knowledgeActiveSubtab === 'sync') {
+      renderKnowledgeResult(state.knowledgeResults.sync, 'sync');
+    }
   }
 }
 
 // 读取知识库中的样本文档并展示。
 async function loadKnowledgeSamples() {
   const limit = knowledgeViewLimit();
-  renderKnowledgeContent(loadingCard('正在读取知识库内容', '系统正在从当前 Chroma 向量库读取样本文档。', ['读取状态', '拉取文档', '渲染结果']));
+  setActionButtonLoading('knowledgeSampleBtn', true, '读取中', '正在拉取样本文档');
+  renderKnowledgeResult(loadingCard('正在读取知识库内容', '系统正在从当前 Chroma 向量库读取样本文档。', ['读取状态', '拉取文档', '渲染结果']), 'view');
   try {
     const data = await requestGetJson(`/api/knowledge/sample?limit=${encodeURIComponent(limit)}`);
-    renderKnowledgeContent(
+    renderKnowledgeResult(
       knowledgeDocumentsView(data.items || [], {
         title: '知识库样本文档',
         note: `当前展示知识库中的前 ${limit} 条样本文档。`,
       }),
+      'view',
     );
+    showToast('读取完成', `当前已展示 ${Array.isArray(data.items) ? data.items.length : 0} 条知识库文档`);
   } catch (error) {
-    renderKnowledgeContent(infoCard('读取知识库内容失败', error.message, 'danger'));
+    renderKnowledgeResult(infoCard('读取知识库内容失败', error.message, 'danger'), 'view');
+    showToast('读取失败', error.message, 'error');
+  } finally {
+    setActionButtonLoading('knowledgeSampleBtn', false);
   }
 }
 
@@ -626,18 +687,37 @@ async function searchKnowledgeContent() {
     return;
   }
   const limit = knowledgeViewLimit();
-  renderKnowledgeContent(loadingCard('正在检索知识库', '系统正在基于当前关键词执行语义检索。', ['发送查询', '执行检索', '渲染命中']));
+  setActionButtonLoading('knowledgeSearchBtn', true, '检索中', '正在执行语义检索');
+  renderKnowledgeResult(loadingCard('正在检索知识库', '系统正在基于当前关键词执行语义检索。', ['发送查询', '执行检索', '渲染命中']), 'search');
   try {
     const data = await requestGetJson(`/api/knowledge/search?q=${encodeURIComponent(query)}&limit=${encodeURIComponent(limit)}`);
-    renderKnowledgeContent(
+    renderKnowledgeResult(
       knowledgeDocumentsView(data.matches || [], {
         title: `检索结果：${query}`,
         note: `当前关键词共返回 ${Array.isArray(data.matches) ? data.matches.length : 0} 条命中结果。`,
       }),
+      'search',
     );
+    showToast('检索完成', `关键词「${query}」已返回 ${Array.isArray(data.matches) ? data.matches.length : 0} 条结果`);
   } catch (error) {
-    renderKnowledgeContent(infoCard('检索知识库失败', error.message, 'danger'));
+    renderKnowledgeResult(infoCard('检索知识库失败', error.message, 'danger'), 'search');
+    showToast('检索失败', error.message, 'error');
+  } finally {
+    setActionButtonLoading('knowledgeSearchBtn', false);
   }
+}
+
+// 更新知识库按钮文字和 loading 状态。
+function setActionButtonLoading(id, loading, loadingTitle = '处理中', loadingDesc = '请稍候') {
+  const button = document.getElementById(id);
+  if (!button) return;
+  const title = button.querySelector('.action-btn__title');
+  const desc = button.querySelector('.action-btn__desc');
+  if (title && !button.dataset.defaultTitle) button.dataset.defaultTitle = title.textContent || '';
+  if (desc && !button.dataset.defaultDesc) button.dataset.defaultDesc = desc.textContent || '';
+  setButtonLoading(id, loading);
+  if (title) title.textContent = loading ? loadingTitle : (button.dataset.defaultTitle || title.textContent || '');
+  if (desc) desc.textContent = loading ? loadingDesc : (button.dataset.defaultDesc || desc.textContent || '');
 }
 
 // 上传知识文件到 Chroma。
@@ -652,28 +732,31 @@ async function uploadKnowledgeFile() {
   const formData = new FormData();
   formData.append('file', file);
 
-  setButtonLoading('knowledgeUploadBtn', true);
-  $('#knowledgeResult').innerHTML = loadingCard('正在导入知识文件', '系统会读取文件内容、清洗文本、切片并写入 Chroma 向量库。', ['读取文件', '清洗文本', '切片入库']);
+  setActionButtonLoading('knowledgeUploadBtn', true, '上传中', '正在读取并切片');
+  renderKnowledgeResult(loadingCard('正在导入知识文件', '系统会读取文件内容、清洗文本、切片并写入 Chroma 向量库。', ['读取文件', '清洗文本', '切片入库']), 'upload');
   setStatus('正在导入知识文件', 'loading');
 
   try {
     const data = await requestFormData('/api/knowledge/upload', formData);
     const result = data.upload_result || {};
-    const summaryHtml = infoCard(
-      '导入完成',
-      `文件 ${result.filename || file.name} 已写入知识库，文档 ID 为 ${result.document_id || '未知'}，切片数量 ${result.chunk_count ?? 0}。`,
+    state.knowledgeStatus = data.knowledge_status || state.knowledgeStatus;
+    renderKnowledgeStatusBar(state.knowledgeStatus || {});
+    renderKnowledgeResult(
+      `
+        ${infoCard('上传完成', `文件 ${result.filename || file.name} 已写入知识库，文档 ID 为 ${result.document_id || '未知'}，切片数量 ${result.chunk_count ?? 0}。`)}
+        ${knowledgeStatusView(data.knowledge_status || {}, '')}
+      `,
+      'upload',
     );
-    renderKnowledgeStatus(data.knowledge_status || {}, summaryHtml);
-    await loadKnowledgeSamples();
     fileInput.value = '';
     setStatus('知识文件已导入', 'success');
     showToast('导入成功', `${result.filename || file.name} 已写入知识库`);
   } catch (error) {
-    $('#knowledgeResult').innerHTML = infoCard('知识库导入失败', error.message, 'danger');
+    renderKnowledgeResult(infoCard('知识库导入失败', error.message, 'danger'), 'upload');
     setStatus('知识库导入失败', 'error');
     showToast('导入失败', error.message, 'error');
   } finally {
-    setButtonLoading('knowledgeUploadBtn', false);
+    setActionButtonLoading('knowledgeUploadBtn', false);
   }
 }
 
@@ -682,8 +765,8 @@ async function updateKnowledgeBase() {
   const limitInput = $('#knowledgeUpdateLimit');
   const limit = Math.max(1, Math.min(20, Number(limitInput?.value || 10) || 10));
 
-  setButtonLoading('knowledgeUpdateBtn', true);
-  $('#knowledgeResult').innerHTML = loadingCard('正在更新热门知识库', '系统会抓取全站热门榜、分区热门榜、每周必看和入站必刷，并把结构化结果追加写入 Chroma。', ['抓取榜单', '提取优点', '写入向量库']);
+  setActionButtonLoading('knowledgeUpdateBtn', true, '更新中', '正在抓取并去重');
+  renderKnowledgeResult(loadingCard('正在更新热门知识库', '系统会抓取全站热门榜、分区热门榜、每周必看和入站必刷，并把结构化结果追加写入 Chroma。', ['抓取榜单', '提取优点', '写入向量库']), 'sync');
   setStatus('正在更新知识库', 'loading');
 
   try {
@@ -697,16 +780,17 @@ async function updateKnowledgeBase() {
       ${infoCard('更新完成', `本次共写入 ${result.total_saved || 0} 条热门样本，其中覆盖更新 ${result.total_updated || 0} 条，失败 ${result.total_failed || 0} 条。`)}
       ${boardSummary}
     `;
-    renderKnowledgeStatus(data.knowledge_status || {}, summaryHtml);
-    await loadKnowledgeSamples();
+    state.knowledgeStatus = data.knowledge_status || state.knowledgeStatus;
+    renderKnowledgeStatusBar(state.knowledgeStatus || {});
+    renderKnowledgeResult(knowledgeStatusView(data.knowledge_status || {}, summaryHtml), 'sync');
     setStatus('知识库已更新', 'success');
-    showToast('更新成功', `本次追加写入 ${result.total_saved || 0} 条热门样本`);
+    showToast('更新成功', `本次写入 ${result.total_saved || 0} 条热门样本`);
   } catch (error) {
-    $('#knowledgeResult').innerHTML = infoCard('知识库更新失败', error.message, 'danger');
+    renderKnowledgeResult(infoCard('知识库更新失败', error.message, 'danger'), 'sync');
     setStatus('知识库更新失败', 'error');
     showToast('更新失败', error.message, 'error');
   } finally {
-    setButtonLoading('knowledgeUpdateBtn', false);
+    setActionButtonLoading('knowledgeUpdateBtn', false);
   }
 }
 
@@ -1013,59 +1097,6 @@ function assistantEmptyState() {
   `;
 }
 
-// 渲染助手思考中的占位气泡。
-function assistantPendingBubble() {
-  return `
-    <article class="chat-row chat-row--assistant">
-      <div class="chat-bubble chat-bubble--assistant chat-bubble--pending">
-        <div class="chat-bubble__head"><strong class="chat-bubble__name">智能助手</strong><span class="meta-line">正在思考</span></div>
-        ${loadingCard('Agent 正在思考', '正在结合当前页面输入、工具结果和上下文组织回答。', ['理解问题', '调用工具', '组织回答'])}
-      </div>
-    </article>
-  `;
-}
-
-// 根据当前聊天记录刷新助手对话区域。
-function renderAssistant() {
-  const box = $('#assistantResult');
-  if (!box) return;
-  if (!state.chatHistory.length && !state.chatPending) {
-    box.innerHTML = assistantEmptyState();
-    return;
-  }
-  box.innerHTML = `
-    <div class="assistant-thread">
-      ${state.chatHistory.map(item => `
-        <article class="chat-row chat-row--${escapeHtml(item.role)}">
-          <div class="chat-bubble chat-bubble--${escapeHtml(item.role)} ${item.error ? 'chat-bubble--error' : ''}">
-            <div class="chat-bubble__head">
-              <strong class="chat-bubble__name">${item.role === 'assistant' ? '智能助手' : '你'}</strong>
-              ${item.role === 'assistant' ? `<button class="copy-btn" data-copy="${escapeHtml(item.content || '')}" data-copy-label="回答">复制</button>` : ''}
-            </div>
-            <div class="rich-text">${rich(item.content || '')}</div>
-            ${item.actions?.length ? `<div class="assistant-actions">${assistantActionButtons(item.actions)}</div>` : ''}
-            ${item.references?.length ? `<div class="chat-links"><div class="meta-line">可直接打开的参考视频</div>${referenceGrid(item.references, true)}</div>` : ''}
-          </div>
-        </article>
-      `).join('')}
-      ${state.chatPending ? assistantPendingBubble() : ''}
-    </div>
-  `;
-  bindCopyButtons(box);
-  box.querySelectorAll('[data-assistant-action]').forEach(button => {
-    if (button.dataset.boundClick === '1') return;
-    button.dataset.boundClick = '1';
-    button.addEventListener('click', () => {
-      const prompt = button.dataset.assistantAction || '';
-      if (!prompt || state.chatPending || state.chatTyping) return;
-      sendAssistantMessage(prompt);
-    });
-  });
-  requestAnimationFrame(() => {
-    box.scrollTop = box.scrollHeight;
-  });
-}
-
 // 把后端返回的运行模式信息同步到前端状态对象里。
 function applyRuntimePayload(data = {}) {
   state.runtime = {
@@ -1272,21 +1303,6 @@ async function submitRuntimeConfig(event) {
   } finally {
     if (submitButton) submitButton.disabled = false;
   }
-}
-
-// 清空当前生成结果、视频解析状态和对话记录。
-function clearResults() {
-  state.videoResolved = null;
-  state.videoResolvedUrl = '';
-  state.videoResolveSeq += 1;
-  state.chatHistory = [];
-  state.chatPending = false;
-  if (state.videoResolveTimer) clearTimeout(state.videoResolveTimer);
-  $('#creatorResult').innerHTML = '<div class="empty-state"><h4>还没有生成结果</h4><p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p></div>';
-  $('#videoResult').innerHTML = '<div class="empty-state"><h4>还没有分析结果</h4><p>输入视频链接后，点击“一键解析并分析视频”。</p></div>';
-  $('#videoPreview').innerHTML = videoPreview(null);
-  renderAssistant();
-  setStatus('已清空结果', 'success');
 }
 
 // 重置模块区域的 hover 和过渡样式。
@@ -1697,6 +1713,9 @@ function initEvents() {
       searchKnowledgeContent();
     }
   });
+  $$('[data-knowledge-subtab]').forEach(button => {
+    button.addEventListener('click', () => setKnowledgeSubtab(button.dataset.knowledgeSubtab || 'upload'));
+  });
   $$('[data-module-tab]').forEach(button => {
     button.addEventListener('click', () => {
       setActiveModule(button.dataset.moduleTab || 'analyze', { focus: true });
@@ -1847,6 +1866,11 @@ function clearResults() {
   $('#creatorResult').innerHTML = '<div class="empty-state"><h4>还没有生成结果</h4><p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p></div>';
   $('#videoResult').innerHTML = '<div class="empty-state"><h4>还没有分析结果</h4><p>输入视频链接后，点击“一键解析并分析视频”。</p></div>';
   $('#videoPreview').innerHTML = videoPreview(null);
+  state.knowledgeResults.upload = knowledgePlaceholder('upload');
+  state.knowledgeResults.sync = state.knowledgeStatus ? knowledgeSyncDefaultResult(state.knowledgeStatus) : knowledgePlaceholder('sync');
+  state.knowledgeResults.view = knowledgePlaceholder('view');
+  state.knowledgeResults.search = knowledgePlaceholder('search');
+  setKnowledgeSubtab(state.knowledgeActiveSubtab);
   renderAssistant();
   renderWorkspaceOutline();
   updateAssistantButton();
@@ -2093,6 +2117,11 @@ function videoPreview(data, options = {}) {
 // 初始化页面默认状态、事件绑定和运行模式信息。
 function init() {
   setActiveModule(state.activeModule);
+  state.knowledgeResults.upload = knowledgePlaceholder('upload');
+  state.knowledgeResults.sync = knowledgePlaceholder('sync');
+  state.knowledgeResults.view = knowledgePlaceholder('view');
+  state.knowledgeResults.search = knowledgePlaceholder('search');
+  setKnowledgeSubtab(state.knowledgeActiveSubtab);
   $('#videoPreview').innerHTML = videoPreview(null);
   renderWorkspaceOutline();
   renderAssistant();
@@ -2101,7 +2130,6 @@ function init() {
   initGlobalScrollScene();
   loadRuntimeInfo();
   loadKnowledgeBaseStatus();
-  loadKnowledgeSamples();
   updateAssistantButton();
   bindCopyButtons(document);
   initCoverMedia();

@@ -5,6 +5,7 @@ import hashlib
 import math
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List
@@ -274,6 +275,13 @@ class KnowledgeBase:
         return 0
 
     def backend_status(self) -> Dict[str, Any]:
+        last_updated_at = ""
+        try:
+            mtimes = [item.stat().st_mtime for item in self.persist_directory.rglob("*") if item.exists()]
+            if mtimes:
+                last_updated_at = datetime.fromtimestamp(max(mtimes)).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            last_updated_at = ""
         return {
             "available": self.available(),
             "backend": self.backend,
@@ -285,6 +293,7 @@ class KnowledgeBase:
             "embedding_model": getattr(self.embeddings, "model_name", "deterministic"),
             "embedding_fallback": bool(getattr(self.embeddings, "using_fallback", False)),
             "embedding_error": getattr(self.embeddings, "load_error", ""),
+            "last_updated_at": last_updated_at,
         }
 
     def _active_collection(self):

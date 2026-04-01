@@ -243,73 +243,94 @@
               <div class="panel__header">
                 <div>
                   <span class="module-kicker">知识库管理</span>
-                  <h3>上传文件、同步热门样本，并直接查看向量库内容</h3>
-                  <p>知识库管理已经升级为一级主 Tab。这里集中处理 Chroma 入库、热门样本更新和库内容查看，不影响原有视频分析与内容创作逻辑。</p>
+                  <h3>上传文件、同步热门样本，并在统一工作区查看向量库内容</h3>
+                  <p>这里保留原有上传、同步、查看、检索逻辑，只重构页面布局和交互层级，让操作区和结果区更清晰。</p>
                 </div>
               </div>
 
               <div class="module-panel__body">
-                <div class="form-grid form-grid--compact">
-                  <label class="field field--full">
-                    <span class="field__label">上传知识文件</span>
-                    <input id="knowledgeFileInput" type="file" accept=".txt,.md,.docx,.pdf" />
-                    <span class="field__hint">支持 txt / md / docx / pdf，上传后自动读取、清洗、切片并写入 Chroma 向量库。</span>
-                  </label>
-
-                  <label class="field">
-                    <span class="field__label">榜单抓取条数</span>
-                    <input id="knowledgeUpdateLimit" type="number" min="1" max="20" value="10" />
-                    <span class="field__hint">每个榜单最多抓取 1-20 条，更新时只追加，不清空历史数据。</span>
-                  </label>
-
-                  <label class="field">
-                    <span class="field__label">知识库查看条数</span>
-                    <input id="knowledgeViewLimit" type="number" min="1" max="20" value="6" />
-                    <span class="field__hint">用于查看样本列表和关键词检索结果。</span>
-                  </label>
-
-                  <label class="field field--full">
-                    <span class="field__label">知识库检索关键词</span>
-                    <input id="knowledgeSearchInput" placeholder="例如：两性 情感 夫妻 坦白局 / 热门 标题 节奏 / 科普 结构" />
-                    <span class="field__hint">支持直接查看当前库内容，也可以按关键词检索命中文档。</span>
-                  </label>
+                <div class="knowledge-status-bar" id="knowledgeStatusBar">
+                  <span>正在读取 Chroma 状态...</span>
                 </div>
 
-                <div class="module-actions">
-                  <button class="action-btn action-btn--primary" id="knowledgeUploadBtn" type="button">
-                    <span class="action-btn__title">上传文件到知识库</span>
-                    <span class="action-btn__desc">把本地资料直接写入 Chroma，后续内容创作、分析和对话都可优先检索。</span>
-                  </button>
-                  <button class="action-btn" id="knowledgeUpdateBtn" type="button">
-                    <span class="action-btn__title">自动更新热门知识库</span>
-                    <span class="action-btn__desc">抓取全站热门榜、分区热门榜、每周必看和入站必刷，结构化后追加写入向量库。</span>
-                  </button>
-                </div>
+                <nav class="knowledge-subtabs" aria-label="知识库功能切换">
+                  <button class="knowledge-subtab is-active" type="button" data-knowledge-subtab="upload">上传知识文件</button>
+                  <button class="knowledge-subtab" type="button" data-knowledge-subtab="sync">同步热门样本</button>
+                  <button class="knowledge-subtab" type="button" data-knowledge-subtab="view">查看知识库</button>
+                  <button class="knowledge-subtab" type="button" data-knowledge-subtab="search">关键词检索</button>
+                </nav>
 
-                <div class="module-actions">
-                  <button class="action-btn action-btn--primary" id="knowledgeSampleBtn" type="button">
-                    <span class="action-btn__title">查看知识库内容</span>
-                    <span class="action-btn__desc">直接读取当前向量库里的部分原始文档，用于确认库存内容。</span>
-                  </button>
-                  <button class="action-btn" id="knowledgeSearchBtn" type="button">
-                    <span class="action-btn__title">按关键词检索知识库</span>
-                    <span class="action-btn__desc">基于当前输入关键词查看命中文档和元数据。</span>
-                  </button>
-                </div>
+                <section class="knowledge-stage">
+                  <div class="knowledge-stage__section">
+                    <div class="knowledge-stage__label">操作区</div>
 
-                <div class="module-result" id="knowledgeResult" data-outline-title="知识库状态">
-                  <div class="empty-state">
-                    <h4>正在读取知识库状态</h4>
-                    <p>页面加载后会自动检查当前 Chroma 向量库是否可用，以及当前已入库的文档数量。</p>
+                    <div class="knowledge-pane is-active" data-knowledge-pane="upload">
+                      <div class="knowledge-action-row">
+                        <label class="field knowledge-field">
+                          <span class="field__label">选择文件</span>
+                          <input id="knowledgeFileInput" type="file" accept=".txt,.md,.docx,.pdf" />
+                        </label>
+                        <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeUploadBtn" type="button">
+                          <span class="action-btn__title">上传到知识库</span>
+                          <span class="action-btn__desc">自动读取并入库</span>
+                        </button>
+                      </div>
+                      <div class="field__hint">支持 txt / md / docx / pdf，自动读取、清洗、切片并写入 Chroma 向量库。</div>
+                    </div>
+
+                    <div class="knowledge-pane" data-knowledge-pane="sync" hidden>
+                      <div class="knowledge-action-row">
+                        <label class="field knowledge-field">
+                          <span class="field__label">榜单抓取条数</span>
+                          <input id="knowledgeUpdateLimit" type="number" min="1" max="20" value="10" />
+                        </label>
+                        <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeUpdateBtn" type="button">
+                          <span class="action-btn__title">自动更新热门知识库</span>
+                          <span class="action-btn__desc">同步并去重更新</span>
+                        </button>
+                      </div>
+                      <div class="field__hint">每次更新只追加/更新最新热门样本，自动去重，不清空历史数据。</div>
+                    </div>
+
+                    <div class="knowledge-pane" data-knowledge-pane="view" hidden>
+                      <div class="knowledge-action-row">
+                        <label class="field knowledge-field">
+                          <span class="field__label">知识库查看条数</span>
+                          <input id="knowledgeViewLimit" type="number" min="1" max="20" value="6" />
+                        </label>
+                        <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeSampleBtn" type="button">
+                          <span class="action-btn__title">查看知识库内容</span>
+                          <span class="action-btn__desc">读取最新文档</span>
+                        </button>
+                      </div>
+                      <div class="field__hint">展示向量库中最新的 N 条原始文档。</div>
+                    </div>
+
+                    <div class="knowledge-pane" data-knowledge-pane="search" hidden>
+                      <div class="knowledge-action-row">
+                        <label class="field knowledge-field">
+                          <span class="field__label">知识库检索关键词</span>
+                          <input id="knowledgeSearchInput" placeholder="例如：两性 情感 夫妻 坦白局 / 热门 标题 节奏 / 科普 结构" />
+                        </label>
+                        <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeSearchBtn" type="button">
+                          <span class="action-btn__title">按关键词检索知识库</span>
+                          <span class="action-btn__desc">执行语义检索</span>
+                        </button>
+                      </div>
+                      <div class="field__hint">按关键词检索向量库，展示命中文档和元数据。</div>
+                    </div>
                   </div>
-                </div>
 
-                <div class="module-result" id="knowledgeContentResult" data-outline-title="知识库内容">
-                  <div class="empty-state">
-                    <h4>还没有查看结果</h4>
-                    <p>点击“查看知识库内容”读取样本，或输入关键词后点击“按关键词检索知识库”。</p>
+                  <div class="knowledge-stage__section">
+                    <div class="knowledge-stage__label">结果展示区</div>
+                    <div class="module-result" id="knowledgeStageResult" data-outline-title="知识库结果">
+                      <div class="empty-state">
+                        <h4>等待操作</h4>
+                        <p>默认展示“上传知识文件”功能。切换上方子 Tab 后，这里会显示对应功能的结果。</p>
+                      </div>
+                    </div>
                   </div>
-                </div>
+                </section>
               </div>
             </section>
           </div>
