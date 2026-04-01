@@ -495,9 +495,6 @@ def knowledge_item_matches_category(item: dict, category: str) -> bool:
     broad_partition = infer_knowledge_item_broad_partition(item)
     allowed_broad = tuple(str(value).strip().lower() for value in rule.get("broad_partitions") or ())
 
-    if broad_partition and allowed_broad and broad_partition not in allowed_broad:
-        return False
-
     partitions = tuple(str(value).strip().lower() for value in rule.get("partitions") or ())
     if partition and any(token and token in partition for token in partitions):
         return True
@@ -505,6 +502,9 @@ def knowledge_item_matches_category(item: dict, category: str) -> bool:
     keywords = tuple(str(value).strip().lower() for value in rule.get("keywords") or ())
     if any(token and token in combined for token in keywords):
         return True
+
+    if broad_partition and allowed_broad and broad_partition not in allowed_broad:
+        return False
 
     return bool(rule.get("allow_broad_match") and broad_partition in allowed_broad)
 

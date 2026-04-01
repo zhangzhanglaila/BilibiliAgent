@@ -13,7 +13,6 @@ from typing import Any, Dict, Iterable, List
 
 from bilibili_api import comment, hot, sync, video, video_zone
 
-from config import CONFIG
 from knowledge_base import Document, add_document, delete_documents, document_exists
 
 try:
@@ -51,7 +50,28 @@ COMMENT_STOPWORDS = {
     "可以",
     "一下",
 }
-PRIMARY_PARTITIONS = ("knowledge", "tech", "life", "game", "ent")
+POPULAR_RANK_PARTITIONS = (
+    {"label": "番剧", "tid": 13, "board_url": "https://www.bilibili.com/anime/"},
+    {"label": "国创", "tid": 167, "board_url": "https://www.bilibili.com/guochuang/"},
+    {"label": "纪录片", "tid": 177, "board_url": "https://www.bilibili.com/documentary/"},
+    {"label": "动画", "tid": 1, "board_url": "https://www.bilibili.com/v/douga/"},
+    {"label": "游戏", "tid": 4, "board_url": "https://www.bilibili.com/v/game/"},
+    {"label": "鬼畜", "tid": 119, "board_url": "https://www.bilibili.com/v/kichiku/"},
+    {"label": "音乐", "tid": 3, "board_url": "https://www.bilibili.com/v/music"},
+    {"label": "舞蹈", "tid": 129, "board_url": "https://www.bilibili.com/v/dance/"},
+    {"label": "知识", "tid": 36, "board_url": "https://www.bilibili.com/v/knowledge/"},
+    {"label": "科技", "tid": 188, "board_url": "https://www.bilibili.com/v/tech/"},
+    {"label": "汽车", "tid": 223, "board_url": "https://www.bilibili.com/v/car"},
+    {"label": "运动", "tid": 234, "board_url": "https://www.bilibili.com/v/sports"},
+    {"label": "动物圈", "tid": 217, "board_url": "https://www.bilibili.com/v/animal"},
+    {"label": "生活", "tid": 160, "board_url": "https://www.bilibili.com/v/life"},
+    {"label": "娱乐", "tid": 5, "board_url": "https://www.bilibili.com/v/ent/"},
+    {"label": "影视", "tid": 181, "board_url": "https://www.bilibili.com/v/cinephile"},
+    {"label": "电影", "tid": 23, "board_url": "https://www.bilibili.com/movie/"},
+    {"label": "电视剧", "tid": 11, "board_url": "https://www.bilibili.com/tv/"},
+    {"label": "时尚", "tid": 155, "board_url": "https://www.bilibili.com/v/fashion"},
+)
+LEGACY_PRIMARY_PARTITIONS = ("knowledge", "tech", "life", "game", "ent")
 
 
 def normalize_kb_text(text: str) -> str:
@@ -209,7 +229,7 @@ def _tag_advantage(tags: Iterable[str], partition_label: str) -> str:
     return f"分区语义集中在「{partition_label}」，建议继续围绕同赛道关键词做标签补强。"
 
 
-def _structured_video_text(board_type: str, item: dict, detail: dict, tags: List[str], hotwords: List[str]) -> str:
+def _structured_video_text(board_type: str, item: dict, detail: dict, tags: List[str], hotwords: List[str], board_url: str = "") -> str:
     stat = detail.get("stat") or item.get("stat") or {}
     title = str(detail.get("title") or item.get("title") or "").strip()
     owner = (detail.get("owner") or item.get("owner") or {})
@@ -236,6 +256,7 @@ def _structured_video_text(board_type: str, item: dict, detail: dict, tags: List
         "核心优点": advantages,
         "发布时间点": _format_pub_slot(pub_ts),
         "BVID": str(detail.get("bvid") or item.get("bvid") or "").strip(),
+        "榜单链接": str(board_url or "").strip(),
         "链接": f"https://www.bilibili.com/video/{detail.get('bvid') or item.get('bvid')}",
     }
     return normalize_kb_text(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -257,7 +278,7 @@ def _video_tags(video_obj: dict) -> List[str]:
     return [str(item.get("tag_name") or "").strip() for item in data if str(item.get("tag_name") or "").strip()]
 
 
-def _ingest_hot_items(board_type: str, items: Iterable[dict], limit: int = 10) -> Dict[str, Any]:
+def _ingest_hot_items(board_type: str, items: Iterable[dict], limit: int = 10, board_url: str = "") -> Dict[str, Any]:
     saved = 0
     updated = 0
     failed: List[str] = []
@@ -269,7 +290,7 @@ def _ingest_hot_items(board_type: str, items: Iterable[dict], limit: int = 10) -
         aid = int(detail.get("aid") or item.get("aid") or 0)
         tags = _video_tags(detail or item)
         hotwords = _comment_hotwords(aid) if aid > 0 else []
-        text = _structured_video_text(board_type, item, detail, tags, hotwords)
+        text = _structured_video_text(board_type, item, detail, tags, hotwords, board_url=board_url)
         try:
             document_id = f"{board_type}:{bvid}"
             existed = document_exists(metadata_filter={"source": "bilibili_hot_sync", "board_type": board_type, "bvid": bvid})
@@ -284,6 +305,7 @@ def _ingest_hot_items(board_type: str, items: Iterable[dict], limit: int = 10) -
                         "board_type": board_type,
                         "bvid": bvid,
                         "title": title,
+                        "board_url": str(board_url or "").strip(),
                         "partition": str(detail.get("tname") or item.get("tname") or "").strip(),
                     },
                 )
@@ -299,26 +321,59 @@ def _ingest_hot_items(board_type: str, items: Iterable[dict], limit: int = 10) -
 def crawl_and_store_bilibili_hot_videos(per_board_limit: int = 10) -> Dict[str, Any]:
     summary: List[Dict[str, Any]] = []
 
+    for legacy_partition in LEGACY_PRIMARY_PARTITIONS:
+        try:
+            delete_documents(metadata_filter={"source": "bilibili_hot_sync", "board_type": f"分区热门榜:{legacy_partition}"})
+        except Exception:
+            pass
+
     hot_payload = _safe_sync(hot.get_hot_videos(ps=per_board_limit, pn=1), {})
     hot_items = hot_payload if isinstance(hot_payload, list) else hot_payload.get("list", []) or []
-    summary.append(_ingest_hot_items("全站热门榜", hot_items, limit=per_board_limit))
+    summary.append(
+        _ingest_hot_items(
+            "全站热门榜",
+            hot_items,
+            limit=per_board_limit,
+            board_url="https://www.bilibili.com/v/popular/rank/all",
+        )
+    )
 
     weekly_series = _safe_sync(hot.get_weekly_hot_videos_list(), {})
     weekly_list = (weekly_series.get("list") or weekly_series.get("data") or []) if isinstance(weekly_series, dict) else []
     latest_week = int((weekly_list[0] or {}).get("number") or 1) if weekly_list else 1
     weekly_payload = _safe_sync(hot.get_weekly_hot_videos(latest_week), {})
     weekly_items = weekly_payload.get("list", []) if isinstance(weekly_payload, dict) else []
-    summary.append(_ingest_hot_items("每周必看", weekly_items, limit=per_board_limit))
+    summary.append(
+        _ingest_hot_items(
+            "每周必看",
+            weekly_items,
+            limit=per_board_limit,
+            board_url="https://www.bilibili.com/v/popular/weekly/",
+        )
+    )
 
     history_payload = _safe_sync(hot.get_history_popular_videos(), {})
     history_items = history_payload.get("list", []) if isinstance(history_payload, dict) else []
-    summary.append(_ingest_hot_items("入站必刷", history_items, limit=per_board_limit))
+    summary.append(
+        _ingest_hot_items(
+            "入站必刷",
+            history_items,
+            limit=per_board_limit,
+            board_url="https://www.bilibili.com/v/popular/history",
+        )
+    )
 
-    for partition_name in PRIMARY_PARTITIONS:
-        tid = CONFIG.partition_tid(partition_name)
-        top_payload = _safe_sync(video_zone.get_zone_top10(tid), {})
+    for partition in POPULAR_RANK_PARTITIONS:
+        top_payload = _safe_sync(video_zone.get_zone_top10(int(partition.get("tid") or 0)), {})
         top_items = top_payload if isinstance(top_payload, list) else top_payload.get("list", []) or top_payload.get("top", []) or []
-        summary.append(_ingest_hot_items(f"分区热门榜:{partition_name}", top_items, limit=min(per_board_limit, 10)))
+        summary.append(
+            _ingest_hot_items(
+                f"分区热门榜:{partition.get('label')}",
+                top_items,
+                limit=min(per_board_limit, 10),
+                board_url=str(partition.get("board_url") or "https://www.bilibili.com/v/popular/rank/"),
+            )
+        )
 
     return {
         "status": "ok",
