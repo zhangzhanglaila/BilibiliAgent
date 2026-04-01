@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from agents.llm_workspace_agent import RetrievalTool
 from chains.router_chain import route_request
-from knowledge_base import Document, KnowledgeBase
+from knowledge_base import Document, KnowledgeBase, build_default_embeddings
 from knowledge_sync import ingest_uploaded_file, update_chroma_knowledge_base
 from memory.long_term_memory import LongTermMemory
 from tools.code_interpreter import CodeInterpreterTool
@@ -170,6 +170,16 @@ class RagIntegrationTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "ok")
             mocked_crawler.assert_called_once_with(per_board_limit=6)
+
+    def test_embedding_interface_stays_compatible(self) -> None:
+        embeddings = build_default_embeddings()
+        docs = embeddings.embed_documents(["两性情感", "夫妻坦白局"])
+        query = embeddings.embed_query("情感话题")
+
+        self.assertEqual(len(docs), 2)
+        self.assertTrue(all(isinstance(vector, list) for vector in docs))
+        self.assertIsInstance(query, list)
+        self.assertTrue(len(query) > 0)
 
 
 if __name__ == "__main__":
