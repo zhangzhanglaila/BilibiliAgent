@@ -122,6 +122,50 @@
             </form>
           </section>
 
+          <section class="panel" id="knowledgePanel" data-outline-title="知识库管理">
+            <div class="panel__header">
+              <div>
+                <span class="module-kicker">知识库管理</span>
+                <h3>上传文件入库，或一键同步 B 站热门样本到 Chroma</h3>
+                <p>不改现有工作流，只补知识库入口。上传文件会自动清洗、切片并写入向量库；更新按钮会追加抓取热门榜样本。</p>
+              </div>
+            </div>
+
+            <div class="module-panel__body">
+              <div class="form-grid form-grid--compact">
+                <label class="field field--full">
+                  <span class="field__label">上传知识文件</span>
+                  <input id="knowledgeFileInput" type="file" accept=".txt,.md,.docx,.pdf" />
+                  <span class="field__hint">支持 txt / md / docx / pdf，上传后自动读取、清洗、切片并写入 Chroma 向量库。</span>
+                </label>
+
+                <label class="field">
+                  <span class="field__label">榜单抓取条数</span>
+                  <input id="knowledgeUpdateLimit" type="number" min="1" max="20" value="10" />
+                  <span class="field__hint">每个榜单最多抓取 1-20 条，更新时只追加，不清空历史数据。</span>
+                </label>
+              </div>
+
+              <div class="module-actions">
+                <button class="action-btn action-btn--primary" id="knowledgeUploadBtn" type="button">
+                  <span class="action-btn__title">上传文件到知识库</span>
+                  <span class="action-btn__desc">把本地资料直接写入 Chroma，后续内容创作、分析和对话都可优先检索。</span>
+                </button>
+                <button class="action-btn" id="knowledgeUpdateBtn" type="button">
+                  <span class="action-btn__title">自动更新热门知识库</span>
+                  <span class="action-btn__desc">抓取全站热门榜、分区热门榜、每周必看和入站必刷，结构化后追加写入向量库。</span>
+                </button>
+              </div>
+
+              <div class="module-result" id="knowledgeResult" data-outline-title="知识库状态">
+                <div class="empty-state">
+                  <h4>正在读取知识库状态</h4>
+                  <p>页面加载后会自动检查当前 Chroma 向量库是否可用，以及当前已入库的文档数量。</p>
+                </div>
+              </div>
+            </div>
+          </section>
+
             <section class="module-grid" id="moduleGrid" data-active="analyze">
             <section class="panel module-panel module-panel--analyze" data-module="analyze" id="publishedVideoModule" data-outline-title="视频分析">
               <div class="panel__header">

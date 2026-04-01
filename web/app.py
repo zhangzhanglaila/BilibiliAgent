@@ -23,6 +23,7 @@ from agents.llm_workspace_agent import AgentTool, LLMWorkspaceAgent, RetrievalTo
 from agents.optimization_agent import OptimizationAgent
 from agents.topic_agent import TopicAgent
 from knowledge_base import Document, KnowledgeBase
+from knowledge_sync import ingest_uploaded_file, update_chroma_knowledge_base
 from config import CONFIG
 from llm_client import LLMClient, format_llm_error, llm_error_http_status, should_skip_same_provider_fallback
 from main import run_copy, run_operate, run_optimize, run_pipeline, run_topic
@@ -243,6 +244,7 @@ VIDEO_TNAME_HINTS = {
     214: "田园美食",
     255: "颜值·网红舞",
 }
+SUPPORTED_KNOWLEDGE_UPLOAD_SUFFIXES = {".txt", ".md", ".docx", ".pdf"}
 
 
 # 判断当前是否已经保存了可用于启用 LLM Agent 的运行时配置。
@@ -2605,6 +2607,15 @@ def save_tool_result_to_knowledge_base(source_id: str, text: str, metadata: dict
         return
 
 
+def build_knowledge_base_status() -> dict:
+    status = KNOWLEDGE_BASE.backend_status()
+    status["vector_db_path"] = CONFIG.vector_db_path
+    status["supported_upload_types"] = sorted(SUPPORTED_KNOWLEDGE_UPLOAD_SUFFIXES)
+    status["memory_backend"] = getattr(LONG_TERM_MEMORY, "backend", "disabled")
+    status["memory_collection"] = getattr(LONG_TERM_MEMORY, "collection_name", "user_long_term_memory")
+    return status
+
+
 def creator_briefing_tool_handler(payload: dict) -> dict:
     result = build_creator_briefing(
         payload.get("field", ""),
@@ -3009,6 +3020,66 @@ def api_runtime_llm_config():
     payload = build_runtime_payload()
     payload["requires_config"] = False
     return jsonify({"success": True, "data": payload})
+
+
+@app.get("/api/knowledge/status")
+# 返回当前 Chroma 知识库状态，供页面展示和排查使用。
+def api_knowledge_status():
+    return jsonify({"success": True, "data": build_knowledge_base_status()})
+
+
+@app.post("/api/knowledge/upload")
+# 上传文件并自动写入 Chroma 知识库。
+def api_knowledge_upload():
+    uploaded = request.files.get("file")
+    if uploaded is None:
+        return jsonify({"success": False, "error": "请先选择要上传的知识文件。"}), 400
+
+    filename = Path(uploaded.filename or "").name
+    if not filename:
+        return jsonify({"success": False, "error": "文件名为空，无法导入知识库。"}), 400
+
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_KNOWLEDGE_UPLOAD_SUFFIXES:
+        return jsonify({"success": False, "error": "仅支持 txt / md / docx / pdf 文件。"}), 400
+
+    try:
+        result = ingest_uploaded_file(
+            filename,
+            uploaded.read(),
+            metadata={"source_channel": "web_upload"},
+        )
+        return jsonify(
+            {
+                "success": True,
+                "data": {
+                    "upload_result": result,
+                    "knowledge_status": build_knowledge_base_status(),
+                },
+            }
+        )
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"知识库导入失败：{exc}"}), 500
+
+
+@app.post("/api/knowledge/update")
+# 重新抓取 B 站热门榜数据并追加写入 Chroma 知识库。
+def api_knowledge_update():
+    data = request.get_json(silent=True) or {}
+    limit = max(1, min(safe_int(data.get("limit") or 10), 20))
+    try:
+        result = update_chroma_knowledge_base(per_board_limit=limit)
+        return jsonify(
+            {
+                "success": True,
+                "data": {
+                    "update_result": result,
+                    "knowledge_status": build_knowledge_base_status(),
+                },
+            }
+        )
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"知识库更新失败：{exc}"}), 500
 
 
 @app.get("/")

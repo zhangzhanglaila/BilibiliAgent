@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 from typing import Any, Dict, List
 
 from graph import BilibiliAgentGraph
+from knowledge_sync import ingest_uploaded_file, update_chroma_knowledge_base
 from models import to_plain_data
 
 
@@ -75,6 +77,23 @@ def run_pipeline(
     return to_plain_data(result)
 
 
+# 把本地文件写入 Chroma 知识库，供 CLI 和 Web 共同复用。
+def run_ingest_file(path: str) -> Dict[str, Any]:
+    file_path = Path(path).expanduser()
+    if not file_path.exists() or not file_path.is_file():
+        raise FileNotFoundError(f"文件不存在：{file_path}")
+    return ingest_uploaded_file(
+        file_path.name,
+        file_path.read_bytes(),
+        metadata={"source_channel": "cli_upload", "file_path": str(file_path)},
+    )
+
+
+# 触发一次热门视频知识库同步，追加写入 Chroma。
+def run_update_kb(per_board_limit: int = 10) -> Dict[str, Any]:
+    return update_chroma_knowledge_base(per_board_limit=per_board_limit)
+
+
 # 以 CLI 友好的格式打印选题结果。
 def print_topic_result(result: dict) -> None:
     ideas = result.get("ideas", [])
@@ -129,6 +148,25 @@ def print_optimization_result(result: dict) -> None:
     print(f"基准总结：{result.get('benchmark_summary')}")
 
 
+# 以 CLI 友好的格式打印知识库文件导入结果。
+def print_ingest_result(result: dict) -> None:
+    print("\n=== 知识库导入结果 ===")
+    print(f"状态：{result.get('status')}")
+    print(f"文件：{result.get('filename')}")
+    print(f"文档 ID：{result.get('document_id')}")
+    print(f"切片数量：{result.get('chunk_count')}")
+
+
+# 以 CLI 友好的格式打印热门知识库同步结果。
+def print_kb_update_result(result: dict) -> None:
+    print("\n=== 知识库更新结果 ===")
+    print(f"状态：{result.get('status')}")
+    print(f"总写入：{result.get('total_saved', 0)}")
+    print(f"总失败：{result.get('total_failed', 0)}")
+    for board in result.get("boards", []):
+        print(f"- {board.get('board_type')}: saved={board.get('saved_count', 0)} failed={len(board.get('failed', []))}")
+
+
 # 构建命令行参数解析器，定义所有可用子命令和参数。
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="B站全自动运营多 Agent 系统")
@@ -156,6 +194,12 @@ def build_parser() -> argparse.ArgumentParser:
     pipeline.add_argument("--up-ids", default="", help="同类 UP 主 ID，逗号分隔")
     pipeline.add_argument("--style", default="干货", help="文案风格")
     pipeline.add_argument("--topic", default="", help="当前输入链接对应的主题种子")
+
+    ingest = sub.add_parser("ingest-file", help="把本地文件导入 Chroma 知识库")
+    ingest.add_argument("--path", required=True, help="文件路径，支持 txt / md / docx / pdf")
+
+    update_kb = sub.add_parser("update-kb", help="抓取 B 站热门视频并追加写入 Chroma 知识库")
+    update_kb.add_argument("--limit", type=int, default=10, help="每个榜单最多抓取多少条，默认 10")
     return parser
 
 
@@ -200,6 +244,17 @@ def main() -> None:
         print_copy_result(result["copywriting_result"])
         print_operation_result(result["operation_result"])
         print_optimization_result(result["optimization_result"])
+        return
+
+    if args.command == "ingest-file":
+        result = run_ingest_file(args.path)
+        print_ingest_result(result)
+        return
+
+    if args.command == "update-kb":
+        result = run_update_kb(per_board_limit=max(1, min(int(args.limit or 10), 20)))
+        print_kb_update_result(result)
+        return
 
 
 if __name__ == "__main__":

@@ -1,11 +1,10 @@
-"""Lightweight RAG knowledge base backed by Chroma when available."""
+"""RAG knowledge base backed exclusively by Chroma."""
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -72,8 +71,6 @@ class KnowledgeBase:
         self.persist_directory.mkdir(parents=True, exist_ok=True)
         self.collection_name = collection_name
         self.embeddings = DeterministicEmbeddings()
-        self._fallback_path = self.persist_directory / f"{collection_name}.json"
-        self._fallback_records: List[Dict[str, Any]] = self._load_fallback_records()
         self.vectorstore = None
         self.collection = None
         self.backend = "disabled"
@@ -98,21 +95,6 @@ class KnowledgeBase:
             except Exception as exc:
                 self.collection = None
                 self.init_error = str(exc)
-
-    def _load_fallback_records(self) -> List[Dict[str, Any]]:
-        if not self._fallback_path.exists():
-            return []
-        try:
-            payload = json.loads(self._fallback_path.read_text(encoding="utf-8"))
-            return payload if isinstance(payload, list) else []
-        except Exception:
-            return []
-
-    def _flush_fallback_records(self) -> None:
-        self._fallback_path.write_text(
-            json.dumps(self._fallback_records, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
 
     def _split_text(self, text: str, chunk_size: int = 320, overlap: int = 60) -> List[str]:
         clean = (text or "").strip()
@@ -147,7 +129,39 @@ class KnowledgeBase:
             start = max(end - overlap, start + 1)
         return [chunk for chunk in chunks if chunk]
 
+    def _require_vector_backend(self) -> None:
+        if self.vectorstore is not None or self.collection is not None:
+            return
+        detail = self.init_error or "Chroma backend not initialized"
+        raise RuntimeError(f"知识库当前不可用：未检测到可用的 Chroma 向量库。{detail}")
+
+    def available(self) -> bool:
+        return self.vectorstore is not None or self.collection is not None
+
+    def count(self) -> int:
+        self._require_vector_backend()
+        if self.vectorstore is not None:
+            collection = getattr(self.vectorstore, "_collection", None)
+            if collection is None:
+                return 0
+            return int(collection.count())
+        if self.collection is not None:
+            return int(self.collection.count())
+        self._require_vector_backend()
+        return 0
+
+    def backend_status(self) -> Dict[str, Any]:
+        return {
+            "available": self.available(),
+            "backend": self.backend,
+            "persist_directory": str(self.persist_directory),
+            "collection_name": self.collection_name,
+            "document_count": self.count() if self.available() else 0,
+            "init_error": self.init_error,
+        }
+
     def add_document(self, document: Document) -> Dict[str, Any]:
+        self._require_vector_backend()
         chunks = self._split_text(document.text)
         if not chunks:
             return {"status": "skipped", "document_id": document.id, "chunk_count": 0}
@@ -171,13 +185,8 @@ class KnowledgeBase:
                 metadatas=metadatas,
                 embeddings=self.embeddings.embed_documents(chunks),
             )
-        else:
-            self._fallback_records = [
-                record for record in self._fallback_records if record.get("metadata", {}).get("document_id") != document.id
-            ]
-            for item_id, chunk, metadata in zip(ids, chunks, metadatas):
-                self._fallback_records.append({"id": item_id, "text": chunk, "metadata": metadata})
-            self._flush_fallback_records()
+        else:  # pragma: no cover
+            self._require_vector_backend()
 
         return {"status": "ok", "document_id": document.id, "chunk_count": len(chunks)}
 
@@ -243,36 +252,22 @@ class KnowledgeBase:
         clean_query = (query or "").strip()
         if not clean_query:
             return {"query": clean_query, "matches": []}
+        self._require_vector_backend()
 
         if self.vectorstore is not None:
             try:
                 return {"query": clean_query, "matches": self._vector_matches_from_langchain(clean_query, limit, metadata_filter)}
-            except Exception:
-                return {
-                    "query": clean_query,
-                    "matches": [],
-                    "error": "chroma_vector_search_failed",
-                    "backend": self.backend,
-                }
+            except Exception as exc:
+                raise RuntimeError(f"Chroma 向量检索失败（{self.backend}）：{exc}") from exc
 
         if self.collection is not None:
             try:
                 return {"query": clean_query, "matches": self._vector_matches_from_chromadb(clean_query, limit, metadata_filter)}
-            except Exception:
-                return {
-                    "query": clean_query,
-                    "matches": [],
-                    "error": "chroma_vector_search_failed",
-                    "backend": self.backend,
-                }
+            except Exception as exc:
+                raise RuntimeError(f"Chroma 向量检索失败（{self.backend}）：{exc}") from exc
 
-        return {
-            "query": clean_query,
-            "matches": [],
-            "error": "chroma_backend_unavailable",
-            "backend": self.backend,
-            "detail": self.init_error or "Chroma backend not initialized",
-        }
+        self._require_vector_backend()
+        return {"query": clean_query, "matches": []}
 
 
 DEFAULT_KNOWLEDGE_BASE = KnowledgeBase()

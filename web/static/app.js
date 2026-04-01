@@ -435,6 +435,26 @@ async function requestGetJson(url) {
   }
 }
 
+// 发送 multipart/form-data 请求，供知识库文件上传使用。
+async function requestFormData(url, formData) {
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || '请求失败');
+    }
+    return data.data;
+  } catch (error) {
+    if (error instanceof Error && /Failed to fetch/i.test(error.message)) {
+      throw new Error('接口请求失败，请检查 Flask 服务是否在运行，或后端是否正在重启。');
+    }
+    throw error;
+  }
+}
+
 // 调用浏览器剪贴板接口复制文本，并给出提示。
 async function copyText(text, label = '内容') {
   try {
@@ -479,6 +499,123 @@ function loadingCard(title, desc, steps = []) {
 // 生成一个简洁的信息提示卡片。
 function infoCard(title, text, tone = '') {
   return `<div class="info-card ${tone ? `info-card--${tone}` : ''}"><h4>${escapeHtml(title)}</h4><p>${escapeHtml(text)}</p></div>`;
+}
+
+// 渲染当前知识库状态卡片。
+function knowledgeStatusView(payload = {}, summaryHtml = '') {
+  const available = Boolean(payload.available);
+  const countText = available ? num(payload.document_count || 0) : '不可用';
+  const backendText = payload.backend || 'disabled';
+  const pathText = payload.vector_db_path || payload.persist_directory || './vector_db';
+  const memoryText = payload.memory_backend || 'disabled';
+  const uploadTypes = Array.isArray(payload.supported_upload_types) ? payload.supported_upload_types : [];
+  const errorHtml = payload.init_error
+    ? `<div class="info-card info-card--danger"><h4>初始化错误</h4><p>${escapeHtml(payload.init_error)}</p></div>`
+    : '';
+
+  return `
+    <section class="copy-block">
+      <div class="block-title">
+        <div><h4>Chroma 知识库状态</h4><p>${available ? '当前向量库已可用，后续检索会优先走这里。' : '当前未检测到可用的 Chroma 向量库，相关检索和入库会直接报错。'}</p></div>
+        <span class="type-badge ${available ? '' : 'type-badge--danger'}">${escapeHtml(available ? '可用' : '不可用')}</span>
+      </div>
+      <div class="summary-strip summary-strip--metrics">
+        ${metricCard('向量后端', backendText, '当前知识库使用的后端类型')}
+        ${metricCard('文档数量', countText, '当前 collection 中的文档总数')}
+        ${metricCard('记忆后端', memoryText, '长期记忆同样走 Chroma，不再写本地 JSON')}
+      </div>
+      <div class="info-card"><h4>向量库路径</h4><p>${escapeHtml(pathText)}</p></div>
+      ${uploadTypes.length ? `<div><div class="meta-line">支持上传格式</div>${tags(uploadTypes)}</div>` : ''}
+      ${summaryHtml}
+      ${errorHtml}
+    </section>
+  `;
+}
+
+// 把知识库状态或执行结果渲染进面板。
+function renderKnowledgeStatus(payload = {}, summaryHtml = '') {
+  const box = $('#knowledgeResult');
+  if (!box) return;
+  box.innerHTML = knowledgeStatusView(payload, summaryHtml);
+}
+
+// 页面加载时读取知识库状态。
+async function loadKnowledgeBaseStatus() {
+  if (!$('#knowledgeResult')) return;
+  try {
+    const data = await requestGetJson('/api/knowledge/status');
+    renderKnowledgeStatus(data);
+  } catch (error) {
+    $('#knowledgeResult').innerHTML = infoCard('知识库状态读取失败', error.message || '请检查后端服务', 'danger');
+  }
+}
+
+// 上传知识文件到 Chroma。
+async function uploadKnowledgeFile() {
+  const fileInput = $('#knowledgeFileInput');
+  if (!fileInput?.files?.length) {
+    showToast('缺少文件', '请先选择要导入知识库的文件。', 'error');
+    return;
+  }
+
+  const file = fileInput.files[0];
+  const formData = new FormData();
+  formData.append('file', file);
+
+  setButtonLoading('knowledgeUploadBtn', true);
+  $('#knowledgeResult').innerHTML = loadingCard('正在导入知识文件', '系统会读取文件内容、清洗文本、切片并写入 Chroma 向量库。', ['读取文件', '清洗文本', '切片入库']);
+  setStatus('正在导入知识文件', 'loading');
+
+  try {
+    const data = await requestFormData('/api/knowledge/upload', formData);
+    const result = data.upload_result || {};
+    const summaryHtml = infoCard(
+      '导入完成',
+      `文件 ${result.filename || file.name} 已写入知识库，文档 ID 为 ${result.document_id || '未知'}，切片数量 ${result.chunk_count ?? 0}。`,
+    );
+    renderKnowledgeStatus(data.knowledge_status || {}, summaryHtml);
+    fileInput.value = '';
+    setStatus('知识文件已导入', 'success');
+    showToast('导入成功', `${result.filename || file.name} 已写入知识库`);
+  } catch (error) {
+    $('#knowledgeResult').innerHTML = infoCard('知识库导入失败', error.message, 'danger');
+    setStatus('知识库导入失败', 'error');
+    showToast('导入失败', error.message, 'error');
+  } finally {
+    setButtonLoading('knowledgeUploadBtn', false);
+  }
+}
+
+// 重新抓取热门榜并追加更新 Chroma。
+async function updateKnowledgeBase() {
+  const limitInput = $('#knowledgeUpdateLimit');
+  const limit = Math.max(1, Math.min(20, Number(limitInput?.value || 10) || 10));
+
+  setButtonLoading('knowledgeUpdateBtn', true);
+  $('#knowledgeResult').innerHTML = loadingCard('正在更新热门知识库', '系统会抓取全站热门榜、分区热门榜、每周必看和入站必刷，并把结构化结果追加写入 Chroma。', ['抓取榜单', '提取优点', '写入向量库']);
+  setStatus('正在更新知识库', 'loading');
+
+  try {
+    const data = await requestJson('/api/knowledge/update', { limit });
+    const result = data.update_result || {};
+    const boards = Array.isArray(result.boards) ? result.boards : [];
+    const boardSummary = boards.length
+      ? `<div class="summary-strip summary-strip--metrics">${boards.map(item => metricCard(item.board_type || '榜单', `写入 ${num(item.saved_count || 0)}`, `失败 ${Array.isArray(item.failed) ? item.failed.length : 0}`)).join('')}</div>`
+      : '';
+    const summaryHtml = `
+      ${infoCard('更新完成', `本次共追加写入 ${result.total_saved || 0} 条热门样本，失败 ${result.total_failed || 0} 条。`)}
+      ${boardSummary}
+    `;
+    renderKnowledgeStatus(data.knowledge_status || {}, summaryHtml);
+    setStatus('知识库已更新', 'success');
+    showToast('更新成功', `本次追加写入 ${result.total_saved || 0} 条热门样本`);
+  } catch (error) {
+    $('#knowledgeResult').innerHTML = infoCard('知识库更新失败', error.message, 'danger');
+    setStatus('知识库更新失败', 'error');
+    showToast('更新失败', error.message, 'error');
+  } finally {
+    setButtonLoading('knowledgeUpdateBtn', false);
+  }
 }
 
 // 生成视频预解析区域里的单个信息卡片。
@@ -1453,6 +1590,8 @@ function toggleVoiceInput() {
 function initEvents() {
   $('#creatorRunBtn').addEventListener('click', runCreatorModule);
   $('#videoAnalyzeBtn').addEventListener('click', runAnalyzeModule);
+  $('#knowledgeUploadBtn')?.addEventListener('click', uploadKnowledgeFile);
+  $('#knowledgeUpdateBtn')?.addEventListener('click', updateKnowledgeBase);
   $('#clearResultsBtn').addEventListener('click', clearResults);
   $('#runtimeModeToggle').addEventListener('click', toggleRuntimeMode);
   $('#runtimeConfigForm').addEventListener('submit', submitRuntimeConfig);
@@ -1861,6 +2000,7 @@ function init() {
   initSpeechRecognition();
   initGlobalScrollScene();
   loadRuntimeInfo();
+  loadKnowledgeBaseStatus();
   updateAssistantButton();
   bindCopyButtons(document);
   initCoverMedia();

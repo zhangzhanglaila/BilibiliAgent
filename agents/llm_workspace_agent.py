@@ -145,7 +145,9 @@ class LLMWorkspaceAgent:
         try:
             observation = self.tools["retrieval"].handler({"query": query_text, "limit": 4})
         except Exception as exc:
-            observation = {"error": str(exc)}
+            raise RuntimeError(f"知识库检索失败，无法继续执行当前任务：{exc}") from exc
+        if isinstance(observation, dict) and str(observation.get("error") or "").strip():
+            raise RuntimeError(f"知识库检索失败，无法继续执行当前任务：{observation['error']}")
         used_tools.append("retrieval")
         scratchpad.append(
             {
