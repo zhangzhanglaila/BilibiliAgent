@@ -143,6 +143,13 @@ class KnowledgeBase:
         if self.vectorstore is not None:
             collection = getattr(self.vectorstore, "_collection", None)
             if collection is None:
+                client = getattr(self.vectorstore, "_client", None)
+                if client is not None:
+                    try:
+                        collection = client.get_collection(name=self.collection_name)
+                    except Exception:
+                        collection = None
+            if collection is None:
                 return 0
             return int(collection.count())
         if self.collection is not None:
@@ -159,6 +166,42 @@ class KnowledgeBase:
             "document_count": self.count() if self.available() else 0,
             "init_error": self.init_error,
         }
+
+    def _active_collection(self):
+        self._require_vector_backend()
+        if self.vectorstore is not None:
+            collection = getattr(self.vectorstore, "_collection", None)
+            if collection is None:
+                client = getattr(self.vectorstore, "_client", None)
+                if client is not None:
+                    collection = client.get_collection(name=self.collection_name)
+            return collection
+        if self.collection is not None:
+            return self.collection
+        self._require_vector_backend()
+        return None
+
+    def sample(self, limit: int = 10, offset: int = 0, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        collection = self._active_collection()
+        payload = collection.get(
+            limit=max(1, min(int(limit or 10), 50)),
+            offset=max(0, int(offset or 0)),
+            where=metadata_filter or None,
+            include=["documents", "metadatas"],
+        )
+        ids = payload.get("ids") or []
+        documents = payload.get("documents") or []
+        metadatas = payload.get("metadatas") or []
+        items: List[Dict[str, Any]] = []
+        for item_id, text, metadata in zip(ids, documents, metadatas):
+            items.append(
+                {
+                    "id": str((metadata or {}).get("document_id") or item_id or ""),
+                    "text": str(text or ""),
+                    "metadata": dict(metadata or {}),
+                }
+            )
+        return {"items": items, "limit": limit, "offset": offset}
 
     def add_document(self, document: Document) -> Dict[str, Any]:
         self._require_vector_backend()
@@ -285,3 +328,7 @@ def add_document(document: Document) -> Dict[str, Any]:
 
 def retrieve(query: str, limit: int = 4, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return DEFAULT_KNOWLEDGE_BASE.retrieve(query, limit=limit, metadata_filter=metadata_filter)
+
+
+def sample(limit: int = 10, offset: int = 0, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    return DEFAULT_KNOWLEDGE_BASE.sample(limit=limit, offset=offset, metadata_filter=metadata_filter)

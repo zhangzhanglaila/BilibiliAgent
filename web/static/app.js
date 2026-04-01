@@ -532,11 +532,62 @@ function knowledgeStatusView(payload = {}, summaryHtml = '') {
   `;
 }
 
+// 把知识库文档列表渲染成可读卡片。
+function knowledgeDocumentsView(items = [], options = {}) {
+  const title = options.title || '知识库内容';
+  const note = options.note || '';
+  const docs = Array.isArray(items) ? items : [];
+  if (!docs.length) {
+    return infoCard(title, note || '当前没有可展示的知识库内容。');
+  }
+  return `
+    <section class="copy-block">
+      <div class="block-title">
+        <div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(note || `共展示 ${docs.length} 条结果`)}</p></div>
+        <span class="type-badge">共 ${docs.length} 条</span>
+      </div>
+      <div class="knowledge-doc-list">
+        ${docs.map((item, index) => {
+          const metadata = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
+          const tagsList = Object.entries(metadata).slice(0, 6).map(([key, value]) => `${key}: ${value}`);
+          return `
+            <article class="knowledge-doc-item">
+              <div class="block-title">
+                <div>
+                  <div class="meta-line">DOC ${index + 1}</div>
+                  <h4>${escapeHtml(item.id || metadata.document_id || '未命名文档')}</h4>
+                </div>
+                <button class="copy-btn" type="button" data-copy="${escapeHtml(item.text || '')}" data-copy-label="知识内容">复制内容</button>
+              </div>
+              ${tagsList.length ? tags(tagsList) : '<p class="section-note">暂无元数据</p>'}
+              <pre>${escapeHtml(item.text || '')}</pre>
+            </article>
+          `;
+        }).join('')}
+      </div>
+    </section>
+  `;
+}
+
 // 把知识库状态或执行结果渲染进面板。
 function renderKnowledgeStatus(payload = {}, summaryHtml = '') {
   const box = $('#knowledgeResult');
   if (!box) return;
   box.innerHTML = knowledgeStatusView(payload, summaryHtml);
+  bindCopyButtons(box);
+}
+
+// 把知识库样本或检索结果渲染到内容区域。
+function renderKnowledgeContent(html) {
+  const box = $('#knowledgeContentResult');
+  if (!box) return;
+  box.innerHTML = html;
+  bindCopyButtons(box);
+}
+
+// 读取当前知识库查看条数。
+function knowledgeViewLimit() {
+  return Math.max(1, Math.min(20, Number($('#knowledgeViewLimit')?.value || 6) || 6));
 }
 
 // 页面加载时读取知识库状态。
@@ -547,6 +598,45 @@ async function loadKnowledgeBaseStatus() {
     renderKnowledgeStatus(data);
   } catch (error) {
     $('#knowledgeResult').innerHTML = infoCard('知识库状态读取失败', error.message || '请检查后端服务', 'danger');
+  }
+}
+
+// 读取知识库中的样本文档并展示。
+async function loadKnowledgeSamples() {
+  const limit = knowledgeViewLimit();
+  renderKnowledgeContent(loadingCard('正在读取知识库内容', '系统正在从当前 Chroma 向量库读取样本文档。', ['读取状态', '拉取文档', '渲染结果']));
+  try {
+    const data = await requestGetJson(`/api/knowledge/sample?limit=${encodeURIComponent(limit)}`);
+    renderKnowledgeContent(
+      knowledgeDocumentsView(data.items || [], {
+        title: '知识库样本文档',
+        note: `当前展示知识库中的前 ${limit} 条样本文档。`,
+      }),
+    );
+  } catch (error) {
+    renderKnowledgeContent(infoCard('读取知识库内容失败', error.message, 'danger'));
+  }
+}
+
+// 按关键词检索知识库并展示命中结果。
+async function searchKnowledgeContent() {
+  const query = ($('#knowledgeSearchInput')?.value || '').trim();
+  if (!query) {
+    showToast('缺少关键词', '请输入知识库检索关键词。', 'error');
+    return;
+  }
+  const limit = knowledgeViewLimit();
+  renderKnowledgeContent(loadingCard('正在检索知识库', '系统正在基于当前关键词执行语义检索。', ['发送查询', '执行检索', '渲染命中']));
+  try {
+    const data = await requestGetJson(`/api/knowledge/search?q=${encodeURIComponent(query)}&limit=${encodeURIComponent(limit)}`);
+    renderKnowledgeContent(
+      knowledgeDocumentsView(data.matches || [], {
+        title: `检索结果：${query}`,
+        note: `当前关键词共返回 ${Array.isArray(data.matches) ? data.matches.length : 0} 条命中结果。`,
+      }),
+    );
+  } catch (error) {
+    renderKnowledgeContent(infoCard('检索知识库失败', error.message, 'danger'));
   }
 }
 
@@ -574,6 +664,7 @@ async function uploadKnowledgeFile() {
       `文件 ${result.filename || file.name} 已写入知识库，文档 ID 为 ${result.document_id || '未知'}，切片数量 ${result.chunk_count ?? 0}。`,
     );
     renderKnowledgeStatus(data.knowledge_status || {}, summaryHtml);
+    await loadKnowledgeSamples();
     fileInput.value = '';
     setStatus('知识文件已导入', 'success');
     showToast('导入成功', `${result.filename || file.name} 已写入知识库`);
@@ -607,6 +698,7 @@ async function updateKnowledgeBase() {
       ${boardSummary}
     `;
     renderKnowledgeStatus(data.knowledge_status || {}, summaryHtml);
+    await loadKnowledgeSamples();
     setStatus('知识库已更新', 'success');
     showToast('更新成功', `本次追加写入 ${result.total_saved || 0} 条热门样本`);
   } catch (error) {
@@ -1406,7 +1498,7 @@ function renderWorkspaceOutline() {
 
 // 切换当前激活的功能模块，并按需聚焦输入控件。
 function setActiveModule(module, options = {}) {
-  const next = module === 'create' ? 'create' : 'analyze';
+  const next = ['analyze', 'create', 'knowledge'].includes(module) ? module : 'analyze';
   state.activeModule = next;
   const grid = $('#moduleGrid');
   if (grid) {
@@ -1592,11 +1684,19 @@ function initEvents() {
   $('#videoAnalyzeBtn').addEventListener('click', runAnalyzeModule);
   $('#knowledgeUploadBtn')?.addEventListener('click', uploadKnowledgeFile);
   $('#knowledgeUpdateBtn')?.addEventListener('click', updateKnowledgeBase);
+  $('#knowledgeSampleBtn')?.addEventListener('click', loadKnowledgeSamples);
+  $('#knowledgeSearchBtn')?.addEventListener('click', searchKnowledgeContent);
   $('#clearResultsBtn').addEventListener('click', clearResults);
   $('#runtimeModeToggle').addEventListener('click', toggleRuntimeMode);
   $('#runtimeConfigForm').addEventListener('submit', submitRuntimeConfig);
   $('#assistantLockOverlay').addEventListener('click', handleAssistantLockedClick);
   $('#videoLink').addEventListener('input', scheduleVideoResolve);
+  $('#knowledgeSearchInput')?.addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      searchKnowledgeContent();
+    }
+  });
   $$('[data-module-tab]').forEach(button => {
     button.addEventListener('click', () => {
       setActiveModule(button.dataset.moduleTab || 'analyze', { focus: true });
@@ -2001,6 +2101,7 @@ function init() {
   initGlobalScrollScene();
   loadRuntimeInfo();
   loadKnowledgeBaseStatus();
+  loadKnowledgeSamples();
   updateAssistantButton();
   bindCopyButtons(document);
   initCoverMedia();

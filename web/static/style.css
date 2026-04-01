@@ -599,7 +599,11 @@ button {
 }
 
 .module-grid[data-active="analyze"] .module-panel[data-module="create"],
-.module-grid[data-active="create"] .module-panel[data-module="analyze"] {
+.module-grid[data-active="analyze"] .module-panel[data-module="knowledge"],
+.module-grid[data-active="create"] .module-panel[data-module="analyze"],
+.module-grid[data-active="create"] .module-panel[data-module="knowledge"],
+.module-grid[data-active="knowledge"] .module-panel[data-module="analyze"],
+.module-grid[data-active="knowledge"] .module-panel[data-module="create"] {
   display: none;
 }
 
@@ -614,14 +618,17 @@ button {
 }
 
 .module-grid[data-active="create"],
-.module-grid[data-active="analyze"] {
+.module-grid[data-active="analyze"],
+.module-grid[data-active="knowledge"] {
   grid-template-columns: unset;
 }
 
 .module-grid[data-active="create"] .module-panel__body,
 .module-grid[data-active="analyze"] .module-panel__body,
+.module-grid[data-active="knowledge"] .module-panel__body,
 .module-grid[data-active="create"] .panel__header p,
-.module-grid[data-active="analyze"] .panel__header p {
+.module-grid[data-active="analyze"] .panel__header p,
+.module-grid[data-active="knowledge"] .panel__header p {
   opacity: 1;
   max-height: none;
   overflow: visible;
@@ -703,6 +710,7 @@ button {
 
 .module-actions {
   display: flex;
+  gap: 14px;
 }
 
 .action-btn {
@@ -786,6 +794,29 @@ button {
   border-radius: var(--radius-lg);
   background: rgba(255, 255, 255, 0.7);
   border: 1px solid rgba(124, 89, 42, 0.08);
+}
+
+.knowledge-doc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.knowledge-doc-item {
+  padding: 18px;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.84);
+  border: 1px solid rgba(124, 89, 42, 0.08);
+}
+
+.knowledge-doc-item pre {
+  margin: 14px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "Cascadia Mono", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--muted);
 }
 
 .block-title,
@@ -1714,7 +1745,8 @@ button {
 
   .module-grid,
   .module-grid[data-active="create"],
-  .module-grid[data-active="analyze"] {
+  .module-grid[data-active="analyze"],
+  .module-grid[data-active="knowledge"] {
     grid-template-columns: 1fr;
   }
 

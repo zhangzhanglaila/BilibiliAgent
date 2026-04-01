@@ -22,7 +22,7 @@ from agents.copywriting_agent import CopywritingAgent
 from agents.llm_workspace_agent import AgentTool, LLMWorkspaceAgent, RetrievalTool
 from agents.optimization_agent import OptimizationAgent
 from agents.topic_agent import TopicAgent
-from knowledge_base import Document, KnowledgeBase
+from knowledge_base import Document, KnowledgeBase, sample as kb_sample
 from knowledge_sync import ingest_uploaded_file, update_chroma_knowledge_base
 from config import CONFIG
 from llm_client import LLMClient, format_llm_error, llm_error_http_status, should_skip_same_provider_fallback
@@ -3026,6 +3026,32 @@ def api_runtime_llm_config():
 # 返回当前 Chroma 知识库状态，供页面展示和排查使用。
 def api_knowledge_status():
     return jsonify({"success": True, "data": build_knowledge_base_status()})
+
+
+@app.get("/api/knowledge/sample")
+# 返回知识库中的部分原始文档内容，便于页面直接查看当前库存。
+def api_knowledge_sample():
+    limit = max(1, min(safe_int(request.args.get("limit") or 10), 20))
+    offset = max(0, safe_int(request.args.get("offset") or 0))
+    try:
+        result = kb_sample(limit=limit, offset=offset)
+        return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"读取知识库内容失败：{exc}"}), 500
+
+
+@app.get("/api/knowledge/search")
+# 根据关键词检索知识库中的命中文档，供知识库管理页查看。
+def api_knowledge_search():
+    query = (request.args.get("q") or "").strip()
+    if not query:
+        return jsonify({"success": False, "error": "请输入检索关键词。"}), 400
+    limit = max(1, min(safe_int(request.args.get("limit") or 6), 12))
+    try:
+        result = KNOWLEDGE_BASE.retrieve(query, limit=limit)
+        return jsonify({"success": True, "data": result})
+    except Exception as exc:
+        return jsonify({"success": False, "error": f"检索知识库失败：{exc}"}), 500
 
 
 @app.post("/api/knowledge/upload")

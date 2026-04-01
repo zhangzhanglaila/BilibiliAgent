@@ -14,7 +14,7 @@
           <div class="brand__badge">B</div>
           <div>
             <h1>B站内容策划与视频分析工作台</h1>
-            <p>左侧切换视频分析与内容创作，右侧是对话式智能助手。</p>
+            <p>左侧切换视频分析、内容创作与知识库管理，右侧是对话式智能助手。</p>
           </div>
         </div>
         <div class="topbar__status-wrap">
@@ -34,6 +34,7 @@
           <nav class="workspace-nav" aria-label="功能切换">
             <button class="workspace-tab is-active" type="button" data-module-tab="analyze">视频分析</button>
             <button class="workspace-tab" type="button" data-module-tab="create">内容创作</button>
+            <button class="workspace-tab" type="button" data-module-tab="knowledge">知识库管理</button>
           </nav>
 
           <div class="workspace-main__content">
@@ -42,19 +43,20 @@
               <span class="hero-card__tag">Bilibili Creator Workspace</span>
               <h2>把发布前的选题文案，和发布后的数据分析，拆成两条独立工作流。</h2>
               <p>
-                通过顶部标签直接切换视频分析与内容创作，不需要在两个模块之间来回滚动。
+                通过顶部标签直接切换视频分析、内容创作与知识库管理，不需要在多个模块之间来回滚动。
                 右侧助手采用连续会话布局，快捷提问、语音输入和发送按钮都固定在底部区域。
               </p>
               <div class="hero-points">
                 <span class="result-badge">视频分析：解析 + 优化</span>
                 <span class="result-badge">内容创作：选题 + 文案</span>
+                <span class="result-badge">知识库管理：入库 + 查看</span>
                 <span class="result-badge" id="runtimeModeBadge">运行模式：{{ initial_runtime.mode_label }}</span>
               </div>
             </div>
             <div class="hero-metrics">
               <div class="metric-box">
                 <span class="metric-box__label">业务面板</span>
-                <strong>2 个模块 + 1 个助手</strong>
+                <strong>3 个模块 + 1 个助手</strong>
               </div>
               <div class="metric-box">
                 <span class="metric-box__label">核心能力</span>
@@ -120,50 +122,6 @@
                 <span class="field__hint" id="runtimeConfigHint">{% if initial_runtime.has_saved_llm_config %}当前已经保存过一组配置，关闭开关后再次打开会直接复用。{% else %}当前没有已保存配置，打开开关时需要先填写 URL、Key 和模型供应商。{% endif %}</span>
               </div>
             </form>
-          </section>
-
-          <section class="panel" id="knowledgePanel" data-outline-title="知识库管理">
-            <div class="panel__header">
-              <div>
-                <span class="module-kicker">知识库管理</span>
-                <h3>上传文件入库，或一键同步 B 站热门样本到 Chroma</h3>
-                <p>不改现有工作流，只补知识库入口。上传文件会自动清洗、切片并写入向量库；更新按钮会追加抓取热门榜样本。</p>
-              </div>
-            </div>
-
-            <div class="module-panel__body">
-              <div class="form-grid form-grid--compact">
-                <label class="field field--full">
-                  <span class="field__label">上传知识文件</span>
-                  <input id="knowledgeFileInput" type="file" accept=".txt,.md,.docx,.pdf" />
-                  <span class="field__hint">支持 txt / md / docx / pdf，上传后自动读取、清洗、切片并写入 Chroma 向量库。</span>
-                </label>
-
-                <label class="field">
-                  <span class="field__label">榜单抓取条数</span>
-                  <input id="knowledgeUpdateLimit" type="number" min="1" max="20" value="10" />
-                  <span class="field__hint">每个榜单最多抓取 1-20 条，更新时只追加，不清空历史数据。</span>
-                </label>
-              </div>
-
-              <div class="module-actions">
-                <button class="action-btn action-btn--primary" id="knowledgeUploadBtn" type="button">
-                  <span class="action-btn__title">上传文件到知识库</span>
-                  <span class="action-btn__desc">把本地资料直接写入 Chroma，后续内容创作、分析和对话都可优先检索。</span>
-                </button>
-                <button class="action-btn" id="knowledgeUpdateBtn" type="button">
-                  <span class="action-btn__title">自动更新热门知识库</span>
-                  <span class="action-btn__desc">抓取全站热门榜、分区热门榜、每周必看和入站必刷，结构化后追加写入向量库。</span>
-                </button>
-              </div>
-
-              <div class="module-result" id="knowledgeResult" data-outline-title="知识库状态">
-                <div class="empty-state">
-                  <h4>正在读取知识库状态</h4>
-                  <p>页面加载后会自动检查当前 Chroma 向量库是否可用，以及当前已入库的文档数量。</p>
-                </div>
-              </div>
-            </div>
           </section>
 
             <section class="module-grid" id="moduleGrid" data-active="analyze">
@@ -276,6 +234,80 @@
                   <div class="empty-state">
                     <h4>还没有生成结果</h4>
                     <p>输入领域、方向和想法后，点击“一键生成选题与文案”。</p>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel module-panel module-panel--knowledge" data-module="knowledge" id="knowledgePanel" data-outline-title="知识库管理">
+              <div class="panel__header">
+                <div>
+                  <span class="module-kicker">知识库管理</span>
+                  <h3>上传文件、同步热门样本，并直接查看向量库内容</h3>
+                  <p>知识库管理已经升级为一级主 Tab。这里集中处理 Chroma 入库、热门样本更新和库内容查看，不影响原有视频分析与内容创作逻辑。</p>
+                </div>
+              </div>
+
+              <div class="module-panel__body">
+                <div class="form-grid form-grid--compact">
+                  <label class="field field--full">
+                    <span class="field__label">上传知识文件</span>
+                    <input id="knowledgeFileInput" type="file" accept=".txt,.md,.docx,.pdf" />
+                    <span class="field__hint">支持 txt / md / docx / pdf，上传后自动读取、清洗、切片并写入 Chroma 向量库。</span>
+                  </label>
+
+                  <label class="field">
+                    <span class="field__label">榜单抓取条数</span>
+                    <input id="knowledgeUpdateLimit" type="number" min="1" max="20" value="10" />
+                    <span class="field__hint">每个榜单最多抓取 1-20 条，更新时只追加，不清空历史数据。</span>
+                  </label>
+
+                  <label class="field">
+                    <span class="field__label">知识库查看条数</span>
+                    <input id="knowledgeViewLimit" type="number" min="1" max="20" value="6" />
+                    <span class="field__hint">用于查看样本列表和关键词检索结果。</span>
+                  </label>
+
+                  <label class="field field--full">
+                    <span class="field__label">知识库检索关键词</span>
+                    <input id="knowledgeSearchInput" placeholder="例如：两性 情感 夫妻 坦白局 / 热门 标题 节奏 / 科普 结构" />
+                    <span class="field__hint">支持直接查看当前库内容，也可以按关键词检索命中文档。</span>
+                  </label>
+                </div>
+
+                <div class="module-actions">
+                  <button class="action-btn action-btn--primary" id="knowledgeUploadBtn" type="button">
+                    <span class="action-btn__title">上传文件到知识库</span>
+                    <span class="action-btn__desc">把本地资料直接写入 Chroma，后续内容创作、分析和对话都可优先检索。</span>
+                  </button>
+                  <button class="action-btn" id="knowledgeUpdateBtn" type="button">
+                    <span class="action-btn__title">自动更新热门知识库</span>
+                    <span class="action-btn__desc">抓取全站热门榜、分区热门榜、每周必看和入站必刷，结构化后追加写入向量库。</span>
+                  </button>
+                </div>
+
+                <div class="module-actions">
+                  <button class="action-btn action-btn--primary" id="knowledgeSampleBtn" type="button">
+                    <span class="action-btn__title">查看知识库内容</span>
+                    <span class="action-btn__desc">直接读取当前向量库里的部分原始文档，用于确认库存内容。</span>
+                  </button>
+                  <button class="action-btn" id="knowledgeSearchBtn" type="button">
+                    <span class="action-btn__title">按关键词检索知识库</span>
+                    <span class="action-btn__desc">基于当前输入关键词查看命中文档和元数据。</span>
+                  </button>
+                </div>
+
+                <div class="module-result" id="knowledgeResult" data-outline-title="知识库状态">
+                  <div class="empty-state">
+                    <h4>正在读取知识库状态</h4>
+                    <p>页面加载后会自动检查当前 Chroma 向量库是否可用，以及当前已入库的文档数量。</p>
+                  </div>
+                </div>
+
+                <div class="module-result" id="knowledgeContentResult" data-outline-title="知识库内容">
+                  <div class="empty-state">
+                    <h4>还没有查看结果</h4>
+                    <p>点击“查看知识库内容”读取样本，或输入关键词后点击“按关键词检索知识库”。</p>
                   </div>
                 </div>
               </div>
