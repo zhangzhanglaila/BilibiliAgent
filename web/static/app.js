@@ -15,6 +15,11 @@ const state = {
   activeModule: 'analyze',
   knowledgeActiveSubtab: 'upload',
   knowledgeStatus: null,
+  knowledgeForm: {
+    updateLimit: 10,
+    viewLimit: 6,
+    searchQuery: '',
+  },
   knowledgeResults: {
     upload: '',
     sync: '',
@@ -598,21 +603,111 @@ function renderKnowledgeResult(html, tab = state.knowledgeActiveSubtab) {
 
 // 读取当前知识库查看条数。
 function knowledgeViewLimit() {
-  return Math.max(1, Math.min(20, Number($('#knowledgeViewLimit')?.value || 6) || 6));
+  return Math.max(1, Math.min(20, Number(state.knowledgeForm.viewLimit || 6) || 6));
+}
+
+// 把知识库输入框里的当前值同步到前端状态，避免切换子 Tab 时丢失。
+function syncKnowledgeFormStateFromDom() {
+  const updateLimitInput = $('#knowledgeUpdateLimit');
+  const viewLimitInput = $('#knowledgeViewLimit');
+  const searchInput = $('#knowledgeSearchInput');
+  if (updateLimitInput) {
+    state.knowledgeForm.updateLimit = Math.max(1, Math.min(20, Number(updateLimitInput.value || 10) || 10));
+  }
+  if (viewLimitInput) {
+    state.knowledgeForm.viewLimit = Math.max(1, Math.min(20, Number(viewLimitInput.value || 6) || 6));
+  }
+  if (searchInput) {
+    state.knowledgeForm.searchQuery = searchInput.value || '';
+  }
+}
+
+// 根据当前子 Tab 渲染唯一的知识库操作面板，确保按钮一对一不混用。
+function knowledgeActionPane(tab = state.knowledgeActiveSubtab) {
+  if (tab === 'sync') {
+    return `
+      <div class="knowledge-pane is-active">
+        <div class="knowledge-action-row">
+          <label class="field knowledge-field">
+            <span class="field__label">榜单抓取条数</span>
+            <input id="knowledgeUpdateLimit" type="number" min="1" max="20" value="${escapeHtml(String(state.knowledgeForm.updateLimit || 10))}" />
+          </label>
+          <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeUpdateBtn" type="button">
+            <span class="action-btn__title">自动更新热门知识库</span>
+            <span class="action-btn__desc">同步并去重更新</span>
+          </button>
+        </div>
+        <div class="field__hint">每次更新只追加/更新最新热门样本，自动去重，不清空历史数据。</div>
+      </div>
+    `;
+  }
+  if (tab === 'view') {
+    return `
+      <div class="knowledge-pane is-active">
+        <div class="knowledge-action-row">
+          <label class="field knowledge-field">
+            <span class="field__label">知识库查看条数</span>
+            <input id="knowledgeViewLimit" type="number" min="1" max="20" value="${escapeHtml(String(state.knowledgeForm.viewLimit || 6))}" />
+          </label>
+          <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeSampleBtn" type="button">
+            <span class="action-btn__title">查看知识库内容</span>
+            <span class="action-btn__desc">读取最新文档</span>
+          </button>
+        </div>
+        <div class="field__hint">展示向量库中最新的 N 条原始文档。</div>
+      </div>
+    `;
+  }
+  if (tab === 'search') {
+    return `
+      <div class="knowledge-pane is-active">
+        <div class="knowledge-action-row">
+          <label class="field knowledge-field">
+            <span class="field__label">知识库检索关键词</span>
+            <input id="knowledgeSearchInput" value="${escapeHtml(state.knowledgeForm.searchQuery || '')}" placeholder="例如：两性 情感 夫妻 坦白局 / 热门 标题 节奏 / 科普 结构" />
+          </label>
+          <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeSearchBtn" type="button">
+            <span class="action-btn__title">按关键词检索知识库</span>
+            <span class="action-btn__desc">执行语义检索</span>
+          </button>
+        </div>
+        <div class="field__hint">按关键词检索向量库，展示命中文档和元数据。</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="knowledge-pane is-active">
+      <div class="knowledge-action-row">
+        <label class="field knowledge-field">
+          <span class="field__label">选择文件</span>
+          <input id="knowledgeFileInput" type="file" accept=".txt,.md,.docx,.pdf" />
+        </label>
+        <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeUploadBtn" type="button">
+          <span class="action-btn__title">上传到知识库</span>
+          <span class="action-btn__desc">自动读取并入库</span>
+        </button>
+      </div>
+      <div class="field__hint">支持 txt / md / docx / pdf，自动读取、清洗、切片并写入 Chroma 向量库。</div>
+    </div>
+  `;
+}
+
+// 渲染知识库操作区，当前子 Tab 只保留自己的专属按钮。
+function renderKnowledgeActionPane(tab = state.knowledgeActiveSubtab) {
+  const host = $('#knowledgeActionHost');
+  if (!host) return;
+  host.innerHTML = knowledgeActionPane(tab);
 }
 
 // 切换知识库子 Tab。
 function setKnowledgeSubtab(tab) {
   const next = ['upload', 'sync', 'view', 'search'].includes(tab) ? tab : 'upload';
+  syncKnowledgeFormStateFromDom();
   state.knowledgeActiveSubtab = next;
   $$('[data-knowledge-subtab]').forEach(button => {
     button.classList.toggle('is-active', button.dataset.knowledgeSubtab === next);
   });
-  $$('[data-knowledge-pane]').forEach(pane => {
-    const visible = pane.dataset.knowledgePane === next;
-    pane.hidden = !visible;
-    pane.classList.toggle('is-active', visible);
-  });
+  renderKnowledgeActionPane(next);
   const box = $('#knowledgeStageResult');
   if (!box) return;
   box.innerHTML = state.knowledgeResults[next] || knowledgePlaceholder(next);
@@ -658,6 +753,7 @@ async function loadKnowledgeBaseStatus() {
 
 // 读取知识库中的样本文档并展示。
 async function loadKnowledgeSamples() {
+  syncKnowledgeFormStateFromDom();
   const limit = knowledgeViewLimit();
   setActionButtonLoading('knowledgeSampleBtn', true, '读取中', '正在拉取样本文档');
   renderKnowledgeResult(loadingCard('正在读取知识库内容', '系统正在从当前 Chroma 向量库读取样本文档。', ['读取状态', '拉取文档', '渲染结果']), 'view');
@@ -681,6 +777,7 @@ async function loadKnowledgeSamples() {
 
 // 按关键词检索知识库并展示命中结果。
 async function searchKnowledgeContent() {
+  syncKnowledgeFormStateFromDom();
   const query = ($('#knowledgeSearchInput')?.value || '').trim();
   if (!query) {
     showToast('缺少关键词', '请输入知识库检索关键词。', 'error');
@@ -762,8 +859,8 @@ async function uploadKnowledgeFile() {
 
 // 重新抓取热门榜并追加更新 Chroma。
 async function updateKnowledgeBase() {
-  const limitInput = $('#knowledgeUpdateLimit');
-  const limit = Math.max(1, Math.min(20, Number(limitInput?.value || 10) || 10));
+  syncKnowledgeFormStateFromDom();
+  const limit = Math.max(1, Math.min(20, Number(state.knowledgeForm.updateLimit || 10) || 10));
 
   setActionButtonLoading('knowledgeUpdateBtn', true, '更新中', '正在抓取并去重');
   renderKnowledgeResult(loadingCard('正在更新热门知识库', '系统会抓取全站热门榜、分区热门榜、每周必看和入站必刷，并把结构化结果追加写入 Chroma。', ['抓取榜单', '提取优点', '写入向量库']), 'sync');
@@ -1698,17 +1795,36 @@ function toggleVoiceInput() {
 function initEvents() {
   $('#creatorRunBtn').addEventListener('click', runCreatorModule);
   $('#videoAnalyzeBtn').addEventListener('click', runAnalyzeModule);
-  $('#knowledgeUploadBtn')?.addEventListener('click', uploadKnowledgeFile);
-  $('#knowledgeUpdateBtn')?.addEventListener('click', updateKnowledgeBase);
-  $('#knowledgeSampleBtn')?.addEventListener('click', loadKnowledgeSamples);
-  $('#knowledgeSearchBtn')?.addEventListener('click', searchKnowledgeContent);
   $('#clearResultsBtn').addEventListener('click', clearResults);
   $('#runtimeModeToggle').addEventListener('click', toggleRuntimeMode);
   $('#runtimeConfigForm').addEventListener('submit', submitRuntimeConfig);
   $('#assistantLockOverlay').addEventListener('click', handleAssistantLockedClick);
   $('#videoLink').addEventListener('input', scheduleVideoResolve);
-  $('#knowledgeSearchInput')?.addEventListener('keydown', event => {
-    if (event.key === 'Enter') {
+  $('#knowledgeActionHost')?.addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    if (button.id === 'knowledgeUploadBtn') uploadKnowledgeFile();
+    if (button.id === 'knowledgeUpdateBtn') updateKnowledgeBase();
+    if (button.id === 'knowledgeSampleBtn') loadKnowledgeSamples();
+    if (button.id === 'knowledgeSearchBtn') searchKnowledgeContent();
+  });
+  $('#knowledgeActionHost')?.addEventListener('input', event => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.id === 'knowledgeUpdateLimit') {
+      state.knowledgeForm.updateLimit = Math.max(1, Math.min(20, Number(target.value || 10) || 10));
+    }
+    if (target.id === 'knowledgeViewLimit') {
+      state.knowledgeForm.viewLimit = Math.max(1, Math.min(20, Number(target.value || 6) || 6));
+    }
+    if (target.id === 'knowledgeSearchInput') {
+      state.knowledgeForm.searchQuery = target.value || '';
+    }
+  });
+  $('#knowledgeActionHost')?.addEventListener('keydown', event => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement)) return;
+    if (target.id === 'knowledgeSearchInput' && event.key === 'Enter') {
       event.preventDefault();
       searchKnowledgeContent();
     }

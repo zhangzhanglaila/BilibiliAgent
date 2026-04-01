@@ -263,62 +263,7 @@
                 <section class="knowledge-stage">
                   <div class="knowledge-stage__section">
                     <div class="knowledge-stage__label">操作区</div>
-
-                    <div class="knowledge-pane is-active" data-knowledge-pane="upload">
-                      <div class="knowledge-action-row">
-                        <label class="field knowledge-field">
-                          <span class="field__label">选择文件</span>
-                          <input id="knowledgeFileInput" type="file" accept=".txt,.md,.docx,.pdf" />
-                        </label>
-                        <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeUploadBtn" type="button">
-                          <span class="action-btn__title">上传到知识库</span>
-                          <span class="action-btn__desc">自动读取并入库</span>
-                        </button>
-                      </div>
-                      <div class="field__hint">支持 txt / md / docx / pdf，自动读取、清洗、切片并写入 Chroma 向量库。</div>
-                    </div>
-
-                    <div class="knowledge-pane" data-knowledge-pane="sync" hidden>
-                      <div class="knowledge-action-row">
-                        <label class="field knowledge-field">
-                          <span class="field__label">榜单抓取条数</span>
-                          <input id="knowledgeUpdateLimit" type="number" min="1" max="20" value="10" />
-                        </label>
-                        <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeUpdateBtn" type="button">
-                          <span class="action-btn__title">自动更新热门知识库</span>
-                          <span class="action-btn__desc">同步并去重更新</span>
-                        </button>
-                      </div>
-                      <div class="field__hint">每次更新只追加/更新最新热门样本，自动去重，不清空历史数据。</div>
-                    </div>
-
-                    <div class="knowledge-pane" data-knowledge-pane="view" hidden>
-                      <div class="knowledge-action-row">
-                        <label class="field knowledge-field">
-                          <span class="field__label">知识库查看条数</span>
-                          <input id="knowledgeViewLimit" type="number" min="1" max="20" value="6" />
-                        </label>
-                        <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeSampleBtn" type="button">
-                          <span class="action-btn__title">查看知识库内容</span>
-                          <span class="action-btn__desc">读取最新文档</span>
-                        </button>
-                      </div>
-                      <div class="field__hint">展示向量库中最新的 N 条原始文档。</div>
-                    </div>
-
-                    <div class="knowledge-pane" data-knowledge-pane="search" hidden>
-                      <div class="knowledge-action-row">
-                        <label class="field knowledge-field">
-                          <span class="field__label">知识库检索关键词</span>
-                          <input id="knowledgeSearchInput" placeholder="例如：两性 情感 夫妻 坦白局 / 热门 标题 节奏 / 科普 结构" />
-                        </label>
-                        <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeSearchBtn" type="button">
-                          <span class="action-btn__title">按关键词检索知识库</span>
-                          <span class="action-btn__desc">执行语义检索</span>
-                        </button>
-                      </div>
-                      <div class="field__hint">按关键词检索向量库，展示命中文档和元数据。</div>
-                    </div>
+                    <div id="knowledgeActionHost" aria-live="polite"></div>
                   </div>
 
                   <div class="knowledge-stage__section">
