@@ -19,13 +19,17 @@ if str(ROOT_DIR) not in sys.path:
 from bilibili_api import sync, video
 
 from agents.copywriting_agent import CopywritingAgent
-from agents.llm_workspace_agent import AgentTool, LLMWorkspaceAgent
+from agents.llm_workspace_agent import AgentTool, LLMWorkspaceAgent, RetrievalTool
 from agents.optimization_agent import OptimizationAgent
 from agents.topic_agent import TopicAgent
+from knowledge_base import Document, KnowledgeBase
 from config import CONFIG
 from llm_client import LLMClient, format_llm_error, llm_error_http_status, should_skip_same_provider_fallback
 from main import run_copy, run_operate, run_optimize, run_pipeline, run_topic
+from memory.long_term_memory import LongTermMemory
 from models import to_plain_data
+from tools.code_interpreter import CodeInterpreterTool
+from tools.search_tool import SearchTool
 
 app = Flask(
     __name__,
@@ -50,6 +54,80 @@ PARTITION_LABELS = {
     "game": "游戏",
     "ent": "娱乐",
 }
+LIFE_CONTENT_KEYWORDS = (
+    "生活",
+    "美食",
+    "日常",
+    "家居",
+    "赶海",
+    "海货",
+    "海鲜",
+    "潮水",
+    "滩涂",
+    "退潮",
+    "海边",
+    "渔村",
+    "赶山",
+    "蛤",
+    "蛤蜊",
+    "花甲",
+    "毛蛤",
+    "蛏",
+    "海螺",
+    "螃蟹",
+    "生蚝",
+    "海蛎",
+)
+SEA_HARVEST_KEYWORDS = (
+    "赶海",
+    "海货",
+    "海鲜",
+    "潮水",
+    "滩涂",
+    "退潮",
+    "海边",
+    "蛤",
+    "蛤蜊",
+    "花甲",
+    "毛蛤",
+    "蛏",
+    "海螺",
+    "螃蟹",
+    "生蚝",
+    "海蛎",
+)
+SEA_HARVEST_TARGET_KEYWORDS = (
+    "大毛蛤",
+    "毛蛤",
+    "蛏王",
+    "蛏子",
+    "蛤蜊",
+    "花甲",
+    "海螺",
+    "螃蟹",
+    "生蚝",
+    "海蛎",
+    "青口",
+    "扇贝",
+    "海胆",
+    "海参",
+    "八爪鱼",
+    "章鱼",
+    "海兔",
+    "海货",
+)
+ANALYSIS_TOPIC_BAD_TAILS = (
+    "换成",
+    "结果先出",
+    "新版本",
+    "连续更新",
+    "三条",
+    "系列版",
+    "轻量更新",
+    "切口测试",
+    "起步版",
+    "更清楚",
+)
 VIDEO_KEYWORD_STOPWORDS = {
     "哔哩哔哩",
     "bilibili",
@@ -64,6 +142,13 @@ CREATOR_PARTITION_ANGLES = {
     "life": ["低成本切口", "真实体验", "前后对比", "情绪共鸣"],
     "game": ["版本答案", "新手路线", "实战复盘", "高光片段"],
     "ent": ["3秒反差开场", "热门动作切口", "评论区互动点", "系列人设"],
+}
+CREATOR_REASON_FALLBACKS = {
+    "knowledge": "问题意识、信息增量、真实案例",
+    "tech": "实测差异、使用门槛、取舍成本",
+    "life": "真实体验、关系细节、情绪共鸣",
+    "game": "版本理解、实战反馈、操作细节",
+    "ent": "反差瞬间、真实反应、互动情绪",
 }
 CREATOR_STOPWORDS = {
     "视频",
@@ -134,6 +219,10 @@ RUNTIME_MODE_LABELS = {
 
 RAW_TOPIC_AGENT = TopicAgent()
 RAW_COPY_AGENT = CopywritingAgent()
+KNOWLEDGE_BASE = KnowledgeBase(persist_directory=CONFIG.vector_db_path)
+LONG_TERM_MEMORY = LongTermMemory(persist_directory=CONFIG.vector_db_path)
+WEB_SEARCH = SearchTool()
+CODE_INTERPRETER = CodeInterpreterTool()
 LLM_WORKSPACE_AGENT: LLMWorkspaceAgent | None = None
 LLM_WORKSPACE_SIGNATURE: tuple[str, ...] | None = None
 RUNTIME_LLM_ENABLED = CONFIG.llm_enabled()
@@ -149,8 +238,9 @@ RUNTIME_LLM_CONFIG: dict[str, str] | None = (
     else None
 )
 REFERENCE_VIDEO_DETAIL_CACHE: dict[str, dict] = {}
-RESOLVED_PAYLOAD_VERSION = 2
+RESOLVED_PAYLOAD_VERSION = 3
 VIDEO_TNAME_HINTS = {
+    214: "田园美食",
     255: "颜值·网红舞",
 }
 
@@ -539,7 +629,7 @@ def map_partition(tname: str, tid: int, context_text: str = "") -> str:
         return "game"
     if any(keyword in text for keyword in ["舞蹈", "卡点", "变速卡点", "热舞", "变装", "颜值", "美女", "身材", "小姐姐"]):
         return "ent"
-    if any(keyword in text for keyword in ["生活", "美食", "日常", "家居"]):
+    if any(keyword in text for keyword in LIFE_CONTENT_KEYWORDS):
         return "life"
     if any(keyword in text for keyword in ["娱乐", "影视", "综艺", "明星", "音乐"]):
         return "ent"
@@ -550,7 +640,7 @@ def map_partition(tname: str, tid: int, context_text: str = "") -> str:
         return "tech"
     if tid in {4, 17, 65, 136, 172}:
         return "game"
-    if tid in {21, 76, 138, 160}:
+    if tid in {21, 76, 138, 160, 214}:
         return "life"
     if tid in {5, 71, 137, 181, 255}:
         return "ent"
@@ -583,6 +673,8 @@ def normalize_video_tname(tname: str, tid: int, keywords: object = None, title: 
 
     keyword_list = extract_video_keywords(keywords)
     text = f"{title} {' '.join(keyword_list)}".lower()
+    if any(token in text for token in SEA_HARVEST_KEYWORDS):
+        return "赶海"
     if any(token in text for token in ["颜值", "美女", "身材", "小姐姐", "变装"]):
         return "颜值"
     if any(token in text for token in ["变速卡点", "卡点", "舞蹈", "热舞"]):
@@ -597,6 +689,7 @@ def build_topic(title: str, keywords: list[str] | None = None, tname: str = "", 
     keyword_list = extract_video_keywords(keywords)
     normalized_tname = normalize_video_tname(tname, tid, keyword_list, cleaned or title or "")
     text = f"{cleaned} {normalized_tname} {' '.join(keyword_list)}".lower()
+    sea_target = next((token for token in SEA_HARVEST_TARGET_KEYWORDS if token in text), "")
 
     if any(keyword in text for keyword in ["颜值", "美女", "身材", "小姐姐", "变装"]) and any(
         keyword in text for keyword in ["变速卡点", "卡点", "舞蹈", "热舞"]
@@ -607,6 +700,8 @@ def build_topic(title: str, keywords: list[str] | None = None, tname: str = "", 
         return "变速卡点舞蹈展示"
     if any(keyword in text for keyword in ["颜值", "美女", "身材", "小姐姐", "变装"]):
         return "颜值展示视频"
+    if any(keyword in text for keyword in SEA_HARVEST_KEYWORDS):
+        return f"赶海捡到{sea_target}" if sea_target and sea_target != "海货" else "赶海收获记录"
     if any(keyword in text for keyword in ["异地恋", "情侣", "约会", "vlog", "日常"]):
         return cleaned or "情侣日常记录"
     return (cleaned or title or "B站内容选题拆解").strip()
@@ -754,13 +849,15 @@ def build_creator_context_keywords(*texts: str) -> list[str]:
 
 def infer_creator_topic_focus(topic: str) -> str:
     text = normalize_creator_text(topic)
-    if any(token in text for token in ["拆成", "三条", "三段", "连续", "固定更新", "系列"]):
-        return "series"
+    if any(token in text for token in ["两性", "情感", "恋爱", "情侣", "夫妻", "婚姻", "坦白局", "私密", "伴侣", "相处"]):
+        return "emotion"
+    if any(token in text for token in ["科普", "原理", "误区", "解析", "解读", "真相", "为什么"]):
+        return "knowledge"
     if any(token in text for token in ["细节", "小事", "瞬间", "情绪", "共鸣"]):
         return "detail"
-    if any(token in text for token in ["日常", "片段", "一段", "记录"]):
+    if any(token in text for token in ["日常", "片段", "一段", "记录", "场景"]):
         return "scene"
-    if any(token in text for token in ["对比", "前后", "变化"]):
+    if any(token in text for token in ["对比", "前后", "变化", "差异"]):
         return "contrast"
     return "general"
 
@@ -768,13 +865,14 @@ def infer_creator_topic_focus(topic: str) -> str:
 def select_creator_topic_cue(topic: str) -> str:
     focus = infer_creator_topic_focus(topic)
     mapping = {
-        "series": "连续更新",
+        "emotion": "关系视角",
+        "knowledge": "问题拆解",
         "detail": "细节放大",
-        "scene": "日常片段",
-        "contrast": "前后对比",
-        "general": "具体场景",
+        "scene": "真实场景",
+        "contrast": "体验对照",
+        "general": "核心切口",
     }
-    return mapping.get(focus, "具体场景")
+    return mapping.get(focus, "核心切口")
 
 
 def keyword_matches_creator_context(keyword: str, context_keywords: list[str]) -> bool:
@@ -836,19 +934,22 @@ def build_creator_reason(
     index: int = 0,
 ) -> str:
     partition_label = PARTITION_LABELS.get(partition_name, partition_name)
-    keyword_text = "、".join(trending_keywords[:3]) if trending_keywords else "开场反差、结果感、互动点"
+    keyword_text = "、".join(trending_keywords[:3]) if trending_keywords else CREATOR_REASON_FALLBACKS.get(
+        partition_name, "真实体验、信息增量、互动讨论"
+    )
     focus = infer_creator_topic_focus(topic)
     lead_templates = [
-        f"从当前{partition_label}分区的 {source_count} 条热点 / 样本看，「{keyword_text}」这类结构最近更容易把人留住。",
-        f"这一批{partition_label}题材里，跑得更好的内容大多都带着「{keyword_text}」这类表达特征。",
-        f"按当前{partition_label}分区样本回看，观众更容易停留在「{keyword_text}」这种信息组织方式上。",
+        f"从当前{partition_label}分区的 {source_count} 条热点 / 样本回看，「{keyword_text}」这类切口最近更容易被点开和讨论。",
+        f"这一批{partition_label}题材里，表现更稳的内容大多都在抓「{keyword_text}」这类观众感知很强的点。",
+        f"按当前{partition_label}分区样本回看，观众停留得更久的内容，通常都能把「{keyword_text}」讲得更具体。",
     ]
     focus_lines = {
-        "scene": f"这一条适合先抓一个最容易代入的生活片段，把场景立住，比一上来讲完整关系更顺。",
-        "series": f"这一条更适合拆成连续更新，先用第一条把核心场景立住，后面再补变化和互动。",
-        "detail": f"这一条重点不在铺大逻辑，而是把一个会被反复提起的小细节单独放大。",
-        "contrast": f"这一条更适合把变化感直接摆出来，让观众一眼看到前后差异。",
-        "general": f"这一条先把一个最具体的场景讲透，会比大而泛的总结更容易起步。",
+        "emotion": "这一条更适合从双方感受、关系边界或相处卡点切进去，观众会更容易把自己的经历代进去。",
+        "knowledge": "这一条适合把一个常见误区拆开讲，再用真实场景把结论落地，信息价值会更清楚。",
+        "scene": "这一条适合先把场景和人物状态立住，让观众先看懂发生了什么，再自然进入后面的情绪或观点。",
+        "detail": "这一条重点不在铺大逻辑，而是把一个会被反复提起的小细节单独讲透。",
+        "contrast": "这一条更适合把两种感受或两种结果直接并排摆出来，观众更容易立刻形成判断。",
+        "general": "这一条先抓住一个明确问题或具体处境，会比泛泛总结更容易建立讨论氛围。",
     }
     angle_templates = [
         f"表达上先往「{angle_label}」去组织，会比平铺直叙更容易测出反馈。",
@@ -1502,6 +1603,8 @@ def normalize_analysis_topics(topic_result: dict, current_title: str = "", limit
             continue
         if current_norm and topic_norm == current_norm:
             continue
+        if current_norm and current_norm in topic_norm and any(token in topic_norm for token in ANALYSIS_TOPIC_BAD_TAILS):
+            continue
         seen.add(topic_norm)
         result.append(topic)
         if len(result) >= limit:
@@ -1703,7 +1806,27 @@ def has_semantic_reference_title(title: str, keywords: list[str] | None = None) 
     if keyword_list and any(keyword.lower() in clean_title for keyword in keyword_list):
         return True
 
-    semantic_tokens = ["舞蹈", "卡点", "变速", "颜值", "美女", "身材", "穿搭", "约会", "异地恋", "vlog", "教程"]
+    semantic_tokens = [
+        "舞蹈",
+        "卡点",
+        "变速",
+        "颜值",
+        "美女",
+        "身材",
+        "穿搭",
+        "约会",
+        "异地恋",
+        "vlog",
+        "教程",
+        "赶海",
+        "海货",
+        "海鲜",
+        "潮水",
+        "蛤",
+        "蛏",
+        "海螺",
+        "螃蟹",
+    ]
     if any(token in clean_title for token in semantic_tokens):
         return True
     return False
@@ -2464,6 +2587,68 @@ def extract_first_bili_url(text: str) -> str:
     return match.group(0).strip() if match else ""
 
 
+# 把工具返回的市场数据沉淀进本地知识库，供后续 RAG 检索复用。
+def save_tool_result_to_knowledge_base(source_id: str, text: str, metadata: dict | None = None) -> None:
+    clean_id = normalize_creator_text(source_id) or "workspace"
+    clean_text = str(text or "").strip()
+    if not clean_text:
+        return
+    try:
+        KNOWLEDGE_BASE.add_document(
+            Document(
+                id=re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+", "_", clean_id)[:80] or "workspace",
+                text=clean_text,
+                metadata=metadata or {},
+            )
+        )
+    except Exception:
+        return
+
+
+def creator_briefing_tool_handler(payload: dict) -> dict:
+    result = build_creator_briefing(
+        payload.get("field", ""),
+        payload.get("direction", ""),
+        payload.get("idea", ""),
+        payload.get("partition", "knowledge"),
+    )
+    save_tool_result_to_knowledge_base(
+        f"creator_{payload.get('field', '')}_{payload.get('direction', '')}_{payload.get('partition', '')}",
+        json.dumps(result, ensure_ascii=False),
+        {
+            "source": "creator_briefing",
+            "partition": payload.get("partition", "knowledge"),
+        },
+    )
+    return result
+
+
+def video_briefing_tool_handler(payload: dict) -> dict:
+    result = build_video_briefing(payload.get("url", ""))
+    save_tool_result_to_knowledge_base(
+        f"video_{((result.get('resolved') or {}).get('bv_id') or payload.get('url', ''))}",
+        json.dumps(result, ensure_ascii=False),
+        {
+            "source": "video_briefing",
+            "partition": (result.get("resolved") or {}).get("partition", ""),
+        },
+    )
+    return result
+
+
+def hot_board_snapshot_tool_handler(payload: dict) -> dict:
+    result = build_hot_board_snapshot(payload.get("partition", "knowledge"))
+    save_tool_result_to_knowledge_base(
+        f"hot_{payload.get('partition', 'knowledge')}",
+        json.dumps(result, ensure_ascii=False),
+        {
+            "source": "hot_board_snapshot",
+            "partition": payload.get("partition", "knowledge"),
+        },
+    )
+    return result
+
+
 # 懒加载并返回全局 LLMWorkspaceAgent 实例。
 def get_llm_workspace_agent() -> LLMWorkspaceAgent:
     global LLM_WORKSPACE_AGENT, LLM_WORKSPACE_SIGNATURE
@@ -2480,28 +2665,35 @@ def get_llm_workspace_agent() -> LLMWorkspaceAgent:
     if LLM_WORKSPACE_AGENT is None or LLM_WORKSPACE_SIGNATURE != signature:
         LLM_WORKSPACE_AGENT = LLMWorkspaceAgent(
             llm_client=build_runtime_llm_client(),
+            memory_store=LONG_TERM_MEMORY,
             tools=[
                 AgentTool(
                     name="creator_briefing",
                     description="根据领域、方向、想法和分区，抓取热点榜、分区样本、同类样本原始数据。输入: {field, direction, idea, partition}",
-                    handler=lambda payload: build_creator_briefing(
-                        payload.get("field", ""),
-                        payload.get("direction", ""),
-                        payload.get("idea", ""),
-                        payload.get("partition", "knowledge"),
-                    ),
+                    handler=creator_briefing_tool_handler,
                 ),
                 AgentTool(
                     name="video_briefing",
                     description="解析 B 站视频链接，返回视频公开数据，并抓取相同分区与同类 UP 的原始样本。输入: {url}",
-                    handler=lambda payload: build_video_briefing(payload.get("url", "")),
+                    handler=video_briefing_tool_handler,
                 ),
                 AgentTool(
                     name="hot_board_snapshot",
                     description="获取指定分区的热点榜和分区样本原始数据，适合回答趋势、热点、近期什么内容火。输入: {partition}",
-                    handler=lambda payload: build_hot_board_snapshot(payload.get("partition", "knowledge")),
+                    handler=hot_board_snapshot_tool_handler,
                 ),
-            ]
+                RetrievalTool(),
+                AgentTool(
+                    name="web_search",
+                    description="实时搜索热点、平台活动、竞品趋势和外部公开信息。输入: {query, limit}",
+                    handler=lambda payload: WEB_SEARCH.search(payload.get("query", ""), int(payload.get("limit") or 5)),
+                ),
+                AgentTool(
+                    name="code_interpreter",
+                    description="执行 Python 代码，完成数据处理、分析和简单可视化准备。输入: {code, variables}",
+                    handler=CODE_INTERPRETER.run,
+                ),
+            ],
         )
         LLM_WORKSPACE_SIGNATURE = signature
     return LLM_WORKSPACE_AGENT
@@ -2531,9 +2723,10 @@ def run_llm_module_create(data: dict) -> dict:
             "idea": (data.get("idea") or "").strip(),
             "partition": (data.get("partition") or "knowledge").strip() or "knowledge",
             "style": (data.get("style") or "干货").strip() or "干货",
+            "memory_user_id": "web_module_create",
         },
         response_contract=response_contract,
-        allowed_tools=["creator_briefing"],
+        allowed_tools=["retrieval", "creator_briefing", "web_search", "code_interpreter"],
         required_tools=["creator_briefing"],
         required_final_keys=["normalized_profile", "seed_topic", "partition", "style", "chosen_topic", "topic_result", "copy_result"],
             max_steps=2,
@@ -2632,9 +2825,10 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
             "url": (data.get("url") or "").strip(),
             "parsed_video": resolved,
             "market_snapshot": market_snapshot,
+            "memory_user_id": "web_module_analyze",
         },
         response_contract=response_contract,
-        allowed_tools=["hot_board_snapshot"],
+        allowed_tools=["retrieval", "hot_board_snapshot", "web_search", "code_interpreter"],
         required_final_keys=["resolved", "performance", "topic_result", "optimize_result", "analysis", "copy_result"],
     )
     result["resolved"] = resolved
@@ -2750,9 +2944,10 @@ def run_llm_chat(data: dict) -> dict:
             "history": history[-8:],
             "creator_context": creator_context,
             "video_url": video_url,
+            "memory_user_id": "web_workspace_chat",
         },
         response_contract=response_contract,
-        allowed_tools=["creator_briefing", "video_briefing", "hot_board_snapshot"],
+        allowed_tools=["retrieval", "creator_briefing", "video_briefing", "hot_board_snapshot", "web_search", "code_interpreter"],
         required_final_keys=["reply", "suggested_next_actions", "mode"],
     )
     chat_query_text = " ".join(

@@ -51,6 +51,8 @@ class AppConfig:
     llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "75"))
     llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
     llm_retry_backoff_seconds: float = float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "1.6"))
+    serpapi_api_key: str = os.getenv("SERPAPI_API_KEY", "")
+    vector_db_path: str = os.getenv("VECTOR_DB_PATH", "./vector_db")
     bili_sessdata: str = os.getenv("BILI_SESSDATA", "")
     bili_csrf: str = os.getenv("BILI_BILI_JCT", "")
     default_partition: str = os.getenv("DEFAULT_PARTITION", "knowledge")

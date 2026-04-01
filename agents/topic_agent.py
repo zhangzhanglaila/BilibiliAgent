@@ -14,6 +14,109 @@ from bilibili_api import hot, sync, user, video_zone
 from config import CONFIG
 from models import TopicIdea, VideoMetrics
 
+LIFE_SEED_TOKENS = (
+    "异地恋",
+    "报备",
+    "情侣",
+    "恋爱",
+    "日常",
+    "生活",
+    "vlog",
+    "记录",
+    "下班",
+    "回家",
+    "通勤",
+    "碎碎念",
+    "赶海",
+    "海货",
+    "海鲜",
+    "潮水",
+    "滩涂",
+    "退潮",
+    "海边",
+)
+SEA_HARVEST_TOKENS = (
+    "赶海",
+    "海货",
+    "海鲜",
+    "潮水",
+    "滩涂",
+    "退潮",
+    "海边",
+    "蛤",
+    "蛤蜊",
+    "花甲",
+    "毛蛤",
+    "蛏",
+    "海螺",
+    "螃蟹",
+    "生蚝",
+    "海蛎",
+)
+SEA_HARVEST_TARGET_TOKENS = (
+    "大毛蛤",
+    "毛蛤",
+    "蛏王",
+    "蛏子",
+    "蛤蜊",
+    "花甲",
+    "海螺",
+    "螃蟹",
+    "生蚝",
+    "海蛎",
+    "青口",
+    "扇贝",
+    "海胆",
+    "海参",
+    "八爪鱼",
+    "章鱼",
+    "海兔",
+    "海货",
+)
+APPEARANCE_TOKENS = (
+    "颜值",
+    "变装",
+    "卡点",
+    "变速",
+    "氛围感",
+    "妆容",
+    "穿搭",
+    "特写",
+)
+APPEARANCE_CARDPOINT_TOKENS = ("卡点", "变速", "踩点")
+APPEARANCE_TRANSFORM_TOKENS = ("变装", "换装", "前后对比", "反差")
+APPEARANCE_DAILY_TOKENS = ("日常", "vlog", "生活", "通勤", "出门", "街拍")
+RELATIONSHIP_SEED_TOKENS = (
+    "两性",
+    "情感",
+    "恋爱",
+    "情侣",
+    "夫妻",
+    "婚姻",
+    "伴侣",
+    "对象",
+    "坦白局",
+    "私密",
+    "亲密",
+    "相处",
+    "吵架",
+    "冷战",
+    "分手",
+    "复合",
+    "前任",
+    "男生",
+    "女生",
+    "男人",
+    "女人",
+    "男女",
+)
+RELATIONSHIP_CONFESSION_TOKENS = ("坦白局", "私密", "亲密", "秘密", "不好意思", "不敢说", "真实经历")
+RELATIONSHIP_DIFFERENCE_TOKENS = ("差异", "区别", "不同", "体验", "感受", "男生", "女生", "男女")
+RELATIONSHIP_CONFLICT_TOKENS = ("相处", "吵架", "冷战", "沟通", "婚姻", "夫妻", "伴侣", "边界", "安全感")
+KNOWLEDGE_SEED_TOKENS = ("科普", "知识", "原理", "为什么", "误区", "区别", "差异", "解析", "解读", "真相")
+REVIEW_SEED_TOKENS = ("测评", "评测", "开箱", "实测", "对比", "推荐", "避坑", "值不值", "体验")
+FUN_SEED_TOKENS = ("搞笑", "整活", "吐槽", "沙雕", "抽象", "盘点", "挑战", "名场面", "翻车")
+
 
 class TopicAgent:
     # 初始化选题 Agent，设置请求节流间隔。
@@ -404,101 +507,274 @@ class TopicAgent:
             return ""
         return base
 
+    # 把长句型标题压成更适合继续扩写的主体，避免把整句原题机械拼进后续题材。
+    def _compact_seed_subject(self, text: str) -> str:
+        clean = self._clean_seed_topic(text)
+        if not clean:
+            return ""
+        parts = re.split(r"[，,。！？!？；;]", clean)
+        for part in parts:
+            value = self._clean_seed_topic(part)
+            if len(value) >= 2:
+                return value
+        return clean
+
+    # 判断当前主题是否属于赶海 / 海货收获这类记录内容。
+    def _is_sea_harvest_seed_topic(self, cleaned: str) -> bool:
+        text = f"{cleaned} {self._seed_title_subject(cleaned)}".lower()
+        return any(token in text for token in SEA_HARVEST_TOKENS)
+
+    # 从赶海标题里提取更适合落地成选题的收获对象。
+    def _extract_sea_harvest_target(self, cleaned: str) -> str:
+        text = cleaned.lower()
+        for token in SEA_HARVEST_TARGET_TOKENS:
+            if token in text:
+                return token
+        return ""
+
+    # 判断当前主题是否属于颜值展示 / 卡点 / 变装赛道。
+    def _is_appearance_seed_topic(self, cleaned: str) -> bool:
+        text = f"{cleaned} {self._seed_title_subject(cleaned)}".lower()
+        return any(token in text for token in APPEARANCE_TOKENS)
+
+    # 基于题材词判断颜值内容更接近哪种延展结构。
+    def _appearance_seed_mode(self, cleaned: str) -> str:
+        text = cleaned.lower()
+        if any(token in text for token in APPEARANCE_CARDPOINT_TOKENS):
+            return "cardpoint"
+        if any(token in text for token in APPEARANCE_TRANSFORM_TOKENS):
+            return "transform"
+        if any(token in text for token in APPEARANCE_DAILY_TOKENS):
+            return "daily"
+        return "general"
+
+    # 为颜值类标题生成同赛道、无建议口吻的系列化延展方向。
+    def _build_appearance_seed_candidates(self, cleaned: str) -> List[tuple[str, str]]:
+        mode = self._appearance_seed_mode(cleaned)
+        if mode == "cardpoint":
+            return [
+                ("颜值特写", "近景颜值特写卡点"),
+                ("场景切换", "场景切换颜值卡点"),
+                ("前后反差", "前后反差变装卡点"),
+            ]
+        if mode == "transform":
+            return [
+                ("变装开场", "开场素颜到成片的变装卡点"),
+                ("场景衔接", "不同场景衔接的变装切换"),
+                ("特写反差", "近景特写和全身切换的变装片段"),
+            ]
+        if mode == "daily":
+            return [
+                ("氛围日常", "通勤路上的颜值氛围感片段"),
+                ("场景特写", "室内外切换的颜值日常特写"),
+                ("出门反差", "出门前后衔接的颜值反差记录"),
+            ]
+        return [
+            ("颜值特写", "镜头贴脸的颜值特写片段"),
+            ("场景切换", "场景切换衔接的氛围感展示"),
+            ("前后反差", "前后状态反差的颜值展示片段"),
+        ]
+
     # 判断当前种子主题是否更接近日常记录型内容。
     def _is_life_seed_topic(self, cleaned: str) -> bool:
         text = f"{cleaned} {self._seed_title_subject(cleaned)}".lower()
-        return any(
-            token in text
-            for token in [
-                "异地恋",
-                "报备",
-                "情侣",
-                "恋爱",
-                "日常",
-                "生活",
-                "vlog",
-                "记录",
-                "下班",
-                "回家",
-                "通勤",
-                "碎碎念",
-            ]
-        )
+        return any(token in text for token in LIFE_SEED_TOKENS)
 
     # 为生活区 / 日常型主题构造更自然的新方向。
     def _build_life_seed_candidates(self, cleaned: str, subject: str) -> List[tuple[str, str]]:
-        base = subject or "日常"
+        base = self._compact_seed_subject(subject) or "日常"
         text = f"{cleaned} {base}"
         if "异地恋" in text and "报备" in text:
             return [
-                ("日常片段", "异地恋报备里最有共鸣的一段日常记录"),
-                ("流程拆分", "把异地恋报备拆成早安、下班、晚安三段连续记录"),
-                ("细节放大", "异地恋里那些会反复分享的小事记录"),
+                ("关系细节", "异地恋报备里那些看起来普通、却最能给人安全感的回应"),
+                ("情绪变化", "从早安到晚安的报备语气变化，为什么会让异地恋感受完全不同"),
+                ("相处延伸", "异地恋里真正让人反复想起的，往往不是大事，而是这些陪伴感很强的小瞬间"),
             ]
         if "异地恋" in text:
             return [
-                ("日常片段", "异地恋里最容易让人代入的一段日常"),
-                ("情绪细节", "把异地恋里最有情绪起伏的一刻单独放大"),
-                ("连续记录", "把异地恋日常拆成三条连续更新的小记录"),
+                ("情绪切口", "异地恋最熬人的时刻，往往不是见不到面，而是这些没法同步的小瞬间"),
+                ("回应细节", "异地恋里真正能把人安抚下来的，通常只是一个很小但很及时的回应"),
+                ("见面反差", "从见面倒计时到分别之后，异地恋情绪起伏最大的那几天"),
             ]
         if "报备" in text:
             return [
-                ("日常片段", "报备日常里最容易让人代入的一段生活流程"),
-                ("流程拆分", "把一天的报备拆成固定三个时间点连续记录"),
-                ("细节放大", "报备里那些最容易被记住的小细节"),
+                ("边界讨论", "报备为什么有人觉得安心，有人却会觉得压力越来越大"),
+                ("时段差异", "情侣一天里的不同报备时刻，真正传递出来的情绪完全不一样"),
+                ("相处平衡", "把报备放回真实关系里，陪伴感和边界感到底该怎么拿捏"),
             ]
         return [
-            ("日常片段", f"{base}里最容易让人代入的一段日常"),
-            ("流程拆分", f"把{base}拆成三个固定更新的小片段"),
-            ("细节放大", f"{base}里最值得单独放大的一处细节"),
+            ("真实场景", f"{base}里最能说明关系状态的那个日常瞬间"),
+            ("情绪变化", f"把{base}放进一天的真实节奏里，情绪变化会特别明显"),
+            ("细节共鸣", f"{base}看起来普通，但真正让人有共鸣的往往是那些没被明说的小反应"),
+        ]
+
+    # 为赶海 / 海货收获类标题生成更贴近内容本身的后续方向。
+    def _build_sea_harvest_seed_candidates(self, cleaned: str, subject: str) -> List[tuple[str, str]]:
+        lead = self._compact_seed_subject(subject) or "这次赶海"
+        target = self._extract_sea_harvest_target(cleaned)
+        if target and target != "海货":
+            return [
+                ("潮位追货", f"跟着下一波潮水继续找{target}的一次赶海记录"),
+                ("收获特写", f"把这次赶海碰到的{target}单独拍一条近景收获记录"),
+                ("同滩复拍", "同一片滩涂换个潮位再去一次，看看还能碰到哪些海货"),
+            ]
+        return [
+            ("潮位追货", f"{lead}之后继续跟着潮水找海货的一次赶海记录"),
+            ("收获特写", "把今天赶海最有画面感的一样收获单独拍一条近景"),
+            ("同滩复拍", "同一片海边隔一天再去一次，看看下一次能捡到什么"),
+        ]
+
+    # 判断当前主题是否属于两性 / 亲密关系 / 夫妻相处类内容。
+    def _is_relationship_seed_topic(self, cleaned: str) -> bool:
+        text = f"{cleaned} {self._seed_title_subject(cleaned)}".lower()
+        return any(token in text for token in RELATIONSHIP_SEED_TOKENS)
+
+    # 基于题材词判断两性关系内容更适合哪种延展方向。
+    def _relationship_seed_mode(self, cleaned: str) -> str:
+        text = cleaned.lower()
+        if any(token in text for token in RELATIONSHIP_CONFESSION_TOKENS):
+            return "confession"
+        if any(token in text for token in RELATIONSHIP_DIFFERENCE_TOKENS):
+            return "difference"
+        if any(token in text for token in RELATIONSHIP_CONFLICT_TOKENS):
+            return "interaction"
+        return "general"
+
+    # 从两性 / 关系话题中提炼更适合直接做视频标题的主轴。
+    def _relationship_seed_anchor(self, cleaned: str, subject: str) -> str:
+        text = f"{cleaned} {subject}".lower()
+        if "夫妻" in text and "坦白局" in text:
+            return "夫妻坦白局"
+        if "坦白局" in text:
+            return "亲密关系坦白局"
+        if any(token in text for token in ["两性", "男女"]) and any(token in text for token in ["差异", "区别", "体验"]):
+            return "男女体验差异"
+        if "夫妻" in text or "婚姻" in text:
+            return "夫妻相处"
+        if any(token in text for token in ["情侣", "恋爱", "对象", "伴侣"]):
+            return "亲密关系相处"
+        base = self._compact_seed_subject(subject)
+        return base or "亲密关系话题"
+
+    # 为两性 / 夫妻坦白局这类主题生成更贴近 B 站生态的延展题材。
+    def _build_relationship_seed_candidates(self, cleaned: str, subject: str) -> List[tuple[str, str]]:
+        anchor = self._relationship_seed_anchor(cleaned, subject)
+        mode = self._relationship_seed_mode(cleaned)
+        if mode == "confession":
+            return [
+                ("坦白视角", f"{anchor}：那些平时不会主动聊、但每对伴侣迟早都会碰到的尴尬瞬间"),
+                ("体验差异", "同一个亲密话题，男生和女生的真实感受到底差在哪"),
+                ("相处细节", "关系里最消耗亲密感的，往往不是大矛盾，而是这些说不出口的小事"),
+            ]
+        if mode == "difference":
+            return [
+                ("体验对照", f"{anchor}里最常见的一种错位感受"),
+                ("误区拆解", "为什么明明是同一件事，男生和女生的体感会完全不同"),
+                ("沟通落点", "那些看起来是小问题，最后却最容易变成关系内耗的差异"),
+            ]
+        if mode == "interaction":
+            return [
+                ("冲突根源", f"{anchor}里最容易反复卡住关系的一类沟通瞬间"),
+                ("双方视角", "同一场争执里，男生视角和女生视角到底各自在意什么"),
+                ("修复细节", "真正让关系缓和下来的，往往是那些很少被认真说开的细节"),
+            ]
+        return [
+            ("话题延伸", f"{anchor}背后那些观众更想继续听下去的真实处境"),
+            ("视角补充", "站到另一半视角之后，很多看法为什么会完全变掉"),
+            ("细节深挖", "亲密关系里最难开口的，常常不是原则问题，而是这些细微感受"),
+        ]
+
+    # 判断当前主题是否更接近知识拆解 / 科普说明类内容。
+    def _is_knowledge_seed_topic(self, cleaned: str) -> bool:
+        text = f"{cleaned} {self._seed_title_subject(cleaned)}".lower()
+        return any(token in text for token in KNOWLEDGE_SEED_TOKENS)
+
+    # 为知识 / 科普型标题构造更像 B 站内容的后续题材。
+    def _build_knowledge_seed_candidates(self, cleaned: str, subject: str) -> List[tuple[str, str]]:
+        base = self._compact_seed_subject(subject) or "这个知识点"
+        text = cleaned.lower()
+        if any(token in text for token in ["差异", "区别", "不同", "对比"]):
+            return [
+                ("核心差异", f"{base}真正拉开体验差距的，往往不是表面上那一点区别"),
+                ("误区拆解", f"很多人以为自己懂了{base}，其实最容易理解反的是这一步"),
+                ("场景落地", f"把{base}放进真实场景里，结论为什么会和想象中不一样"),
+            ]
+        if any(token in text for token in ["误区", "谣言", "真相"]):
+            return [
+                ("误区来源", f"{base}为什么总会被讲偏，问题通常出在最前面的那个判断"),
+                ("真实情况", f"围绕{base}最容易被忽略的真实前提到底是什么"),
+                ("延伸追问", f"如果把{base}继续往下讲一步，评论区最容易追问的会是哪层"),
+            ]
+        return [
+            ("问题拆解", f"{base}最值得单独讲清楚的，不是结论本身，而是中间那层逻辑"),
+            ("场景验证", f"把{base}放进真实案例里，很多人的理解会立刻发生变化"),
+            ("延伸问题", f"围绕{base}继续往前追问一步，才是观众真正想知道的后半段"),
+        ]
+
+    # 判断当前主题是否更接近测评 / 对比 / 消费决策内容。
+    def _is_review_seed_topic(self, cleaned: str) -> bool:
+        text = f"{cleaned} {self._seed_title_subject(cleaned)}".lower()
+        return any(token in text for token in REVIEW_SEED_TOKENS)
+
+    # 为测评 / 对比类主题生成更具体的后续题材。
+    def _build_review_seed_candidates(self, cleaned: str, subject: str) -> List[tuple[str, str]]:
+        base = self._compact_seed_subject(subject) or "这个东西"
+        return [
+            ("真实体验", f"{base}放进真实使用场景后，优缺点会比参数表里明显得多"),
+            ("取舍重点", f"围绕{base}最容易买错的，不是贵和便宜，而是没想清楚自己的使用取舍"),
+            ("对比延伸", f"同预算继续看{base}，真正拉开差距的往往是这些不显眼的小体验"),
+        ]
+
+    # 判断当前主题是否更接近搞笑 / 整活 / 反应类内容。
+    def _is_fun_seed_topic(self, cleaned: str) -> bool:
+        text = f"{cleaned} {self._seed_title_subject(cleaned)}".lower()
+        return any(token in text for token in FUN_SEED_TOKENS)
+
+    # 为整活 / 搞笑类标题生成更自然的延展题材。
+    def _build_fun_seed_candidates(self, cleaned: str, subject: str) -> List[tuple[str, str]]:
+        base = self._compact_seed_subject(subject) or "这类整活内容"
+        return [
+            ("反应延伸", f"{base}放进真实反应里，最容易把效果拉满的往往是第二个人的表情"),
+            ("场景升级", f"同样的{base}换到更具体的场景里，笑点会比原版更集中"),
+            ("评论区接梗", f"{base}最适合接着拍的一条，通常就是评论区已经开始帮你补完的那个梗"),
+        ]
+
+    # 为未命中特定赛道的主题生成较通顺的通用延展题材。
+    def _build_general_seed_candidates(self, cleaned: str, subject: str) -> List[tuple[str, str]]:
+        base = self._compact_seed_subject(subject) or self._compact_seed_subject(cleaned) or "这类内容"
+        return [
+            ("核心切口", f"{base}背后最容易被忽略的那层真实原因"),
+            ("场景补充", f"把{base}放回具体场景里，很多人的反应会和嘴上说的完全不一样"),
+            ("延伸话题", f"和{base}相关的下一层问题，往往才是观众更想继续听下去的部分"),
         ]
 
     # 围绕种子主题构造几种可执行的选题变体。
     def _build_seed_candidates(self, cleaned: str) -> List[tuple[str, str]]:
-        mode = self._seed_topic_mode(cleaned)
         subject = self._seed_topic_subject(cleaned)
-        title_subject = self._seed_title_subject(cleaned)
-        defaults = {
-            "dance_first_video": "这条舞蹈内容",
-            "opening_hook": "这条内容的开场",
-            "series_plan": "这个系列",
-            "first_video": "第一条内容",
-            "general": "这条内容",
-        }
-        base_subject = title_subject or defaults.get(mode, "这条内容")
+        title_subject = self._seed_title_subject(cleaned) or subject
+
+        if self._is_appearance_seed_topic(cleaned):
+            return self._build_appearance_seed_candidates(cleaned)
+
+        if self._is_sea_harvest_seed_topic(cleaned):
+            return self._build_sea_harvest_seed_candidates(cleaned, title_subject or subject)
+
+        if self._is_relationship_seed_topic(cleaned):
+            return self._build_relationship_seed_candidates(cleaned, title_subject or subject)
 
         if self._is_life_seed_topic(cleaned):
             return self._build_life_seed_candidates(cleaned, title_subject or subject)
 
-        if mode == "dance_first_video":
-            return [
-                ("第一条起号", f"{base_subject}先发最轻松好跟上的版本"),
-                ("开场动作", f"{base_subject}先做近景表情更强的一版"),
-                ("系列规划", f"把{base_subject}拆成完整动作、高光切片、互动返场三条连续更新"),
-            ]
-        if mode == "opening_hook":
-            return [
-                ("开场动作", f"{base_subject}先做结果先出的开场版"),
-                ("镜头顺序", f"{base_subject}换成前三秒更近的镜头版本"),
-                ("系列规划", f"把{base_subject}里开头反差最强的部分单独放大成一条"),
-            ]
-        if mode == "series_plan":
-            return [
-                ("系列规划", f"{base_subject}先发最容易建立记忆点的第一条"),
-                ("起量切口", f"把{base_subject}拆成三条连续更新的系列版"),
-                ("互动放大", f"{base_subject}里互动感最强的片段单独做一条"),
-            ]
-        if mode == "first_video":
-            return [
-                ("第一条起号", f"{base_subject}先发最容易看懂的起步版"),
-                ("切口测试", f"把{base_subject}拆成一个单点更强的小版本"),
-                ("系列规划", f"{base_subject}先做连续三条的轻量更新"),
-            ]
-        return [
-            ("起量切口", f"{base_subject}里最容易让人记住的一个具体片段"),
-            ("表达角度", f"把{base_subject}换成结果先出的新版本"),
-            ("系列规划", f"{base_subject}拆成三条连续更新会更清楚"),
-        ]
+        if self._is_knowledge_seed_topic(cleaned):
+            return self._build_knowledge_seed_candidates(cleaned, title_subject or subject)
+
+        if self._is_review_seed_topic(cleaned):
+            return self._build_review_seed_candidates(cleaned, title_subject or subject)
+
+        if self._is_fun_seed_topic(cleaned):
+            return self._build_fun_seed_candidates(cleaned, title_subject or subject)
+
+        return self._build_general_seed_candidates(cleaned, title_subject or subject)
 
     # 基于用户种子主题生成优先级更高的选题结果。
     def _generate_seed_topics(

@@ -9,6 +9,7 @@ from agents.copywriting_agent import CopywritingAgent
 from agents.operation_agent import OperationAgent
 from agents.optimization_agent import OptimizationAgent
 from agents.topic_agent import TopicAgent
+from chains.router_chain import RouterChain
 
 
 class PipelineState(TypedDict, total=False):
@@ -23,6 +24,10 @@ class PipelineState(TypedDict, total=False):
     copywriting_result: Any
     operation_result: Any
     optimization_result: Any
+    plan: Dict[str, Any]
+    title_result: List[str]
+    script_result: List[Dict[str, str]]
+    tag_result: Dict[str, Any]
 
 
 class BilibiliAgentGraph:
@@ -32,7 +37,21 @@ class BilibiliAgentGraph:
         self.copy_agent = CopywritingAgent()
         self.operation_agent = OperationAgent()
         self.optimization_agent = OptimizationAgent()
+        self.router = RouterChain()
         self.graph = self._build_graph()
+
+    # 先根据输入生成执行计划，明确任务类型、策略和执行步骤。
+    def _plan_node(self, state: PipelineState) -> PipelineState:
+        route = self.router.route(dict(state))
+        state["plan"] = {
+            "task_type": route.task_type,
+            "partition": route.partition,
+            "strategy": route.strategy,
+            "steps": route.plan_steps,
+        }
+        if not state.get("partition_name"):
+            state["partition_name"] = route.partition
+        return state
 
     # 执行选题节点，把主题结果写回状态，并补齐后续节点要用的 topic/style。
     def _topic_node(self, state: PipelineState) -> PipelineState:
@@ -51,15 +70,34 @@ class BilibiliAgentGraph:
         state["topic_result"] = result
         return state
 
-    # 执行文案节点，基于上一步的主题结果生成可发布文案。
-    def _copy_node(self, state: PipelineState) -> PipelineState:
+    # 生成标题阶段，先出完整文案草稿，再单独暴露标题结果给后续节点复用。
+    def _title_node(self, state: PipelineState) -> PipelineState:
         ideas = state.get("topic_result", {}).get("ideas", [])
         topic_idea = ideas[0] if ideas else None
-        state["copywriting_result"] = self.copy_agent.run(
+        copy_result = self.copy_agent.run(
             topic=state.get("topic"),
             topic_idea=topic_idea,
             style=state.get("style", "干货"),
         )
+        state["copywriting_result"] = copy_result
+        state["title_result"] = list(getattr(copy_result, "titles", []) or [])
+        return state
+
+    # 生成脚本阶段，提炼脚本部分并写回状态。
+    def _script_node(self, state: PipelineState) -> PipelineState:
+        copy_result = state.get("copywriting_result")
+        script = list(getattr(copy_result, "script", []) or [])
+        state["script_result"] = script
+        return state
+
+    # 生成标签阶段，提取标签、简介和置顶评论，供后续直接发布或展示。
+    def _tag_node(self, state: PipelineState) -> PipelineState:
+        copy_result = state.get("copywriting_result")
+        state["tag_result"] = {
+            "tags": list(getattr(copy_result, "tags", []) or []),
+            "description": getattr(copy_result, "description", ""),
+            "pinned_comment": getattr(copy_result, "pinned_comment", ""),
+        }
         return state
 
     # 执行运营节点，给目标视频生成互动处理建议。
@@ -84,14 +122,19 @@ class BilibiliAgentGraph:
     # 定义并编译整条 LangGraph 流水线。
     def _build_graph(self):
         workflow = StateGraph(PipelineState)
+        workflow.add_node("plan", self._plan_node)
         workflow.add_node("topic", self._topic_node)
-        workflow.add_node("copy", self._copy_node)
+        workflow.add_node("title", self._title_node)
+        workflow.add_node("script", self._script_node)
+        workflow.add_node("tags", self._tag_node)
         workflow.add_node("operate", self._operation_node)
         workflow.add_node("optimize", self._optimization_node)
-        # 后面的文案、运营、优化都依赖这里先产出的主题、风格和对标样本。
-        workflow.set_entry_point("topic")
-        workflow.add_edge("topic", "copy")
-        workflow.add_edge("copy", "operate")
+        workflow.set_entry_point("plan")
+        workflow.add_edge("plan", "topic")
+        workflow.add_edge("topic", "title")
+        workflow.add_edge("title", "script")
+        workflow.add_edge("script", "tags")
+        workflow.add_edge("tags", "operate")
         workflow.add_edge("operate", "optimize")
         workflow.add_edge("optimize", END)
         return workflow.compile()
@@ -102,6 +145,9 @@ class BilibiliAgentGraph:
 
     # 按名称单独运行某一个 Agent，方便 Web 和 CLI 按需复用。
     def run_single_agent(self, agent_name: str, state: Dict[str, Any]) -> Dict[str, Any]:
+        if agent_name == "plan":
+            planning_state: PipelineState = dict(state)
+            return {"plan": self._plan_node(planning_state).get("plan", {})}
         if agent_name == "topic":
             return {
                 "topic_result": self.topic_agent.run(
@@ -111,11 +157,19 @@ class BilibiliAgentGraph:
                 )
             }
         if agent_name == "copy":
+            result = self.copy_agent.run(
+                topic=state.get("topic"),
+                style=state.get("style", "干货"),
+            )
             return {
-                "copywriting_result": self.copy_agent.run(
-                    topic=state.get("topic"),
-                    style=state.get("style", "干货"),
-                )
+                "copywriting_result": result,
+                "title_result": getattr(result, "titles", []),
+                "script_result": getattr(result, "script", []),
+                "tag_result": {
+                    "tags": getattr(result, "tags", []),
+                    "description": getattr(result, "description", ""),
+                    "pinned_comment": getattr(result, "pinned_comment", ""),
+                },
             }
         if agent_name == "operate":
             return {
