@@ -55,6 +55,31 @@ PARTITION_LABELS = {
     "game": "游戏",
     "ent": "娱乐",
 }
+KNOWLEDGE_SEARCH_CATEGORY_RULES = {
+    "番剧": {"keywords": ("番剧", "新番", "追番", "番剧解说"), "partitions": ("番剧",), "broad_partitions": ("ent",)},
+    "国创": {"keywords": ("国创", "国漫", "国产动画"), "partitions": ("国创", "国漫"), "broad_partitions": ("ent",)},
+    "纪录片": {"keywords": ("纪录片", "纪实", "人文", "自然", "历史纪录"), "partitions": ("纪录片",), "broad_partitions": ("ent",)},
+    "电影": {"keywords": ("电影", "影评", "院线", "幕后"), "partitions": ("电影", "影视"), "broad_partitions": ("ent",)},
+    "电视剧": {"keywords": ("电视剧", "国产剧", "海外剧", "追剧"), "partitions": ("电视剧", "影视"), "broad_partitions": ("ent",)},
+    "综艺": {"keywords": ("综艺", "真人秀", "名场面"), "partitions": ("综艺",), "broad_partitions": ("ent",)},
+    "动画": {"keywords": ("动画", "mad", "amv", "特摄", "手办", "模玩"), "partitions": ("动画", "特摄", "手办", "模玩"), "broad_partitions": ("ent",)},
+    "游戏": {"keywords": ("游戏", "电竞", "手游", "端游"), "partitions": ("游戏", "电竞"), "broad_partitions": ("game",), "allow_broad_match": True},
+    "鬼畜": {"keywords": ("鬼畜", "音mad", "人力vocaloid", "鬼畜调教", "鬼畜剧场"), "partitions": ("鬼畜", "音mad", "人力vocaloid"), "broad_partitions": ("ent",)},
+    "音乐": {"keywords": ("音乐", "翻唱", "演奏", "原创音乐", "乐器", "乐理", "说唱", "唱歌"), "partitions": ("翻唱", "演奏", "原创音乐", "音乐"), "broad_partitions": ("ent",)},
+    "舞蹈": {"keywords": ("舞蹈", "宅舞", "街舞", "热舞", "编舞", "翻跳", "手势舞", "舞见", "跳舞"), "partitions": ("舞蹈", "宅舞", "街舞", "中国舞", "舞见"), "broad_partitions": ("ent",)},
+    "科技数码": {"keywords": ("科技", "数码", "手机", "电脑", "ai", "软件", "开箱"), "partitions": ("科技", "数码", "手机", "电脑"), "broad_partitions": ("tech",), "allow_broad_match": True},
+    "汽车": {"keywords": ("汽车", "新车", "试驾", "用车", "驾驶", "保养", "车型", "自驾"), "partitions": ("汽车",), "broad_partitions": ("tech",)},
+    "时尚美妆": {"keywords": ("美妆", "护肤", "穿搭", "彩妆", "时尚", "妆容"), "partitions": ("美妆", "穿搭", "时尚"), "broad_partitions": ("ent", "life")},
+    "体育运动": {"keywords": ("体育", "运动", "健身", "训练", "赛事", "篮球", "足球"), "partitions": ("体育", "运动", "健身"), "broad_partitions": ("life",)},
+    "动物": {"keywords": ("动物", "萌宠", "宠物", "猫", "狗"), "partitions": ("动物", "萌宠", "宠物"), "broad_partitions": ("life",)},
+    "生活": {"keywords": ("生活", "日常", "vlog", "探店", "做饭", "家居", "好物", "体验"), "partitions": ("生活", "日常", "vlog", "美食"), "broad_partitions": ("life",), "allow_broad_match": True},
+    "知识科普": {"keywords": ("知识", "科普", "社科", "历史", "学习", "医学", "健康", "人文"), "partitions": ("知识", "科普", "学习", "校园"), "broad_partitions": ("knowledge",), "allow_broad_match": True},
+    "娱乐热点": {"keywords": ("娱乐", "热点", "八卦", "明星", "热搜", "争议", "影视解说"), "partitions": ("娱乐", "影视"), "broad_partitions": ("ent",)},
+    "职场成长": {"keywords": ("职场", "求职", "面试", "简历", "打工", "副业", "考研", "考证"), "partitions": ("职场", "校园", "学习"), "broad_partitions": ("knowledge",)},
+    "情感婚恋": {"keywords": ("情感", "婚恋", "婚姻", "情侣", "暧昧", "前任", "脱单", "相亲"), "partitions": ("情感", "婚恋"), "broad_partitions": ("life", "knowledge")},
+    "两性心理": {"keywords": ("两性", "心理", "男女", "情绪共鸣", "高情商", "安全感", "人性"), "partitions": ("心理", "情感"), "broad_partitions": ("knowledge", "life")},
+    "通用爆款": {"keywords": ("爆款", "标题", "脚本", "互动", "标签", "发布时间", "置顶评论", "封面"), "match_all": True},
+}
 LIFE_CONTENT_KEYWORDS = (
     "生活",
     "美食",
@@ -411,6 +436,118 @@ def safe_metric_int(value: object) -> int:
         return int(float(text) * multiplier)
     except Exception:
         return 0
+
+
+def extract_knowledge_text_field(text: object, field_name: str) -> str:
+    raw = str(text or "")
+    if not raw or not field_name:
+        return ""
+
+    field_pattern = re.escape(str(field_name))
+    full_match = re.search(rf'"{field_pattern}"\s*:\s*"((?:\\.|[^"])*)"', raw)
+    if full_match:
+        try:
+            return json.loads(f'"{full_match.group(1)}"').strip()
+        except Exception:
+            return full_match.group(1).replace('\\"', '"').replace("\\\\", "\\").strip()
+
+    partial_match = re.search(rf'"{field_pattern}"\s*:\s*"([^\n]*)', raw)
+    return partial_match.group(1).rstrip('", ').strip() if partial_match else ""
+
+
+def normalize_knowledge_search_category(value: object) -> str:
+    clean = str(value or "").strip()
+    return clean if clean in KNOWLEDGE_SEARCH_CATEGORY_RULES else ""
+
+
+def infer_knowledge_item_broad_partition(item: dict) -> str:
+    metadata = item.get("metadata") or {}
+    board_type = str(metadata.get("board_type") or extract_knowledge_text_field(item.get("text"), "榜单来源") or "").strip().lower()
+    if board_type.startswith("分区热门榜:"):
+        return board_type.split(":", 1)[1].strip()
+
+    partition = str(metadata.get("partition") or extract_knowledge_text_field(item.get("text"), "分区") or "").strip().lower()
+    title = str(metadata.get("title") or extract_knowledge_text_field(item.get("text"), "视频标题") or "").strip().lower()
+    combined = f"{partition} {title}"
+    if any(token in combined for token in ["游戏", "电竞", "手游", "端游"]):
+        return "game"
+    if any(token in combined for token in ["科技", "数码", "手机", "电脑", "汽车", "ai", "软件"]):
+        return "tech"
+    if any(token in combined for token in ["生活", "日常", "vlog", "美食", "探店", "家居", "萌宠", "宠物", "体育", "健身", "运动"]):
+        return "life"
+    if any(token in combined for token in ["番剧", "国创", "纪录片", "电影", "电视剧", "综艺", "动画", "鬼畜", "翻唱", "音乐", "舞蹈", "宅舞", "街舞", "美妆", "穿搭", "娱乐"]):
+        return "ent"
+    if any(token in combined for token in ["知识", "科普", "学习", "职场", "考研", "面试", "心理", "婚恋", "情感"]):
+        return "knowledge"
+    return ""
+
+
+def knowledge_item_matches_category(item: dict, category: str) -> bool:
+    rule = KNOWLEDGE_SEARCH_CATEGORY_RULES.get(category) or {}
+    if not rule or rule.get("match_all"):
+        return True
+
+    metadata = item.get("metadata") or {}
+    board_type = str(metadata.get("board_type") or extract_knowledge_text_field(item.get("text"), "榜单来源") or "").strip().lower()
+    partition = str(metadata.get("partition") or extract_knowledge_text_field(item.get("text"), "分区") or "").strip().lower()
+    title = str(metadata.get("title") or extract_knowledge_text_field(item.get("text"), "视频标题") or "").strip().lower()
+    combined = " ".join(filter(None, [board_type, partition, title]))
+    broad_partition = infer_knowledge_item_broad_partition(item)
+    allowed_broad = tuple(str(value).strip().lower() for value in rule.get("broad_partitions") or ())
+
+    if broad_partition and allowed_broad and broad_partition not in allowed_broad:
+        return False
+
+    partitions = tuple(str(value).strip().lower() for value in rule.get("partitions") or ())
+    if partition and any(token and token in partition for token in partitions):
+        return True
+
+    keywords = tuple(str(value).strip().lower() for value in rule.get("keywords") or ())
+    if any(token and token in combined for token in keywords):
+        return True
+
+    return bool(rule.get("allow_broad_match") and broad_partition in allowed_broad)
+
+
+def knowledge_chunk_index(item: dict) -> int:
+    metadata = item.get("metadata") or {}
+    value = metadata.get("chunk_index")
+    return safe_int(value) if value is not None else 10**9
+
+
+def collapse_knowledge_matches(matches: list[dict]) -> list[dict]:
+    groups: dict[str, dict] = {}
+    for index, item in enumerate(matches or []):
+        metadata = dict((item or {}).get("metadata") or {})
+        key = str((item or {}).get("id") or metadata.get("document_id") or f"knowledge_doc_{index}")
+        candidate = {
+            **dict(item or {}),
+            "metadata": metadata,
+            "_rank": index,
+            "_chunk_index": knowledge_chunk_index({"metadata": metadata}),
+        }
+        existing = groups.get(key)
+        if existing is None:
+            groups[key] = candidate
+            continue
+
+        next_score = candidate.get("score")
+        prev_score = existing.get("score")
+        try:
+            if next_score is not None and (prev_score is None or float(next_score) < float(prev_score)):
+                existing["score"] = float(next_score)
+        except Exception:
+            pass
+
+        if candidate["_chunk_index"] < existing["_chunk_index"]:
+            existing["text"] = candidate.get("text", existing.get("text", ""))
+            existing["metadata"] = metadata
+            existing["_chunk_index"] = candidate["_chunk_index"]
+            if candidate.get("id"):
+                existing["id"] = candidate["id"]
+
+    ordered = sorted(groups.values(), key=lambda item: item.get("_rank", 0))
+    return [{key: value for key, value in item.items() if not key.startswith("_")} for item in ordered]
 
 
 # 复用文案 Agent 的清洗逻辑来清理文本输出。
@@ -3048,7 +3185,17 @@ def api_knowledge_search():
         return jsonify({"success": False, "error": "请输入检索关键词。"}), 400
     limit = max(1, min(safe_int(request.args.get("limit") or 6), 12))
     try:
-        result = KNOWLEDGE_BASE.retrieve(query, limit=limit)
+        category = normalize_knowledge_search_category(query)
+        candidate_limit = max(limit, 48) if category else limit
+        raw_result = KNOWLEDGE_BASE.retrieve(query, limit=candidate_limit)
+        matches = raw_result.get("matches", [])
+        if category:
+            matches = [item for item in matches if knowledge_item_matches_category(item, category)]
+        result = {
+            "query": query,
+            "category": category,
+            "matches": collapse_knowledge_matches(matches)[:limit],
+        }
         return jsonify({"success": True, "data": result})
     except Exception as exc:
         return jsonify({"success": False, "error": f"检索知识库失败：{exc}"}), 500

@@ -283,6 +283,7 @@ def _ingest_hot_items(board_type: str, items: Iterable[dict], limit: int = 10) -
                         "source": "bilibili_hot_sync",
                         "board_type": board_type,
                         "bvid": bvid,
+                        "title": title,
                         "partition": str(detail.get("tname") or item.get("tname") or "").strip(),
                     },
                 )

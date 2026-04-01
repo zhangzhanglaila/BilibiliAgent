@@ -125,6 +125,21 @@ function parseKnowledgeStructuredPayload(text = '') {
   }
 }
 
+function extractKnowledgeTextField(text = '', field = '') {
+  const raw = String(text || '');
+  const name = String(field || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!raw || !name) return '';
+  const fullMatch = raw.match(new RegExp(`"${name}"\\s*:\\s*"((?:\\\\.|[^"])*)"`, 'u'));
+  if (fullMatch) {
+    return fullMatch[1]
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, '\\')
+      .trim();
+  }
+  const partialMatch = raw.match(new RegExp(`"${name}"\\s*:\\s*"([^\\n]*)`, 'u'));
+  return partialMatch ? partialMatch[1].replace(/[",\s]+$/g, '').trim() : '';
+}
+
 function knowledgeBoardLabel(value = '') {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -152,14 +167,22 @@ function knowledgeCategoryLabel(metadata = {}, payload = null, parsedId = {}, fa
 }
 
 function knowledgeDocumentTitle(item = {}, metadata = {}, payload = null) {
-  const rawTitle = String(payload?.视频标题 || metadata.title || metadata.filename || item.id || metadata.document_id || '未命名文档').trim();
-  const boardType = String(metadata.board_type || payload?.榜单来源 || '').trim();
+  const rawDocId = String(item.id || metadata.document_id || '').trim();
+  const extractedTitle = String(payload?.视频标题 || extractKnowledgeTextField(item.text || '', '视频标题') || metadata.title || '').trim();
+  const extractedPartition = String(payload?.分区 || extractKnowledgeTextField(item.text || '', '分区') || metadata.partition || '').trim();
+  const fallbackTitle = String(metadata.filename || rawDocId || '未命名文档').trim();
+  const titleLooksLikeDocId = !extractedTitle && (
+    fallbackTitle === rawDocId
+    || /^(分区热门榜:|全站热门榜:|每周必看:|入站必刷:|file:)/.test(fallbackTitle)
+    || /BV[0-9A-Za-z]{10}/.test(fallbackTitle)
+  );
+  const cleanTitle = extractedTitle || (titleLooksLikeDocId ? '' : fallbackTitle);
+  const boardType = String(metadata.board_type || payload?.榜单来源 || parseKnowledgeDocumentId(rawDocId).boardType || '').trim();
   const boardLabel = knowledgeBoardLabel(boardType);
-  const partitionLabel = String(payload?.分区 || metadata.partition || '').trim();
-  if (boardLabel && rawTitle) {
-    return [boardLabel, partitionLabel, rawTitle].filter(Boolean).join('：');
+  if (boardLabel) {
+    return [boardLabel, extractedPartition, cleanTitle].filter(Boolean).join('：') || boardLabel;
   }
-  return rawTitle;
+  return cleanTitle || extractedPartition || fallbackTitle;
 }
 
 function knowledgeDocumentTags(metadata = {}, context = {}) {
@@ -185,6 +208,44 @@ function knowledgeDocumentTags(metadata = {}, context = {}) {
   });
 
   return list;
+}
+
+function knowledgeChunkIndex(metadata = {}) {
+  const value = Number(metadata?.chunk_index);
+  return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+
+function groupKnowledgeDocuments(items = []) {
+  const groups = new Map();
+  (Array.isArray(items) ? items : []).forEach((item, index) => {
+    const metadata = item?.metadata && typeof item.metadata === 'object' ? item.metadata : {};
+    const key = String(item?.id || metadata.document_id || `knowledge_doc_${index}`);
+    const chunkIndex = knowledgeChunkIndex(metadata);
+    const existing = groups.get(key);
+    if (!existing) {
+      groups.set(key, {
+        ...item,
+        metadata: { ...metadata },
+        _chunkIndex: chunkIndex,
+      });
+      return;
+    }
+
+    const nextScore = Number(item?.score);
+    const prevScore = Number(existing.score);
+    if (item?.score !== undefined && (!Number.isFinite(prevScore) || (Number.isFinite(nextScore) && nextScore < prevScore))) {
+      existing.score = nextScore;
+    }
+
+    if (chunkIndex < existing._chunkIndex) {
+      existing.text = item?.text || existing.text;
+      existing.metadata = { ...metadata };
+      existing._chunkIndex = chunkIndex;
+      if (item?.id) existing.id = item.id;
+    }
+  });
+
+  return Array.from(groups.values()).map(({ _chunkIndex, ...item }) => item);
 }
 
 // 读取单个匹配选择器的 DOM 节点。
@@ -682,7 +743,7 @@ function knowledgeDocumentsView(items = [], options = {}) {
   const title = options.title || '知识库内容';
   const note = options.note || '';
   const query = options.query || '';
-  const docs = Array.isArray(items) ? items : [];
+  const docs = groupKnowledgeDocuments(items);
   if (!docs.length) {
     return infoCard(title, note || '当前没有可展示的知识库内容。');
   }
