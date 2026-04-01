@@ -1,6 +1,17 @@
 const MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a3 3 0 0 1 3 3v6a3 3 0 1 1-6 0V6a3 3 0 0 1 3-3z"></path><path d="M19 11a7 7 0 0 1-14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>';
 const SEND_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4 20-7Z"></path></svg>';
 const INITIAL_RUNTIME = window.__INITIAL_RUNTIME__ || {};
+const KNOWLEDGE_SEARCH_OPTIONS = [
+  '两性 情感 夫妻 坦白局',
+  '男女体验差异',
+  '私密话题 关系相处',
+  '热门 标题 节奏',
+  '脚本结构 互动设计',
+  '标签策略 发布时间',
+  '知识区 科普 结构',
+  '生活区 真实体验',
+  '娱乐区 情绪互动',
+];
 
 const state = {
   videoResolved: null,
@@ -622,6 +633,18 @@ function syncKnowledgeFormStateFromDom() {
   }
 }
 
+// 生成知识库检索下拉选项，保证当前值也能被正确回显。
+function knowledgeSearchOptionsHtml() {
+  const current = String(state.knowledgeForm.searchQuery || '').trim();
+  const options = current && !KNOWLEDGE_SEARCH_OPTIONS.includes(current)
+    ? [current, ...KNOWLEDGE_SEARCH_OPTIONS]
+    : KNOWLEDGE_SEARCH_OPTIONS.slice();
+  return [
+    '<option value="">请选择检索主题</option>',
+    ...options.map(option => `<option value="${escapeHtml(option)}"${option === current ? ' selected' : ''}>${escapeHtml(option)}</option>`),
+  ].join('');
+}
+
 // 根据当前子 Tab 渲染唯一的知识库操作面板，确保按钮一对一不混用。
 function knowledgeActionPane(tab = state.knowledgeActiveSubtab) {
   if (tab === 'sync') {
@@ -664,14 +687,16 @@ function knowledgeActionPane(tab = state.knowledgeActiveSubtab) {
         <div class="knowledge-action-row">
           <label class="field knowledge-field">
             <span class="field__label">知识库检索关键词</span>
-            <input id="knowledgeSearchInput" value="${escapeHtml(state.knowledgeForm.searchQuery || '')}" placeholder="例如：两性 情感 夫妻 坦白局 / 热门 标题 节奏 / 科普 结构" />
+            <select id="knowledgeSearchInput">
+              ${knowledgeSearchOptionsHtml()}
+            </select>
           </label>
           <button class="action-btn action-btn--primary action-btn--inline" id="knowledgeSearchBtn" type="button">
             <span class="action-btn__title">按关键词检索知识库</span>
             <span class="action-btn__desc">执行语义检索</span>
           </button>
         </div>
-        <div class="field__hint">按关键词检索向量库，展示命中文档和元数据。</div>
+        <div class="field__hint">点击下拉框选择检索主题，再按关键词检索知识库。</div>
       </div>
     `;
   }
@@ -1810,13 +1835,20 @@ function initEvents() {
   });
   $('#knowledgeActionHost')?.addEventListener('input', event => {
     const target = event.target;
-    if (!(target instanceof HTMLInputElement)) return;
+    if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLSelectElement)) return;
     if (target.id === 'knowledgeUpdateLimit') {
       state.knowledgeForm.updateLimit = Math.max(1, Math.min(20, Number(target.value || 10) || 10));
     }
     if (target.id === 'knowledgeViewLimit') {
       state.knowledgeForm.viewLimit = Math.max(1, Math.min(20, Number(target.value || 6) || 6));
     }
+    if (target.id === 'knowledgeSearchInput') {
+      state.knowledgeForm.searchQuery = target.value || '';
+    }
+  });
+  $('#knowledgeActionHost')?.addEventListener('change', event => {
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement)) return;
     if (target.id === 'knowledgeSearchInput') {
       state.knowledgeForm.searchQuery = target.value || '';
     }
