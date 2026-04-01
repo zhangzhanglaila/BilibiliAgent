@@ -2,124 +2,37 @@ const MIC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 const SEND_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"></path><path d="m22 2-7 20-4-9-9-4 20-7Z"></path></svg>';
 const INITIAL_RUNTIME = window.__INITIAL_RUNTIME__ || {};
 const KNOWLEDGE_SEARCH_OPTIONS = [
-  '番剧区・细分垂类｜新番速报｜剧情前瞻解读',
-  '番剧区・细分垂类｜番剧解说｜全集剧情梳理',
-  '番剧区・细分垂类｜番剧吐槽｜雷点槽点盘点',
-  '番剧区・细分垂类｜名场面｜高燃片段剪辑',
-  '番剧区・细分垂类｜番剧二创｜CP 向内容创作',
-  '国创区・细分垂类｜国漫解析｜剧情深度解读',
-  '国创区・细分垂类｜国创二创｜混剪 / 配音创作',
-  '国创区・细分垂类｜国产动画｜测评与推荐',
-  '国创区・细分垂类｜国漫设定｜世界观科普',
-  '纪录片区・细分垂类｜人文纪实｜纪录片解说',
-  '纪录片区・细分垂类｜自然科普｜纪录片精华剪辑',
-  '纪录片区・细分垂类｜历史纪录片｜事件梳理',
-  '纪录片区・细分垂类｜纪实向｜真实故事叙事',
-  '电影区・细分垂类｜院线影评｜新片点评',
-  '电影区・细分垂类｜经典电影｜深度解析',
-  '电影区・细分垂类｜冷门佳片｜宝藏推荐',
-  '电影区・细分垂类｜电影幕后｜冷知识科普',
-  '电影区・细分垂类｜剧情梳理｜全片脉络讲解',
-  '电视剧区・细分垂类｜国产剧｜吐槽与解析',
-  '电视剧区・细分垂类｜海外剧｜分集解说',
-  '电视剧区・细分垂类｜剧集精华｜高能片段剪辑',
-  '电视剧区・细分垂类｜追剧攻略｜观剧指南',
-  '综艺区・细分垂类｜综艺名场面｜高光盘点',
-  '综艺区・细分垂类｜真人秀｜剧情向解读',
-  '综艺区・细分垂类｜综艺吐槽｜搞笑整活',
-  '综艺区・细分垂类｜综艺热点｜话题梳理',
-  '动画区・细分垂类｜MAD/AMV｜剪辑创作思路',
-  '动画区・细分垂类｜动画杂谈｜作品点评',
-  '动画区・细分垂类｜特摄解析｜剧情 / 设定讲解',
-  '动画区・细分垂类｜手办模玩｜测评与分享',
-  '动画区・细分垂类｜动画配音｜二创创作',
-  '游戏区・细分垂类｜手游攻略｜玩法 / 抽卡教学',
-  '游戏区・细分垂类｜端游实况｜通关解说',
-  '游戏区・细分垂类｜电竞赛事｜精彩复盘',
-  '游戏区・细分垂类｜独立游戏｜小众佳作推荐',
-  '游戏区・细分垂类｜怀旧游戏｜情怀向内容',
-  '游戏区・细分垂类｜游戏剧情｜深度解读',
-  '鬼畜区・细分垂类｜鬼畜调教｜卡点剪辑思路',
-  '鬼畜区・细分垂类｜音 MAD｜音频创作设计',
-  '鬼畜区・细分垂类｜人力 VOCALOID｜调教技巧',
-  '鬼畜区・细分垂类｜鬼畜剧场｜脚本结构',
-  '鬼畜区・细分垂类｜梗向鬼畜｜热点二创',
-  '音乐区・细分垂类｜翻唱教程｜演唱技巧',
-  '音乐区・细分垂类｜热歌盘点｜榜单解析',
-  '音乐区・细分垂类｜音乐教学｜乐器 / 乐理',
-  '音乐区・细分垂类｜原创音乐｜创作思路',
-  '音乐区・细分垂类｜古风音乐｜词曲设计',
-  '音乐区・细分垂类｜音乐混剪｜踩点剪辑',
-  '舞蹈区・细分垂类｜宅舞翻跳｜教程拆解',
-  '舞蹈区・细分垂类｜街舞教学｜基础动作',
-  '舞蹈区・细分垂类｜国风舞蹈｜编创思路',
-  '舞蹈区・细分垂类｜舞蹈舞台｜表演解析',
-  '舞蹈区・细分垂类｜网红舞｜手势舞教程',
-  '科技数码区・细分垂类｜数码开箱｜新品测评',
-  '科技数码区・细分垂类｜科技资讯｜行业解读',
-  '科技数码区・细分垂类｜手机电脑｜科普与技巧',
-  '科技数码区・细分垂类｜数码干货｜使用教程',
-  '汽车区・细分垂类｜汽车测评｜性能 / 体验',
-  '汽车区・细分垂类｜用车技巧｜驾驶 / 保养',
-  '汽车区・细分垂类｜新车解析｜车型盘点',
-  '汽车区・细分垂类｜汽车科普｜知识讲解',
-  '汽车区・细分垂类｜自驾攻略｜出行指南',
-  '时尚美妆区・细分垂类｜美妆教程｜妆容教学',
-  '时尚美妆区・细分垂类｜护肤科普｜成分 / 技巧',
-  '时尚美妆区・细分垂类｜穿搭分享｜风格搭配',
-  '时尚美妆区・细分垂类｜彩妆测评｜产品实测',
-  '时尚美妆区・细分垂类｜时尚干货｜变美技巧',
-  '体育运动区・细分垂类｜赛事解说｜热点复盘',
-  '体育运动区・细分垂类｜运动教学｜技巧训练',
-  '体育运动区・细分垂类｜健身科普｜减脂 / 增肌',
-  '体育运动区・细分垂类｜体育热点｜话题分析',
-  '体育运动区・细分垂类｜球类教学｜基础玩法',
-  '动物圈・细分垂类｜萌宠日常｜生活记录',
-  '动物圈・细分垂类｜宠物科普｜饲养知识',
-  '动物圈・细分垂类｜动物趣事｜搞笑盘点',
-  '动物圈・细分垂类｜萌宠剪辑｜创作技巧',
-  '生活区・细分垂类｜日常 Vlog｜真实生活记录',
-  '生活区・细分垂类｜个人经历｜故事向叙事脚本',
-  '生活区・细分垂类｜生活避坑｜踩雷经验分享',
-  '生活区・细分垂类｜沉浸式体验｜探店 / 体验类',
-  '生活区・细分垂类｜家居好物｜实测与种草类',
-  '生活区・细分垂类｜美食日常｜做饭 / 探店测评',
-  '知识科普・细分垂类｜社科科普｜人文历史类结构',
-  '知识科普・细分垂类｜科技科普｜数码 / 互联网讲解',
-  '知识科普・细分垂类｜医学健康｜生理常识科普',
-  '知识科普・细分垂类｜学习干货｜知识点拆解逻辑',
-  '知识科普・细分垂类｜硬核科普｜通俗化表达技巧',
-  '知识科普・细分垂类｜冷知识盘点｜猎奇科普结构',
-  '娱乐热点・细分垂类｜热点吐槽｜社会事件评论',
-  '娱乐热点・细分垂类｜娱乐八卦｜明星 / 综艺点评',
-  '娱乐热点・细分垂类｜搞笑整蛊｜整活互动设计',
-  '娱乐热点・细分垂类｜影视解说｜电影 / 剧集讲解',
-  '娱乐热点・细分垂类｜强情绪冲突｜争议话题标题',
-  '职场成长・细分垂类｜职场经验｜打工人避坑干货',
-  '职场成长・细分垂类｜校园学习｜考研 / 考证方法',
-  '职场成长・细分垂类｜逆袭成长｜个人提升叙事',
-  '职场成长・细分垂类｜副业搞钱｜兼职项目分享',
-  '职场成长・细分垂类｜求职面试｜简历 / 面试技巧',
-  '情感婚恋・细分垂类｜婚姻日常｜夫妻相处坦白局',
-  '情感婚恋・细分垂类｜情侣矛盾｜吵架修复与和好',
-  '情感婚恋・细分垂类｜暧昧拉扯｜心动话术与试探',
-  '情感婚恋・细分垂类｜前任处理｜断联与边界感',
-  '情感婚恋・细分垂类｜亲密关系｜私密话题与沟通',
-  '情感婚恋・细分垂类｜脱单技巧｜相亲与搭讪思路',
-  '两性心理・细分垂类｜男女思维差异｜行为逻辑对比',
-  '两性心理・细分垂类｜情绪共鸣｜共情类内容结构',
-  '两性心理・细分垂类｜高情商沟通｜聊天话术技巧',
-  '两性心理・细分垂类｜安全感构建｜信任建立方式',
-  '两性心理・细分垂类｜人性底层逻辑｜心理洞察类',
-  '通用爆款・创作技巧｜前三秒留人｜黄金开场结构',
-  '通用爆款・创作技巧｜爆款标题｜钩子 + 悬念设计',
-  '通用爆款・创作技巧｜脚本节奏｜快慢节奏编排',
-  '通用爆款・创作技巧｜评论区互动｜引导留言话术',
-  '通用爆款・创作技巧｜标签策略｜精准流量标签',
-  '通用爆款・创作技巧｜发布时间｜最优发布时段',
-  '通用爆款・创作技巧｜置顶评论｜引流互动设计',
-  '通用爆款・创作技巧｜封面文案｜吸睛封面逻辑',
+  '番剧',
+  '国创',
+  '纪录片',
+  '电影',
+  '电视剧',
+  '综艺',
+  '动画',
+  '游戏',
+  '鬼畜',
+  '音乐',
+  '舞蹈',
+  '科技数码',
+  '汽车',
+  '时尚美妆',
+  '体育运动',
+  '动物',
+  '生活',
+  '知识科普',
+  '娱乐热点',
+  '职场成长',
+  '情感婚恋',
+  '两性心理',
+  '通用爆款',
 ];
+const KNOWLEDGE_PARTITION_LABELS = {
+  knowledge: '知识',
+  tech: '科技',
+  life: '生活',
+  game: '游戏',
+  ent: '娱乐',
+};
 
 const state = {
   videoResolved: null,
@@ -172,6 +85,115 @@ const state = {
   recognition: null,
   isListening: false,
 };
+
+function knowledgeMajorTopicLabel(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const head = raw.split('｜')[0].trim();
+  return head.includes('・') ? head.split('・')[0].trim() : head;
+}
+
+function knowledgePartitionLabel(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  return KNOWLEDGE_PARTITION_LABELS[raw.toLowerCase()] || raw;
+}
+
+function parseKnowledgeDocumentId(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return { boardType: '', partition: '', bvid: '' };
+  }
+  const partitionMatch = raw.match(/^分区热门榜:([^:]+)/);
+  const boardMatch = raw.match(/^(全站热门榜|每周必看|入站必刷)/);
+  const bvidMatch = raw.match(/BV[0-9A-Za-z]{10}/);
+  return {
+    boardType: partitionMatch ? `分区热门榜:${partitionMatch[1]}` : (boardMatch ? boardMatch[1] : ''),
+    partition: partitionMatch ? partitionMatch[1] : '',
+    bvid: bvidMatch ? bvidMatch[0] : '',
+  };
+}
+
+function parseKnowledgeStructuredPayload(text = '') {
+  const raw = String(text || '').trim();
+  if (!raw || !raw.startsWith('{')) return null;
+  try {
+    const payload = JSON.parse(raw);
+    return payload && typeof payload === 'object' ? payload : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+function knowledgeBoardLabel(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('分区热门榜:')) return '分区热门榜';
+  return raw.split(':')[0].trim();
+}
+
+function knowledgeSourceLabel(metadata = {}, payload = null, parsedId = {}) {
+  const boardLabel = knowledgeBoardLabel(metadata.board_type || payload?.榜单来源 || parsedId.boardType || '');
+  const source = String(metadata.source || '').trim();
+  if (source === 'uploaded_file') return '上传文件';
+  if (source === 'bilibili_hot_sync') return boardLabel || '热门样本同步';
+  return boardLabel || source;
+}
+
+function knowledgeCategoryLabel(metadata = {}, payload = null, parsedId = {}, fallbackQuery = '') {
+  const boardType = String(metadata.board_type || payload?.榜单来源 || parsedId.boardType || '').trim();
+  if (boardType.startsWith('分区热门榜:')) {
+    return knowledgePartitionLabel(boardType.slice('分区热门榜:'.length).split(':')[0]);
+  }
+  if (parsedId.partition) {
+    return knowledgePartitionLabel(parsedId.partition);
+  }
+  return knowledgeMajorTopicLabel(fallbackQuery);
+}
+
+function knowledgeDocumentTitle(item = {}, metadata = {}, payload = null) {
+  return String(payload?.视频标题 || metadata.title || metadata.filename || item.id || metadata.document_id || '未命名文档').trim();
+}
+
+function knowledgeDocumentDisplayId(value = '', context = {}) {
+  const docId = String(value || '').trim();
+  if (!docId) return '';
+  const parsedId = parseKnowledgeDocumentId(docId);
+  const boardLabel = knowledgeBoardLabel(context.boardType || parsedId.boardType || '');
+  const title = String(context.title || '').trim();
+  if (boardLabel && title) return `${boardLabel}：${title}`;
+  return docId;
+}
+
+function knowledgeDocumentTags(metadata = {}, context = {}) {
+  const list = [];
+  if (context.category) list.push(`分类：${context.category}`);
+  if (context.source) list.push(`来源：${context.source}`);
+  if (context.bvid) list.push(`BVID：${context.bvid}`);
+  if (context.filename && context.filename !== context.title) list.push(`文件：${context.filename}`);
+  if (context.sourceChannel === 'web_upload') {
+    list.push('导入：网页上传');
+  } else if (context.sourceChannel) {
+    list.push(`导入：${context.sourceChannel}`);
+  }
+
+  const hiddenKeys = new Set(['source', 'board_type', 'partition', 'filename', 'source_channel', 'bvid', 'title', 'content_hash']);
+  Object.entries(metadata).forEach(([key, value]) => {
+    if (hiddenKeys.has(key) || value === null || value === undefined || String(value).trim() === '') return;
+    if (key === 'document_id') {
+      const docId = knowledgeDocumentDisplayId(value, context);
+      if (docId && docId !== context.title) list.push(`文档：${docId}`);
+      return;
+    }
+    if (key === 'chunk_index') {
+      list.push(`分片：${value}`);
+      return;
+    }
+    list.push(`${key}: ${value}`);
+  });
+
+  return list;
+}
 
 // 读取单个匹配选择器的 DOM 节点。
 const $ = selector => document.querySelector(selector);
@@ -667,6 +689,7 @@ function knowledgeStatusBarView(payload = {}) {
 function knowledgeDocumentsView(items = [], options = {}) {
   const title = options.title || '知识库内容';
   const note = options.note || '';
+  const query = options.query || '';
   const docs = Array.isArray(items) ? items : [];
   if (!docs.length) {
     return infoCard(title, note || '当前没有可展示的知识库内容。');
@@ -680,13 +703,33 @@ function knowledgeDocumentsView(items = [], options = {}) {
       <div class="knowledge-doc-list">
         ${docs.map((item, index) => {
           const metadata = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
-          const tagsList = Object.entries(metadata).slice(0, 6).map(([key, value]) => `${key}: ${value}`);
+          const payload = parseKnowledgeStructuredPayload(item.text || '');
+          const parsedId = parseKnowledgeDocumentId(item.id || metadata.document_id || '');
+          const docTitle = knowledgeDocumentTitle(item, metadata, payload);
+          const docCategory = knowledgeCategoryLabel(metadata, payload, parsedId, query);
+          const docSource = knowledgeSourceLabel(metadata, payload, parsedId);
+          const docBvid = String(metadata.bvid || payload?.BVID || parsedId.bvid || '').trim();
+          const tagsList = knowledgeDocumentTags(metadata, {
+            title: docTitle,
+            category: docCategory,
+            source: docSource,
+            boardType: String(metadata.board_type || payload?.榜单来源 || parsedId.boardType || '').trim(),
+            bvid: docBvid,
+            filename: String(metadata.filename || '').trim(),
+            sourceChannel: String(metadata.source_channel || '').trim(),
+          }).slice(0, 6);
+          const metaLine = [`DOC ${index + 1}`];
+          if (docCategory) {
+            metaLine.push(`分类：${docCategory}`);
+          } else if (docSource) {
+            metaLine.push(`来源：${docSource}`);
+          }
           return `
             <article class="knowledge-doc-item">
               <div class="block-title">
                 <div>
-                  <div class="meta-line">DOC ${index + 1}</div>
-                  <h4>${escapeHtml(item.id || metadata.document_id || '未命名文档')}</h4>
+                  <div class="meta-line">${escapeHtml(metaLine.join(' · '))}</div>
+                  <h4>${escapeHtml(docTitle)}</h4>
                 </div>
                 <div class="knowledge-doc-item__actions">
                   ${item.score !== undefined ? `<span class="result-badge">相关性 ${escapeHtml(String(Number(item.score).toFixed(4)))}</span>` : ''}
@@ -748,7 +791,7 @@ function knowledgeSearchOptionsHtml() {
     ? [current, ...KNOWLEDGE_SEARCH_OPTIONS]
     : KNOWLEDGE_SEARCH_OPTIONS.slice();
   return [
-    '<option value="">请选择检索主题</option>',
+    '<option value="">请选择检索分类</option>',
     ...options.map(option => `<option value="${escapeHtml(option)}"${option === current ? ' selected' : ''}>${escapeHtml(option)}</option>`),
   ].join('');
 }
@@ -804,7 +847,7 @@ function knowledgeActionPane(tab = state.knowledgeActiveSubtab) {
             <span class="action-btn__desc">执行语义检索</span>
           </button>
         </div>
-        <div class="field__hint">点击下拉框选择检索主题，再按关键词检索知识库。</div>
+        <div class="field__hint">点击下拉框选择一级分类，再检索知识库。</div>
       </div>
     `;
   }
@@ -921,10 +964,12 @@ async function searchKnowledgeContent() {
   renderKnowledgeResult(loadingCard('正在检索知识库', '系统正在基于当前关键词执行语义检索。', ['发送查询', '执行检索', '渲染命中']), 'search');
   try {
     const data = await requestGetJson(`/api/knowledge/search?q=${encodeURIComponent(query)}&limit=${encodeURIComponent(limit)}`);
+    const displayQuery = knowledgeMajorTopicLabel(query) || query;
     renderKnowledgeResult(
       knowledgeDocumentsView(data.matches || [], {
-        title: `检索结果：${query}`,
-        note: `当前关键词共返回 ${Array.isArray(data.matches) ? data.matches.length : 0} 条命中结果。`,
+        title: `检索结果：${displayQuery}`,
+        note: `${displayQuery !== query ? '当前分类' : '当前关键词'}共返回 ${Array.isArray(data.matches) ? data.matches.length : 0} 条命中结果。`,
+        query,
       }),
       'search',
     );
