@@ -162,9 +162,15 @@ def print_kb_update_result(result: dict) -> None:
     print("\n=== 知识库更新结果 ===")
     print(f"状态：{result.get('status')}")
     print(f"总写入：{result.get('total_saved', 0)}")
+    print(f"总覆盖：{result.get('total_updated', 0)}")
     print(f"总失败：{result.get('total_failed', 0)}")
     for board in result.get("boards", []):
-        print(f"- {board.get('board_type')}: saved={board.get('saved_count', 0)} failed={len(board.get('failed', []))}")
+        print(
+            f"- {board.get('board_type')}: "
+            f"saved={board.get('saved_count', 0)} "
+            f"updated={board.get('updated_count', 0)} "
+            f"failed={len(board.get('failed', []))}"
+        )
 
 
 # 构建命令行参数解析器，定义所有可用子命令和参数。

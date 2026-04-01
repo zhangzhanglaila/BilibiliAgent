@@ -691,10 +691,10 @@ async function updateKnowledgeBase() {
     const result = data.update_result || {};
     const boards = Array.isArray(result.boards) ? result.boards : [];
     const boardSummary = boards.length
-      ? `<div class="summary-strip summary-strip--metrics">${boards.map(item => metricCard(item.board_type || '榜单', `写入 ${num(item.saved_count || 0)}`, `失败 ${Array.isArray(item.failed) ? item.failed.length : 0}`)).join('')}</div>`
+      ? `<div class="summary-strip summary-strip--metrics">${boards.map(item => metricCard(item.board_type || '榜单', `写入 ${num(item.saved_count || 0)}`, `覆盖 ${num(item.updated_count || 0)} / 失败 ${Array.isArray(item.failed) ? item.failed.length : 0}`)).join('')}</div>`
       : '';
     const summaryHtml = `
-      ${infoCard('更新完成', `本次共追加写入 ${result.total_saved || 0} 条热门样本，失败 ${result.total_failed || 0} 条。`)}
+      ${infoCard('更新完成', `本次共写入 ${result.total_saved || 0} 条热门样本，其中覆盖更新 ${result.total_updated || 0} 条，失败 ${result.total_failed || 0} 条。`)}
       ${boardSummary}
     `;
     renderKnowledgeStatus(data.knowledge_status || {}, summaryHtml);

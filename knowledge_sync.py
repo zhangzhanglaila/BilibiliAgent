@@ -1,11 +1,11 @@
 """Knowledge base ingestion and synchronization helpers."""
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
 import tempfile
-import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -14,7 +14,7 @@ from typing import Any, Dict, Iterable, List
 from bilibili_api import comment, hot, sync, video, video_zone
 
 from config import CONFIG
-from knowledge_base import Document, add_document
+from knowledge_base import Document, add_document, delete_documents, document_exists
 
 try:
     from docx import Document as DocxDocument
@@ -98,7 +98,11 @@ def ingest_uploaded_file(filename: str, raw_bytes: bytes, metadata: Dict[str, An
     text = read_uploaded_file_content(filename, raw_bytes)
     if not text:
         raise ValueError("文件内容为空，无法写入知识库。")
-    document_id = f"file:{Path(filename).stem}:{int(time.time())}"
+    content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    document_id = f"file:{content_hash}"
+    existed = document_exists(metadata_filter={"source": "uploaded_file", "content_hash": content_hash})
+    if existed:
+        delete_documents(metadata_filter={"source": "uploaded_file", "content_hash": content_hash})
     result = add_document(
         Document(
             id=document_id,
@@ -106,11 +110,13 @@ def ingest_uploaded_file(filename: str, raw_bytes: bytes, metadata: Dict[str, An
             metadata={
                 "source": "uploaded_file",
                 "filename": Path(filename).name,
+                "content_hash": content_hash,
                 **(metadata or {}),
             },
         )
     )
     result["filename"] = Path(filename).name
+    result["content_hash"] = content_hash
     return result
 
 
@@ -253,8 +259,9 @@ def _video_tags(video_obj: dict) -> List[str]:
 
 def _ingest_hot_items(board_type: str, items: Iterable[dict], limit: int = 10) -> Dict[str, Any]:
     saved = 0
+    updated = 0
     failed: List[str] = []
-    for index, item in enumerate(list(items)[:limit], start=1):
+    for item in list(items)[:limit]:
         bvid = str(item.get("bvid") or "").strip()
         if not bvid:
             continue
@@ -264,9 +271,13 @@ def _ingest_hot_items(board_type: str, items: Iterable[dict], limit: int = 10) -
         hotwords = _comment_hotwords(aid) if aid > 0 else []
         text = _structured_video_text(board_type, item, detail, tags, hotwords)
         try:
-            add_document(
+            document_id = f"{board_type}:{bvid}"
+            existed = document_exists(metadata_filter={"source": "bilibili_hot_sync", "board_type": board_type, "bvid": bvid})
+            if existed:
+                delete_documents(metadata_filter={"source": "bilibili_hot_sync", "board_type": board_type, "bvid": bvid})
+            result = add_document(
                 Document(
-                    id=f"{board_type}:{bvid}:{int(time.time())}:{index}",
+                    id=document_id,
                     text=text,
                     metadata={
                         "source": "bilibili_hot_sync",
@@ -277,9 +288,11 @@ def _ingest_hot_items(board_type: str, items: Iterable[dict], limit: int = 10) -
                 )
             )
             saved += 1
+            if existed or result.get("status") == "updated":
+                updated += 1
         except Exception as exc:
             failed.append(f"{board_type}:{bvid}:{exc}")
-    return {"board_type": board_type, "saved_count": saved, "failed": failed}
+    return {"board_type": board_type, "saved_count": saved, "updated_count": updated, "failed": failed}
 
 
 def crawl_and_store_bilibili_hot_videos(per_board_limit: int = 10) -> Dict[str, Any]:
@@ -310,6 +323,7 @@ def crawl_and_store_bilibili_hot_videos(per_board_limit: int = 10) -> Dict[str, 
         "status": "ok",
         "boards": summary,
         "total_saved": sum(item.get("saved_count", 0) for item in summary),
+        "total_updated": sum(item.get("updated_count", 0) for item in summary),
         "total_failed": sum(len(item.get("failed", [])) for item in summary),
     }
 

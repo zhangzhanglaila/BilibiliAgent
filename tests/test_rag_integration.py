@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,8 +21,12 @@ from tools.search_tool import SearchTool
 
 
 class RagIntegrationTests(unittest.TestCase):
+    def _make_tempdir(self) -> str:
+        return tempfile.mkdtemp()
+
     def test_knowledge_base_add_and_retrieve(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
+        tempdir = self._make_tempdir()
+        try:
             kb = KnowledgeBase(persist_directory=tempdir, collection_name="test_kb")
             if kb.backend == "disabled":
                 with self.assertRaises(RuntimeError):
@@ -46,9 +51,12 @@ class RagIntegrationTests(unittest.TestCase):
 
             self.assertTrue(result["matches"])
             self.assertIn("夫妻坦白局", result["matches"][0]["text"])
+        finally:
+            shutil.rmtree(tempdir, ignore_errors=True)
 
     def test_long_term_memory_save_and_retrieve(self) -> None:
-        with tempfile.TemporaryDirectory() as tempdir:
+        tempdir = self._make_tempdir()
+        try:
             memory = LongTermMemory(persist_directory=tempdir, collection_name="test_memory")
             if getattr(memory, "backend", "disabled") == "disabled":
                 with self.assertRaises(RuntimeError):
@@ -68,6 +76,43 @@ class RagIntegrationTests(unittest.TestCase):
 
             self.assertTrue(result["history"])
             self.assertIn("情侣日常记录", result["history"][0]["text"])
+        finally:
+            shutil.rmtree(tempdir, ignore_errors=True)
+
+    def test_knowledge_base_overwrites_same_document_id(self) -> None:
+        tempdir = self._make_tempdir()
+        try:
+            kb = KnowledgeBase(persist_directory=tempdir, collection_name="test_kb_overwrite")
+            if kb.backend == "disabled":
+                with self.assertRaises(RuntimeError):
+                    kb.count()
+                return
+
+            kb.add_document(
+                Document(
+                    id="hot:BV1demo",
+                    text="旧版本：播放量 100 点赞量 10",
+                    metadata={"source": "bilibili_hot_sync", "board_type": "全站热门榜", "bvid": "BV1demo"},
+                )
+            )
+            first_count = kb.count()
+
+            result = kb.add_document(
+                Document(
+                    id="hot:BV1demo",
+                    text="新版本：播放量 200 点赞量 20",
+                    metadata={"source": "bilibili_hot_sync", "board_type": "全站热门榜", "bvid": "BV1demo"},
+                )
+            )
+            second_count = kb.count()
+            retrieved = kb.retrieve("播放量 200 点赞量 20", limit=2)
+
+            self.assertEqual(result["status"], "updated")
+            self.assertEqual(first_count, second_count)
+            self.assertTrue(retrieved["matches"])
+            self.assertIn("新版本", retrieved["matches"][0]["text"])
+        finally:
+            shutil.rmtree(tempdir, ignore_errors=True)
 
     def test_search_tool_returns_structured_warning_without_key(self) -> None:
         tool = SearchTool(api_key="")
@@ -103,7 +148,8 @@ class RagIntegrationTests(unittest.TestCase):
         self.assertIn("optimize", result["plan_steps"])
 
     def test_ingest_uploaded_file_uses_add_document(self) -> None:
-        with patch("knowledge_sync.add_document") as mocked_add_document:
+        with patch("knowledge_sync.add_document") as mocked_add_document, patch("knowledge_sync.document_exists") as mocked_exists:
+            mocked_exists.return_value = False
             mocked_add_document.return_value = {"status": "ok", "document_id": "file:test:1", "chunk_count": 2}
 
             result = ingest_uploaded_file("test.md", "# Sample\n\nB站两性情感选题案例".encode("utf-8"))
@@ -114,6 +160,7 @@ class RagIntegrationTests(unittest.TestCase):
             document = mocked_add_document.call_args.args[0]
             self.assertIsInstance(document, Document)
             self.assertIn("B站两性情感选题案例", document.text)
+            self.assertTrue(str(document.id).startswith("file:"))
 
     def test_update_chroma_knowledge_base_delegates_to_crawler(self) -> None:
         with patch("knowledge_sync.crawl_and_store_bilibili_hot_videos") as mocked_crawler:

@@ -181,12 +181,21 @@ class KnowledgeBase:
         self._require_vector_backend()
         return None
 
+    def _where_clause(self, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
+        filters = dict(metadata_filter or {})
+        if not filters:
+            return None
+        if len(filters) == 1:
+            key, value = next(iter(filters.items()))
+            return {key: {"$eq": value}}
+        return {"$and": [{key: {"$eq": value}} for key, value in filters.items()]}
+
     def sample(self, limit: int = 10, offset: int = 0, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
         collection = self._active_collection()
         payload = collection.get(
             limit=max(1, min(int(limit or 10), 50)),
             offset=max(0, int(offset or 0)),
-            where=metadata_filter or None,
+            where=self._where_clause(metadata_filter),
             include=["documents", "metadatas"],
         )
         ids = payload.get("ids") or []
@@ -203,11 +212,35 @@ class KnowledgeBase:
             )
         return {"items": items, "limit": limit, "offset": offset}
 
+    def exists(self, document_id: str | None = None, metadata_filter: Dict[str, Any] | None = None) -> bool:
+        collection = self._active_collection()
+        where = dict(metadata_filter or {})
+        if document_id:
+            where["document_id"] = document_id
+        payload = collection.get(limit=1, where=self._where_clause(where), include=["metadatas"])
+        return bool(payload.get("ids"))
+
+    def delete(self, document_id: str | None = None, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        collection = self._active_collection()
+        where = dict(metadata_filter or {})
+        if document_id:
+            where["document_id"] = document_id
+        if not where:
+            raise ValueError("删除知识库文档时必须提供 document_id 或 metadata_filter。")
+        clause = self._where_clause(where)
+        payload = collection.get(where=clause, include=["metadatas"])
+        ids = payload.get("ids") or []
+        if ids:
+            collection.delete(where=clause)
+        return {"deleted_count": len(ids), "where": where}
+
     def add_document(self, document: Document) -> Dict[str, Any]:
         self._require_vector_backend()
         chunks = self._split_text(document.text)
         if not chunks:
             return {"status": "skipped", "document_id": document.id, "chunk_count": 0}
+        existed = self.exists(document_id=document.id)
+        self.delete(document_id=document.id)
 
         metadatas = []
         ids = []
@@ -219,19 +252,15 @@ class KnowledgeBase:
             ids.append(f"{document.id}:{index}")
             metadatas.append(metadata)
 
-        if self.vectorstore is not None:
-            self.vectorstore.add_texts(chunks, metadatas=metadatas, ids=ids)
-        elif self.collection is not None:
-            self.collection.upsert(
-                ids=ids,
-                documents=chunks,
-                metadatas=metadatas,
-                embeddings=self.embeddings.embed_documents(chunks),
-            )
-        else:  # pragma: no cover
-            self._require_vector_backend()
+        collection = self._active_collection()
+        collection.upsert(
+            ids=ids,
+            documents=chunks,
+            metadatas=metadatas,
+            embeddings=self.embeddings.embed_documents(chunks),
+        )
 
-        return {"status": "ok", "document_id": document.id, "chunk_count": len(chunks)}
+        return {"status": "updated" if existed else "ok", "document_id": document.id, "chunk_count": len(chunks)}
 
     def _fallback_score(self, query: str, text: str) -> float:
         query_tokens = set(keyword_tokens(query))
@@ -272,7 +301,7 @@ class KnowledgeBase:
         payload = self.collection.query(
             query_embeddings=[self.embeddings.embed_query(query)],
             n_results=limit,
-            where=metadata_filter or None,
+            where=self._where_clause(metadata_filter),
             include=["documents", "metadatas", "distances"],
         )
         ids = (payload.get("ids") or [[]])[0]
@@ -332,3 +361,11 @@ def retrieve(query: str, limit: int = 4, metadata_filter: Dict[str, Any] | None 
 
 def sample(limit: int = 10, offset: int = 0, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return DEFAULT_KNOWLEDGE_BASE.sample(limit=limit, offset=offset, metadata_filter=metadata_filter)
+
+
+def document_exists(document_id: str | None = None, metadata_filter: Dict[str, Any] | None = None) -> bool:
+    return DEFAULT_KNOWLEDGE_BASE.exists(document_id=document_id, metadata_filter=metadata_filter)
+
+
+def delete_documents(document_id: str | None = None, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    return DEFAULT_KNOWLEDGE_BASE.delete(document_id=document_id, metadata_filter=metadata_filter)
