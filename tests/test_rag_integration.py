@@ -31,6 +31,9 @@ class RagIntegrationTests(unittest.TestCase):
 
             result = kb.retrieve("夫妻坦白局 亲密关系 评论", limit=3)
 
+            if kb.backend == "disabled":
+                self.assertEqual(result.get("error"), "chroma_backend_unavailable")
+                return
             self.assertTrue(result["matches"])
             self.assertIn("夫妻坦白局", result["matches"][0]["text"])
 

@@ -22,6 +22,11 @@ except Exception:  # pragma: no cover
     Chroma = None
 
 try:
+    import chromadb
+except Exception:  # pragma: no cover
+    chromadb = None
+
+try:
     from langchain_core.embeddings import Embeddings
 except Exception:  # pragma: no cover
     class Embeddings:  # type: ignore[no-redef]
@@ -70,6 +75,9 @@ class KnowledgeBase:
         self._fallback_path = self.persist_directory / f"{collection_name}.json"
         self._fallback_records: List[Dict[str, Any]] = self._load_fallback_records()
         self.vectorstore = None
+        self.collection = None
+        self.backend = "disabled"
+        self.init_error = ""
         if Chroma is not None:
             try:
                 self.vectorstore = Chroma(
@@ -77,8 +85,19 @@ class KnowledgeBase:
                     persist_directory=str(self.persist_directory),
                     embedding_function=self.embeddings,
                 )
-            except Exception:
+                self.backend = "langchain_chroma"
+            except Exception as exc:
                 self.vectorstore = None
+                self.init_error = str(exc)
+        if self.vectorstore is None and chromadb is not None:
+            try:
+                client = chromadb.PersistentClient(path=str(self.persist_directory))
+                self.collection = client.get_or_create_collection(name=self.collection_name)
+                self.backend = "chromadb"
+                self.init_error = ""
+            except Exception as exc:
+                self.collection = None
+                self.init_error = str(exc)
 
     def _load_fallback_records(self) -> List[Dict[str, Any]]:
         if not self._fallback_path.exists():
@@ -145,6 +164,13 @@ class KnowledgeBase:
 
         if self.vectorstore is not None:
             self.vectorstore.add_texts(chunks, metadatas=metadatas, ids=ids)
+        elif self.collection is not None:
+            self.collection.upsert(
+                ids=ids,
+                documents=chunks,
+                metadatas=metadatas,
+                embeddings=self.embeddings.embed_documents(chunks),
+            )
         else:
             self._fallback_records = [
                 record for record in self._fallback_records if record.get("metadata", {}).get("document_id") != document.id
@@ -163,44 +189,90 @@ class KnowledgeBase:
         overlap = len(query_tokens & text_tokens)
         return overlap / max(len(query_tokens), 1)
 
+    def _vector_matches_from_langchain(
+        self,
+        query: str,
+        limit: int,
+        metadata_filter: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        docs = self.vectorstore.similarity_search_with_score(query, k=limit, filter=metadata_filter)
+        for doc, score in docs:
+            metadata = dict(getattr(doc, "metadata", {}) or {})
+            results.append(
+                {
+                    "id": metadata.get("document_id") or metadata.get("id") or "",
+                    "text": getattr(doc, "page_content", ""),
+                    "metadata": metadata,
+                    "score": float(score),
+                }
+            )
+        return results
+
+    def _vector_matches_from_chromadb(
+        self,
+        query: str,
+        limit: int,
+        metadata_filter: Dict[str, Any] | None = None,
+    ) -> List[Dict[str, Any]]:
+        if self.collection is None:
+            return []
+        payload = self.collection.query(
+            query_embeddings=[self.embeddings.embed_query(query)],
+            n_results=limit,
+            where=metadata_filter or None,
+            include=["documents", "metadatas", "distances"],
+        )
+        ids = (payload.get("ids") or [[]])[0]
+        documents = (payload.get("documents") or [[]])[0]
+        metadatas = (payload.get("metadatas") or [[]])[0]
+        distances = (payload.get("distances") or [[]])[0]
+        results: List[Dict[str, Any]] = []
+        for item_id, text, metadata, score in zip(ids, documents, metadatas, distances):
+            results.append(
+                {
+                    "id": str((metadata or {}).get("document_id") or item_id or ""),
+                    "text": str(text or ""),
+                    "metadata": dict(metadata or {}),
+                    "score": float(score or 0.0),
+                }
+            )
+        return results
+
     def retrieve(self, query: str, limit: int = 4, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
         clean_query = (query or "").strip()
         if not clean_query:
             return {"query": clean_query, "matches": []}
 
-        results: List[Dict[str, Any]] = []
         if self.vectorstore is not None:
             try:
-                docs = self.vectorstore.similarity_search_with_score(clean_query, k=limit, filter=metadata_filter)
-                for doc, score in docs:
-                    metadata = dict(getattr(doc, "metadata", {}) or {})
-                    results.append(
-                        {
-                            "id": metadata.get("document_id") or metadata.get("id") or "",
-                            "text": getattr(doc, "page_content", ""),
-                            "metadata": metadata,
-                            "score": float(score),
-                        }
-                    )
-                return {"query": clean_query, "matches": results}
+                return {"query": clean_query, "matches": self._vector_matches_from_langchain(clean_query, limit, metadata_filter)}
             except Exception:
-                pass
-
-        filtered = []
-        for record in self._fallback_records:
-            metadata = dict(record.get("metadata") or {})
-            if metadata_filter and any(metadata.get(key) != value for key, value in metadata_filter.items()):
-                continue
-            filtered.append(
-                {
-                    "id": record.get("id", ""),
-                    "text": record.get("text", ""),
-                    "metadata": metadata,
-                    "score": self._fallback_score(clean_query, record.get("text", "")),
+                return {
+                    "query": clean_query,
+                    "matches": [],
+                    "error": "chroma_vector_search_failed",
+                    "backend": self.backend,
                 }
-            )
-        filtered.sort(key=lambda item: item["score"], reverse=True)
-        return {"query": clean_query, "matches": filtered[:limit]}
+
+        if self.collection is not None:
+            try:
+                return {"query": clean_query, "matches": self._vector_matches_from_chromadb(clean_query, limit, metadata_filter)}
+            except Exception:
+                return {
+                    "query": clean_query,
+                    "matches": [],
+                    "error": "chroma_vector_search_failed",
+                    "backend": self.backend,
+                }
+
+        return {
+            "query": clean_query,
+            "matches": [],
+            "error": "chroma_backend_unavailable",
+            "backend": self.backend,
+            "detail": self.init_error or "Chroma backend not initialized",
+        }
 
 
 DEFAULT_KNOWLEDGE_BASE = KnowledgeBase()
