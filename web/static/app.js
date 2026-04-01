@@ -152,17 +152,14 @@ function knowledgeCategoryLabel(metadata = {}, payload = null, parsedId = {}, fa
 }
 
 function knowledgeDocumentTitle(item = {}, metadata = {}, payload = null) {
-  return String(payload?.视频标题 || metadata.title || metadata.filename || item.id || metadata.document_id || '未命名文档').trim();
-}
-
-function knowledgeDocumentDisplayId(value = '', context = {}) {
-  const docId = String(value || '').trim();
-  if (!docId) return '';
-  const parsedId = parseKnowledgeDocumentId(docId);
-  const boardLabel = knowledgeBoardLabel(context.boardType || parsedId.boardType || '');
-  const title = String(context.title || '').trim();
-  if (boardLabel && title) return `${boardLabel}：${title}`;
-  return docId;
+  const rawTitle = String(payload?.视频标题 || metadata.title || metadata.filename || item.id || metadata.document_id || '未命名文档').trim();
+  const boardType = String(metadata.board_type || payload?.榜单来源 || '').trim();
+  const boardLabel = knowledgeBoardLabel(boardType);
+  const partitionLabel = String(payload?.分区 || metadata.partition || '').trim();
+  if (boardLabel && rawTitle) {
+    return [boardLabel, partitionLabel, rawTitle].filter(Boolean).join('：');
+  }
+  return rawTitle;
 }
 
 function knowledgeDocumentTags(metadata = {}, context = {}) {
@@ -177,14 +174,9 @@ function knowledgeDocumentTags(metadata = {}, context = {}) {
     list.push(`导入：${context.sourceChannel}`);
   }
 
-  const hiddenKeys = new Set(['source', 'board_type', 'partition', 'filename', 'source_channel', 'bvid', 'title', 'content_hash']);
+  const hiddenKeys = new Set(['source', 'board_type', 'partition', 'filename', 'source_channel', 'bvid', 'title', 'content_hash', 'document_id']);
   Object.entries(metadata).forEach(([key, value]) => {
     if (hiddenKeys.has(key) || value === null || value === undefined || String(value).trim() === '') return;
-    if (key === 'document_id') {
-      const docId = knowledgeDocumentDisplayId(value, context);
-      if (docId && docId !== context.title) list.push(`文档：${docId}`);
-      return;
-    }
     if (key === 'chunk_index') {
       list.push(`分片：${value}`);
       return;
