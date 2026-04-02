@@ -440,13 +440,15 @@
 
 **触发条件**
 
-- 必须同时满足：
-  1. 当前链路把 `web_search` 放进 `allowed_tools`
-  2. 模型某一步决策选择 `action="web_search"`
+- 当前有两种触发路径：
+  1. 当前链路把 `web_search` 放进 `allowed_tools`，且模型某一步决策选择 `action="web_search"`
+  2. 当前链路把 `web_search` 放进 `allowed_tools`，且前置 `retrieval` 结果为空、相关性很低或明显无关，此时 Agent 会自动补一次联网搜索
 
 **实际调用规则**
 
-- `web_search` **不是自动触发工具**。
+- `web_search` 不再是“只能由模型主动选择”的工具。
+- 当 `retrieval` 命中为空、top score 过高，或命中文本与查询关键片段明显对不上时，Agent 会自动执行一次 `web_search`，再把联网结果和 retrieval 结果一起交给 LLM：
+  - `agents/llm_workspace_agent.py`
 - 如果缺少 `SERPAPI` key 或依赖，会返回 `warning` 而不是中断整个 Agent：
   - `tools/search_tool.py:20-25`
 
@@ -752,9 +754,10 @@
    - `agents/llm_workspace_agent.py:343-344`
 
 2. “Web Search 是固定第二步”不准确。  
-   `web_search` 只是可选工具之一，是否调用取决于某一轮 LLM 决策是否返回 `action="web_search"`：
-   - `web/app.py:4052`
-   - `agents/llm_workspace_agent.py:380-465`
+   `web_search` 不是固定第二步，但现在也不再完全依赖模型手动选择。
+   当前实现是：
+   - 如果前置 retrieval 明显无效，Agent 会先自动补一次 `web_search`
+   - 如果 retrieval 足够，后续是否继续联网，仍由某一轮 LLM 决策决定
 
 3. “搜索结果充分性有单独一层专门校验器”不准确。  
    搜索结果回来后，并不是进入一个写死的 `search_validator`；而是下一轮 LLM 看到新的 `scratchpad` 后，再决定继续调工具还是直接输出 `final`：
@@ -849,7 +852,7 @@ Web API
 | creator_briefing | 是 | 否 | 是 | 否 | 在 `module_create` 中是必调 |
 | video_briefing | 否 | 否 | 是 | 否 | 分析链路已提前拿到 `resolved + market_snapshot` |
 | hot_board_snapshot | 否 | 是 | 是 | 否 | 仅模型判断需要热点榜时调用 |
-| web_search | 是 | 是 | 是 | 否 | 仅模型判断需要联网时调用 |
+| web_search | 是 | 是 | 是 | 条件自动 / 按需 | retrieval 无效时自动补搜；否则由模型决定是否联网 |
 | code_interpreter | 是 | 是 | 是 | 否 | 仅模型判断需要计算/代码执行时调用 |
 | 记忆读取 | 是 | 是 | 是 | 否 | 取决于 `load_history`，当前三条主链路均开启 |
 | 记忆写回 | 是 | 是 | 是 | 否 | 取决于 `save_memory`，当前三条主链路均开启 |
@@ -861,20 +864,28 @@ Web API
 
 ### 8.1 哪些能力是“自动触发”的
 
-- 只有 `retrieval` 是自动触发能力：
+- `retrieval` 是稳定自动触发能力：
   - `agents/llm_workspace_agent.py:343-344`
+- `web_search` 在特定条件下也会自动触发：
+  - 当前链路允许 `web_search`
+  - 且前置 retrieval 为空、低相关或明显无关
+  - 这时 Agent 会先补一次联网搜索，再让 LLM 决策后续输出
 
 ### 8.2 哪些能力是“模型按需选择”的
 
 - `creator_briefing`
 - `video_briefing`
 - `hot_board_snapshot`
-- `web_search`
 - `code_interpreter`
 
 它们都必须由模型在某一步返回对应 `action` 才会执行：
 
 - `agents/llm_workspace_agent.py:445-464`
+
+`web_search` 例外：
+
+- 如果 retrieval 已被判定为无效，Agent 可能先自动补一次 `web_search`
+- 在那之后，模型仍然可以继续决定是否再次联网或改调其他工具
 
 ### 8.3 哪些规则会强制约束模型
 

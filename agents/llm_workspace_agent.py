@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Sequence
@@ -34,6 +35,9 @@ class RetrievalTool(AgentTool):
 
 
 class LLMWorkspaceAgent:
+    AUTO_WEB_SEARCH_HARD_SCORE_THRESHOLD = 0.65
+    AUTO_WEB_SEARCH_WEAK_SCORE_THRESHOLD = 0.48
+
     # 初始化受控 Agent 运行时，注册工具并设置最大推理步数。
     def __init__(
         self,
@@ -134,6 +138,248 @@ class LLMWorkspaceAgent:
             lines.append(f"{index}. {text}")
         return "\n".join(lines)
 
+    def _build_auto_web_search_query(
+        self,
+        *,
+        task_name: str,
+        user_payload: Dict[str, Any],
+        query_text: str,
+    ) -> str:
+        candidates = [
+            str(user_payload.get("message") or "").strip(),
+        ]
+        parsed_video = user_payload.get("parsed_video")
+        if isinstance(parsed_video, dict):
+            candidates.append(
+                " ".join(
+                    value
+                    for value in [
+                        str(parsed_video.get("title") or "").strip(),
+                        str(parsed_video.get("up_name") or "").strip(),
+                        str(parsed_video.get("partition_label") or parsed_video.get("partition") or "").strip(),
+                    ]
+                    if value
+                ).strip()
+            )
+        candidates.extend(
+            [
+                str(user_payload.get("url") or "").strip(),
+                str(user_payload.get("video_url") or "").strip(),
+            ]
+        )
+        creator_context = user_payload.get("creator_context")
+        if isinstance(creator_context, dict):
+            candidates.append(
+                " ".join(
+                    value
+                    for value in [
+                        str(creator_context.get("field") or "").strip(),
+                        str(creator_context.get("direction") or "").strip(),
+                        str(creator_context.get("idea") or "").strip(),
+                        str(creator_context.get("partition") or "").strip(),
+                    ]
+                    if value
+                ).strip()
+            )
+        candidates.append(
+            " ".join(
+                value
+                for value in [
+                    str(user_payload.get("field") or "").strip(),
+                    str(user_payload.get("direction") or "").strip(),
+                    str(user_payload.get("idea") or "").strip(),
+                    str(user_payload.get("partition") or "").strip(),
+                ]
+                if value
+            ).strip()
+        )
+        candidates.append(query_text.strip())
+
+        for candidate in candidates:
+            clean = " ".join(candidate.split()).strip()
+            if clean:
+                return clean[:240]
+        return f"{task_name} {query_text}".strip()[:240]
+
+    def _extract_query_fragments(self, text: str) -> List[str]:
+        clean = str(text or "").strip().lower()
+        if not clean:
+            return []
+        clean = re.sub(r"[^\w\u4e00-\u9fff]+", " ", clean)
+        raw_chunks = re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9][a-z0-9._-]{1,}", clean)
+        phrase_stopwords = [
+            "你知道",
+            "请问",
+            "介绍一下",
+            "介绍",
+            "告诉我",
+            "帮我",
+            "查一下",
+            "查查",
+            "是谁",
+            "是什么",
+            "怎么样",
+            "怎么",
+            "为什么",
+            "一下",
+            "有关",
+            "关于",
+            "知道",
+            "了解",
+        ]
+        token_stopwords = {
+            "什么",
+            "哪里",
+            "哪个",
+            "这个",
+            "那个",
+            "一下",
+            "是不是",
+            "可以",
+            "是谁",
+            "知道",
+            "请问",
+            "介绍",
+            "帮我",
+            "告诉",
+        }
+        fragments: set[str] = set()
+        for chunk in raw_chunks:
+            if re.fullmatch(r"[\u4e00-\u9fff]+", chunk):
+                normalized = chunk
+                for phrase in phrase_stopwords:
+                    normalized = normalized.replace(phrase, " ")
+                for part in normalized.split():
+                    part = part.strip()
+                    if len(part) < 2 or part in token_stopwords:
+                        continue
+                    fragments.add(part)
+                    if len(part) > 4:
+                        for size in range(4, 1, -1):
+                            for index in range(0, len(part) - size + 1):
+                                sub = part[index:index + size]
+                                if sub not in token_stopwords:
+                                    fragments.add(sub)
+            else:
+                token = chunk.strip()
+                if len(token) >= 2:
+                    fragments.add(token)
+        return sorted((fragment for fragment in fragments if fragment), key=len, reverse=True)[:24]
+
+    def _retrieval_match_haystack(self, match: Dict[str, Any]) -> str:
+        metadata = match.get("metadata") if isinstance(match.get("metadata"), dict) else {}
+        parts = [str(match.get("text") or "").strip()]
+        if metadata:
+            parts.append(json.dumps(metadata, ensure_ascii=False))
+        return " ".join(part for part in parts if part).lower()
+
+    def _should_auto_web_search(
+        self,
+        *,
+        search_query: str,
+        retrieval_observation: Dict[str, Any],
+    ) -> tuple[bool, Dict[str, Any]]:
+        matches = retrieval_observation.get("matches") if isinstance(retrieval_observation, dict) else []
+        matches = [item for item in (matches or []) if isinstance(item, dict)]
+        if not matches:
+            return True, {"reason": "retrieval_empty", "best_score": None, "matched_fragments": []}
+
+        scored_matches: List[tuple[float, Dict[str, Any]]] = []
+        for item in matches:
+            try:
+                score = float(item.get("score"))
+            except Exception:
+                continue
+            scored_matches.append((score, item))
+        scored_matches.sort(key=lambda entry: entry[0])
+        best_score = scored_matches[0][0] if scored_matches else None
+
+        fragments = [
+            fragment
+            for fragment in self._extract_query_fragments(search_query)
+            if (re.fullmatch(r"[\u4e00-\u9fff]+", fragment) and len(fragment) >= 3) or len(fragment) >= 2
+        ]
+        matched_fragments: List[str] = []
+        if fragments:
+            for _, item in scored_matches[:3]:
+                haystack = self._retrieval_match_haystack(item)
+                current = [fragment for fragment in fragments if fragment in haystack]
+                if len(current) > len(matched_fragments):
+                    matched_fragments = current
+
+        if best_score is None:
+            return True, {"reason": "retrieval_score_missing", "best_score": None, "matched_fragments": matched_fragments}
+        if best_score >= self.AUTO_WEB_SEARCH_HARD_SCORE_THRESHOLD:
+            return True, {"reason": "retrieval_low_confidence", "best_score": best_score, "matched_fragments": matched_fragments}
+        if fragments and not matched_fragments and best_score >= self.AUTO_WEB_SEARCH_WEAK_SCORE_THRESHOLD:
+            return True, {"reason": "retrieval_irrelevant", "best_score": best_score, "matched_fragments": []}
+        return False, {"reason": "retrieval_sufficient", "best_score": best_score, "matched_fragments": matched_fragments}
+
+    def _auto_web_search_if_needed(
+        self,
+        *,
+        task_name: str,
+        user_payload: Dict[str, Any],
+        query_text: str,
+        allowed_tools: Sequence[str],
+        scratchpad: List[Dict[str, Any]],
+        used_tools: List[str],
+        retrieval_observation: Dict[str, Any],
+    ) -> None:
+        if "web_search" not in allowed_tools or "web_search" not in self.tools:
+            return
+
+        search_query = self._build_auto_web_search_query(
+            task_name=task_name,
+            user_payload=user_payload,
+            query_text=query_text,
+        )
+        should_search, summary = self._should_auto_web_search(
+            search_query=search_query,
+            retrieval_observation=retrieval_observation,
+        )
+        if not should_search:
+            return
+
+        scratchpad.append(
+            {
+                "action": "retrieval_validation",
+                "action_input": {"query": search_query},
+                "observation": {
+                    "auto_web_search": True,
+                    **summary,
+                },
+            }
+        )
+
+        action_input = {
+            "query": search_query,
+            "limit": 5,
+            "trigger": "retrieval_fallback",
+            "reason": summary.get("reason", "retrieval_fallback"),
+        }
+        tool = self.tools["web_search"]
+        with trace_block(
+            "agent_tool.web_search",
+            run_type="tool",
+            inputs=action_input,
+            metadata={"task_name": task_name, "auto_triggered": True},
+            tags=["agent_tool", "web_search", "auto_fallback"],
+        ) as run:
+            try:
+                observation = tool.handler(action_input)
+            except Exception as exc:
+                observation = {"error": str(exc)}
+            end_trace(run, {"observation_preview": self._payload_text(observation)[:1000]})
+        used_tools.append("web_search")
+        scratchpad.append(
+            {
+                "action": "web_search",
+                "action_input": action_input,
+                "observation": observation,
+            }
+        )
+
     def _auto_retrieve(
         self,
         *,
@@ -141,9 +387,9 @@ class LLMWorkspaceAgent:
         query_text: str,
         scratchpad: List[Dict[str, Any]],
         used_tools: List[str],
-    ) -> None:
+    ) -> Dict[str, Any]:
         if "retrieval" not in allowed_tools or "retrieval" not in self.tools:
-            return
+            return {"query": query_text, "matches": []}
         with trace_block(
             "agent_tool.retrieval",
             run_type="retriever",
@@ -170,6 +416,7 @@ class LLMWorkspaceAgent:
                 "observation": observation,
             }
         )
+        return observation
 
     def _score_candidate(self, candidate: Dict[str, Any], required_final_keys: Sequence[str]) -> float:
         missing_keys = self._validate_final(candidate, required_final_keys)
@@ -341,7 +588,21 @@ class LLMWorkspaceAgent:
         user_id = self._build_history_key(task_name, user_payload)
         query_text = self._build_query_text(task_name, task_goal, user_payload)
         history_block = self._history_block(user_id, query_text) if load_history else "当前任务已跳过历史上下文检索。"
-        self._auto_retrieve(allowed_tools=allowed_tools, query_text=query_text, scratchpad=scratchpad, used_tools=used_tools)
+        retrieval_observation = self._auto_retrieve(
+            allowed_tools=allowed_tools,
+            query_text=query_text,
+            scratchpad=scratchpad,
+            used_tools=used_tools,
+        )
+        self._auto_web_search_if_needed(
+            task_name=task_name,
+            user_payload=user_payload,
+            query_text=query_text,
+            allowed_tools=allowed_tools,
+            scratchpad=scratchpad,
+            used_tools=used_tools,
+            retrieval_observation=retrieval_observation,
+        )
 
         system_prompt = (
             "你是 B 站创作工作台的 LLM Agent 中枢。\n"
@@ -350,6 +611,7 @@ class LLMWorkspaceAgent:
             "如需历史经验、案例、文案沉淀，优先使用 retrieval。\n"
             "如需实时信息、热点、平台活动、竞品情况，可以使用 web_search。\n"
             "如需执行代码、做数据处理或可视化，可以使用 code_interpreter。\n"
+            "如果系统已经补充了 web_search 结果，应优先综合本地检索和联网结果作答；只有两边都没有有效信息时，才要求用户补充线索。\n"
             "你可以多步调用工具；当信息足够时，再输出最终 JSON。"
         )
 
