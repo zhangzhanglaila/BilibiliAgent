@@ -1,6 +1,7 @@
 """Flask web entry for the Bilibili content ideation and analysis workspace."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import json
 import re
@@ -2013,31 +2014,51 @@ def serialize_video_metric(video_metric: object) -> dict:
 # 汇总全站、分区和同类账号样本，生成一份市场快照。
 def build_market_snapshot(partition_name: str, up_ids: list[int] | None = None) -> dict:
     normalized_partition = CONFIG.normalize_partition(partition_name)
+    partition_label = PARTITION_LABELS.get(normalized_partition, normalized_partition)
 
-    try:
-        hot_board = [serialize_video_metric(item) for item in RAW_TOPIC_AGENT.fetch_hot_videos()[:6]]
-    except Exception:
-        hot_board = []
+    def fetch_hot_board() -> list[dict]:
+        try:
+            return [serialize_video_metric(item) for item in RAW_TOPIC_AGENT.fetch_hot_videos()[:6]]
+        except Exception:
+            return []
 
-    try:
-        partition_samples = [
-            serialize_video_metric(item)
-            for item in RAW_TOPIC_AGENT.fetch_partition_videos(normalized_partition)[:6]
-        ]
-    except Exception:
-        partition_samples = []
+    def fetch_partition_samples() -> list[dict]:
+        try:
+            return [
+                {
+                    **serialize_video_metric(item),
+                    "partition": normalized_partition,
+                    "partition_label": partition_label,
+                }
+                for item in RAW_TOPIC_AGENT.fetch_partition_videos(normalized_partition)[:6]
+            ]
+        except Exception:
+            return []
 
-    try:
-        peer_samples = [
-            serialize_video_metric(item)
-            for item in RAW_TOPIC_AGENT.fetch_peer_up_videos(up_ids)[:6]
-        ]
-    except Exception:
-        peer_samples = []
+    def fetch_peer_samples() -> list[dict]:
+        try:
+            return [
+                {
+                    **serialize_video_metric(item),
+                    "partition": normalized_partition,
+                    "partition_label": partition_label,
+                }
+                for item in RAW_TOPIC_AGENT.fetch_peer_up_videos(up_ids)[:6]
+            ]
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        hot_future = executor.submit(fetch_hot_board)
+        partition_future = executor.submit(fetch_partition_samples)
+        peer_future = executor.submit(fetch_peer_samples)
+        hot_board = hot_future.result()
+        partition_samples = partition_future.result()
+        peer_samples = peer_future.result()
 
     return {
         "partition": normalized_partition,
-        "partition_label": PARTITION_LABELS.get(normalized_partition, normalized_partition),
+        "partition_label": partition_label,
         "source_count": len(hot_board) + len(partition_samples) + len(peer_samples),
         "hot_board": hot_board,
         "partition_samples": partition_samples,
@@ -2775,18 +2796,687 @@ def build_reference_videos_from_market_snapshot(
     query_text: str = "",
     resolved: dict | None = None,
 ) -> list[dict]:
-    sources = (
-        (market_snapshot.get("hot_board") or [])
-        + (market_snapshot.get("peer_samples") or [])
-        + (market_snapshot.get("partition_samples") or [])
+    resolved = resolved or {}
+    entries: list[tuple[tuple, float, dict]] = []
+    seen: set[str] = set()
+    target_partition = str(resolved.get("partition") or market_snapshot.get("partition") or "").strip()
+    target_partition_label = (
+        str(resolved.get("partition_label") or "")
+        or str(market_snapshot.get("partition_label") or "")
+        or PARTITION_LABELS.get(target_partition, target_partition)
     )
-    return select_reference_videos(
-        sources,
+
+    for group_name in ("peer_samples", "hot_board", "partition_samples"):
+        for raw_item in market_snapshot.get(group_name) or []:
+            item = dict(raw_item or {})
+            bvid = (item.get("bvid") or "").strip()
+            url = (item.get("url") or "").strip()
+            if exclude_bvid and bvid.lower() == exclude_bvid.lower():
+                continue
+            if not (title_or_url := ((item.get("title") or "").strip() or url)):
+                continue
+            if url and url in seen:
+                continue
+            if bvid and not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE):
+                continue
+
+            candidate = {
+                "title": item.get("title", ""),
+                "url": url or f"https://www.bilibili.com/video/{bvid}",
+                "author": item.get("author", ""),
+                "cover": item.get("cover", ""),
+                "view": safe_int(item.get("view")),
+                "like": safe_optional_int(item.get("like")),
+                "like_rate": float(item.get("like_rate") or 0.0),
+                "source": item.get("source", ""),
+                "bvid": bvid,
+                "partition": str(item.get("partition") or target_partition),
+                "partition_label": str(item.get("partition_label") or target_partition_label),
+                "topic": build_topic(title_or_url, keywords=extract_video_keywords([title_or_url]), tname=target_partition_label),
+                "keywords": extract_video_keywords([title_or_url]),
+            }
+            rank_key, _ = build_reference_rank_entry(candidate, query_text=query_text, resolved=resolved)
+            source_bonus = 1.0 if group_name == "peer_samples" else 0.5 if group_name == "hot_board" else 0.0
+            entries.append((rank_key, source_bonus, candidate))
+            if candidate["url"]:
+                seen.add(candidate["url"])
+
+    ranked = sorted(entries, key=lambda entry: (entry[0], entry[1]), reverse=True)
+    return [
+        {
+            "title": item.get("title", ""),
+            "url": item.get("url", ""),
+            "author": item.get("author", ""),
+            "cover": item.get("cover", ""),
+            "view": safe_int(item.get("view")),
+            "like": safe_optional_int(item.get("like")),
+            "like_rate": float(item.get("like_rate") or 0.0),
+            "source": item.get("source", ""),
+        }
+        for _, _, item in ranked[:6]
+        if item.get("url")
+    ]
+
+
+def normalize_text_value(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n-_|，,。.;；")
+
+
+def normalize_text_list(value: object, limit: int = 0) -> list[str]:
+    raw_items: list[object] = []
+    if isinstance(value, str):
+        raw_items.extend(re.split(r"[\r\n]+|[；;]+", value))
+    elif isinstance(value, (list, tuple, set)):
+        raw_items.extend(list(value))
+    elif value not in (None, ""):
+        raw_items.append(value)
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        text = normalize_text_value(item)
+        if not text:
+            continue
+        marker = text.lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(text)
+        if limit > 0 and len(result) >= limit:
+            break
+    return result
+
+
+def merge_text_lists(*values: object, limit: int = 0) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        for item in normalize_text_list(value):
+            marker = item.lower()
+            if marker in seen:
+                continue
+            seen.add(marker)
+            result.append(item)
+            if limit > 0 and len(result) >= limit:
+                return result
+    return result
+
+
+def normalize_bool_flag(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        clean = value.strip().lower()
+        if clean in {"true", "1", "yes", "y", "是"}:
+            return True
+        if clean in {"false", "0", "no", "n", "否"}:
+            return False
+    if value in (None, ""):
+        return default
+    return bool(value)
+
+
+def extract_retrieval_matches_from_tool_observations(observations: list[dict]) -> list[dict]:
+    matches: list[dict] = []
+    for item in observations or []:
+        if not isinstance(item, dict) or item.get("action") != "retrieval":
+            continue
+        observation = item.get("observation")
+        if not isinstance(observation, dict):
+            continue
+        for match in observation.get("matches") or []:
+            if isinstance(match, dict):
+                matches.append(match)
+    return matches
+
+
+def build_reference_video_from_knowledge_match(match: dict) -> dict | None:
+    metadata = dict((match or {}).get("metadata") or {})
+    text = str((match or {}).get("text") or "")
+    title = normalize_text_value(metadata.get("title") or extract_knowledge_text_field(text, "视频标题"))
+    url = normalize_text_value(metadata.get("url") or extract_knowledge_text_field(text, "链接"))
+    bvid = normalize_text_value(metadata.get("bvid") or extract_knowledge_text_field(text, "BVID"))
+    if not url and re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE):
+        url = f"https://www.bilibili.com/video/{bvid}"
+    if not title or not url:
+        return None
+
+    partition_text = normalize_text_value(metadata.get("partition") or extract_knowledge_text_field(text, "分区"))
+    broad_partition = infer_knowledge_item_broad_partition({"metadata": metadata, "text": text}) or map_partition(
+        partition_text,
+        0,
+        context_text=f"{title} {partition_text}",
+    )
+    view = safe_int(metadata.get("view") or extract_knowledge_text_field(text, "播放量"))
+    like = safe_optional_int(metadata.get("like"))
+    if like is None:
+        like = safe_optional_int(extract_knowledge_text_field(text, "点赞量"))
+    keywords = extract_video_keywords([title, partition_text, extract_knowledge_text_field(text, "评论热词")])
+    board_type = normalize_text_value(metadata.get("board_type") or extract_knowledge_text_field(text, "榜单来源"))
+    partition_label = PARTITION_LABELS.get(broad_partition, partition_text or broad_partition)
+    return {
+        "title": title,
+        "url": url,
+        "author": normalize_text_value(metadata.get("author") or extract_knowledge_text_field(text, "UP主")),
+        "cover": normalize_text_value(metadata.get("cover")),
+        "view": view,
+        "like": like,
+        "like_rate": float((like or 0) / max(view, 1)),
+        "source": board_type or "知识库高表现样本",
+        "bvid": bvid,
+        "partition": broad_partition,
+        "partition_label": partition_label,
+        "topic": build_topic(title, keywords=keywords, tname=partition_text),
+        "keywords": keywords,
+        "_retrieval_score": float((match or {}).get("score") or 0.0),
+    }
+
+
+def build_reference_videos_from_retrieval_matches(
+    matches: list[dict],
+    exclude_bvid: str = "",
+    query_text: str = "",
+    resolved: dict | None = None,
+    limit: int = 6,
+) -> list[dict]:
+    resolved = resolved or {}
+    entries: list[tuple[tuple, float, dict]] = []
+    seen: set[str] = set()
+    for match in matches or []:
+        item = build_reference_video_from_knowledge_match(match)
+        if not item:
+            continue
+        bvid = (item.get("bvid") or "").strip()
+        if exclude_bvid and bvid.lower() == exclude_bvid.lower():
+            continue
+        identity = (item.get("url") or "").strip() or bvid
+        if not identity or identity in seen:
+            continue
+        seen.add(identity)
+        rank_key, _ = build_reference_rank_entry(item, query_text=query_text, resolved=resolved)
+        retrieval_bonus = -float(item.get("_retrieval_score") or 0.0)
+        entries.append((rank_key, retrieval_bonus, item))
+
+    ranked = sorted(entries, key=lambda entry: (entry[0], entry[1]), reverse=True)
+    result: list[dict] = []
+    for _, _, item in ranked[:limit]:
+        result.append(
+            {
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "author": item.get("author", ""),
+                "cover": item.get("cover", ""),
+                "view": safe_int(item.get("view")),
+                "like": safe_optional_int(item.get("like")),
+                "like_rate": float(item.get("like_rate") or 0.0),
+                "source": item.get("source", ""),
+            }
+        )
+    return result
+
+
+def build_module_analyze_reference_videos(
+    market_snapshot: dict,
+    tool_observations: list[dict] | None = None,
+    exclude_bvid: str = "",
+    query_text: str = "",
+    resolved: dict | None = None,
+) -> list[dict]:
+    retrieval_matches = extract_retrieval_matches_from_tool_observations(tool_observations or [])
+    retrieval_videos = build_reference_videos_from_retrieval_matches(
+        retrieval_matches,
         exclude_bvid=exclude_bvid,
+        query_text=query_text,
+        resolved=resolved,
         limit=6,
+    )
+    if len(retrieval_videos) >= 4:
+        return retrieval_videos[:6]
+
+    market_videos = build_reference_videos_from_market_snapshot(
+        market_snapshot,
+        exclude_bvid=exclude_bvid,
         query_text=query_text,
         resolved=resolved,
     )
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for item in retrieval_videos + market_videos:
+        url = (item.get("url") or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        merged.append(item)
+        if len(merged) >= 6:
+            break
+    return merged
+
+
+def infer_title_formula(title: str) -> str:
+    text = normalize_text_value(title)
+    if not text:
+        return "具体场景 + 明确结果"
+    if any(token in text for token in ("本来", "结果", "却", "居然", "反而", "不是", "别再", "翻车", "崩溃")):
+        return "反差冲突 + 结果落点"
+    if any(token in text for token in ("第一次", "终于", "这次", "今天", "刚刚", "昨晚")):
+        return "时间场景 + 真实经历"
+    if re.search(r"\d", text):
+        return "数字信息 + 具体对象 + 结果承诺"
+    if any(token in text for token in ("情侣", "异地恋", "约会", "日常", "vlog", "情绪", "见面")):
+        return "人物关系 + 场景细节 + 情绪反应"
+    return "具体场景 + 核心看点 + 情绪结果"
+
+
+def build_partition_playbook(resolved: dict, performance: dict) -> dict:
+    partition = str(resolved.get("partition") or "").strip()
+    if partition == "knowledge":
+        return {
+            "rhythm": ["前 3 秒先抛结论或反常识点，中段再补证据和案例。", "中段按 2-3 个明确小结论推进，避免背景铺垫过长。", "结尾用取舍建议或下一条延展问题承接评论区。"],
+            "structure": ["标题先给结果，再补充具体对象或使用场景。", "内容结构优先用“结论 -> 证据 -> 对比 -> 结尾动作”组织。", "封面突出核心名词和结果词，不要把说明文字堆满。"],
+            "openings": ["先说最终结论，再补一句为什么这次值得看。", "第一句直接抛最容易踩坑的地方。", "开场 1 句话先把“误区/差异/结果”说透。"],
+            "middle": ["第 1 段先给最直观的证据或案例。", "第 2 段补反例、对比或成本差异。", "第 3 段收束成可直接执行的动作。"],
+            "ending": ["结尾引导观众补充自己踩过的坑。", "可顺带预告下一条更细的实测或分支场景。"],
+            "publish_windows": ["工作日 19:00-22:00", "周末 10:00-12:00"],
+            "color_scheme": "高对比黄黑或蓝白，突出“结果词 + 核心对象”。",
+            "coin": True,
+            "comment_guides": ["你最想让我继续拆哪一种具体场景？", "评论区告诉我你现在最卡在哪一步。"],
+        }
+    if partition in {"life", "ent"}:
+        return {
+            "rhythm": ["开场直接上情绪点、人物关系或最有代入感的画面。", "中段按时间线推进，每 8-12 秒给一次情绪或画面变化。", "结尾留下选择题、站队点或续集伏笔。"],
+            "structure": ["标题优先写人物关系、当天场景和情绪结果。", "内容结构用“开场钩子 -> 两段核心画面 -> 互动结尾”最稳。", "封面文案控制在 6-10 个字，人物表情和动作要先于环境。"],
+            "openings": ["先给见面、反差或情绪最满的一幕。", "第一句直接说今天最有感觉的那个瞬间。", "开头先给“本来以为...结果...”的反差。"],
+            "middle": ["中段第一段推进核心场景。", "第二段补细节特写、人物反应或关系变化。", "镜头切换跟着情绪走，不要平铺叙事。"],
+            "ending": ["结尾丢给观众一个代入式问题。", "顺手埋一个下次还会继续拍的续集点。"],
+            "publish_windows": ["工作日 18:30-22:30", "周末 14:00-18:00"],
+            "color_scheme": "暖色调橙红或奶白 + 高饱和点缀，突出人物和情绪。",
+            "coin": False,
+            "comment_guides": ["如果是你，你会怎么选？", "评论区告诉我你最想看下一次拍哪一段。"],
+        }
+    if partition == "game":
+        return {
+            "rhythm": ["先上高光或翻车瞬间，中段再解释过程。", "每一段都要有明显结果反馈，避免空讲。", "结尾抛版本、打法或下一局想看什么。"],
+            "structure": ["标题把版本答案、高光或反差写在前面。", "中段按“高光 -> 过程 -> 复盘”组织。", "封面优先突出角色、装备或关键场面。"],
+            "openings": ["开场先丢最炸的一幕。", "第一句直接说这局最离谱的点。"],
+            "middle": ["中段快速回放关键决策。", "补充对手反应、失误或翻盘细节。"],
+            "ending": ["结尾引导观众站队打法。", "可预告下一期版本或角色测试。"],
+            "publish_windows": ["工作日 18:00-23:00", "周末 12:00-18:00"],
+            "color_scheme": "深底高对比荧光色，突出角色或战斗瞬间。",
+            "coin": True,
+            "comment_guides": ["你觉得这波最关键的点在哪？", "下条想看我继续测哪套打法？"],
+        }
+    return {
+        "rhythm": ["开场先给最强结果或最大反差，中段再补上下文。", "中段每一段只讲一个重点，避免信息挤在一起。", "结尾给互动问题或下一条续集点。"],
+        "structure": ["标题先给具体场景，再补结果或情绪。", "内容结构优先保持“钩子 -> 递进 -> 互动收束”。", "封面文案要短，主体元素比背景更重要。"],
+        "openings": ["前 3 秒先放最能留人的一句话或画面。", "开头先交代这条内容最值的那个点。"],
+        "middle": ["中段第一段推进核心内容。", "第二段补充细节、对比或情绪变化。"],
+        "ending": ["结尾主动引导观众留言自己的经历。", "顺手埋下集方向，给评论区继续互动理由。"],
+        "publish_windows": ["工作日 19:00-22:00", "周末 10:00-12:00"],
+        "color_scheme": "高对比主色 + 一个强调色，保证主体和文案可读性。",
+        "coin": not bool(performance.get("is_hot")),
+        "comment_guides": ["你最想继续看哪一部分？", "评论区说说你自己的真实体验。"],
+    }
+
+
+def build_default_title_sets(resolved: dict, performance: dict) -> dict:
+    base_topic = normalize_text_value(resolved.get("topic") or resolved.get("title") or resolved.get("partition_label") or "这条内容")
+    base_topic = base_topic[:18] or "这条内容"
+    is_hot = bool(performance.get("is_hot"))
+    short_titles = [
+        f"{base_topic}这次终于拍顺了",
+        f"{base_topic}这条开头更容易把人留下",
+        f"{base_topic}这一版更有代入感",
+    ]
+    long_titles = [
+        f"把{base_topic}最有感觉的一段直接放到前面，这条更容易让人看到最后",
+        f"同样是拍{base_topic}，这一版先给结果再讲过程，留人会更稳",
+        f"{base_topic}这次不靠堆信息，先把最能共鸣的画面放出来",
+    ]
+    conflict_titles = [
+        f"本来以为{base_topic}会很普通，结果开头这一幕最先把人留下",
+        f"不是{base_topic}没人看，是第一眼还没把冲突和情绪抛出来",
+        f"{base_topic}最容易拍散的地方，恰好就是这条最该放大的爆点",
+    ]
+    if is_hot:
+        short_titles[0] = f"{base_topic}这一版已经很有爆点了"
+        long_titles[0] = f"{base_topic}这条之所以容易起量，是因为最强画面一上来就先给到了"
+    return {
+        "short_titles": normalize_text_list(short_titles, limit=3),
+        "long_titles": normalize_text_list(long_titles, limit=3),
+        "conflict_titles": normalize_text_list(conflict_titles, limit=3),
+    }
+
+
+def build_default_cover_plan(resolved: dict, title_sets: dict, playbook: dict) -> dict:
+    keywords = extract_video_keywords(resolved.get("keywords"))
+    hero = keywords[0] if keywords else normalize_text_value(resolved.get("topic") or resolved.get("partition_label") or "核心画面")
+    secondary = keywords[1] if len(keywords) > 1 else "情绪反应"
+    short_titles = normalize_text_list((title_sets or {}).get("short_titles"), limit=2)
+    return {
+        "copy_lines": merge_text_lists(short_titles, [f"{hero}这段最有感觉", f"{hero}别先铺背景"], limit=3),
+        "layout_advice": [
+            "主文案放左上或右上，控制在 6-10 个字内，别挡住人物表情和主体动作。",
+            "主体人物或核心物体放在画面右侧 2/3 区域，背景只保留能说明场景的关键信息。",
+            "优先突出表情、动作、结果画面，不要平均分配画面信息。",
+        ],
+        "color_scheme": normalize_text_value(playbook.get("color_scheme")) or "高对比主色 + 一个强调色，先保证可读性。",
+        "highlight_elements": normalize_text_list([hero, secondary, resolved.get("partition_label"), "人物表情", "结果画面"], limit=4),
+    }
+
+
+def build_default_tag_strategy(resolved: dict, benchmark_videos: list[dict]) -> dict:
+    keywords = extract_video_keywords(resolved.get("keywords"))
+    partition_label = normalize_text_value(resolved.get("partition_label") or PARTITION_LABELS.get(resolved.get("partition", ""), ""))
+    hot_terms = []
+    for item in benchmark_videos[:3]:
+        hot_terms.extend(extract_reference_terms(item.get("title", ""))[:4])
+    hot_tags = []
+    for term in hot_terms:
+        candidate = normalize_text_value(term)
+        if len(candidate) < 2 or candidate in hot_tags:
+            continue
+        hot_tags.append(candidate)
+        if len(hot_tags) >= 4:
+            break
+    core_traffic = merge_text_lists(keywords[:3], [partition_label, normalize_text_value(resolved.get("topic"))], limit=4)
+    vertical = merge_text_lists([partition_label, resolved.get("style")], keywords[3:6], limit=4)
+    hot = merge_text_lists(hot_tags, ["同赛道爆款", "高表现拆解"], limit=4)
+    recommended = merge_text_lists(core_traffic, vertical, hot, limit=8)
+    return {
+        "core_traffic_tags": core_traffic,
+        "vertical_tags": vertical,
+        "hot_tags": hot,
+        "recommended_tags": recommended,
+    }
+
+
+def build_default_publish_strategy(resolved: dict, performance: dict, playbook: dict) -> dict:
+    partition_label = normalize_text_value(resolved.get("partition_label") or PARTITION_LABELS.get(resolved.get("partition", ""), "当前赛道"))
+    should_ask_for_coin = normalize_bool_flag(playbook.get("coin"), default=not bool(performance.get("is_hot")))
+    return {
+        "best_publish_windows": normalize_text_list(playbook.get("publish_windows"), limit=3),
+        "should_ask_for_coin": should_ask_for_coin,
+        "coin_call_to_action": (
+            "结尾可以弱引导“如果这条对你有帮助，先收藏投币，我继续补下一条同题材拆解”。"
+            if should_ask_for_coin
+            else "这类内容更适合优先引导评论和收藏，投币引导放轻一些。"
+        ),
+        "suggested_comment_guides": merge_text_lists(
+            playbook.get("comment_guides"),
+            [f"评论区告诉我你还想看哪一种{partition_label}场景。", "如果是你，你会先保留哪一个镜头或观点？"],
+            limit=3,
+        ),
+    }
+
+
+def build_default_reusable_hit_points(
+    resolved: dict,
+    benchmark_videos: list[dict],
+    playbook: dict,
+    performance: dict,
+) -> list[str]:
+    formulas = [infer_title_formula(item.get("title", "")) for item in benchmark_videos[:3] if item.get("title")]
+    lead_formula = formulas[0] if formulas else "具体场景 + 结果落点"
+    partition_label = normalize_text_value(resolved.get("partition_label") or PARTITION_LABELS.get(resolved.get("partition", ""), "当前赛道"))
+    points = [
+        f"同赛道高表现内容普遍把「{lead_formula}」放进标题，而不是先讲空泛背景。",
+        "开头先给结果、反差或情绪最高的一幕，再补过程，留人会更稳。",
+        "中段只推进 2-3 个核心信息点，每一段都要有新的画面或结果反馈。",
+        "结尾不要硬收，最好留一个评论问题或续集承接点。",
+        f"封面和标签都要继续围绕「{partition_label} + 核心对象 + 情绪/结果词」来组织。",
+    ]
+    if performance.get("is_hot"):
+        points[0] = f"这条视频已经踩中了「{lead_formula}」这类点击公式，下一条重点是放大而不是换赛道。"
+    return normalize_text_list(points, limit=5)
+
+
+def build_default_analysis_payload(
+    resolved: dict,
+    performance: dict,
+    topic_result: dict,
+    optimize_result: dict,
+    reference_videos: list[dict],
+) -> dict:
+    playbook = build_partition_playbook(resolved, performance)
+    title_sets = build_default_title_sets(resolved, performance)
+    cover_plan = build_default_cover_plan(resolved, title_sets, playbook)
+    benchmark_videos = [dict(item or {}) for item in reference_videos[:3]]
+    benchmark_formulas = normalize_text_list([infer_title_formula(item.get("title", "")) for item in benchmark_videos], limit=3)
+    benchmark_analysis = {
+        "benchmark_videos": benchmark_videos,
+        "common_title_formulas": merge_text_lists(benchmark_formulas, ["具体场景 + 明确结果", "反差或情绪词 + 关键对象"], limit=3),
+        "common_rhythm_formulas": normalize_text_list(playbook.get("rhythm"), limit=3),
+        "common_structure_formulas": normalize_text_list(playbook.get("structure"), limit=3),
+    }
+    remake_script_structure = {
+        "opening_hooks": normalize_text_list(playbook.get("openings"), limit=3),
+        "middle_rhythm": normalize_text_list(playbook.get("middle"), limit=3),
+        "ending_interactions": normalize_text_list(playbook.get("ending"), limit=3),
+    }
+    tag_strategy = build_default_tag_strategy(resolved, benchmark_videos)
+    publish_strategy = build_default_publish_strategy(resolved, performance, playbook)
+    reusable_hit_points = build_default_reusable_hit_points(resolved, benchmark_videos, playbook, performance)
+    title_suggestions = merge_text_lists(
+        title_sets.get("short_titles"),
+        title_sets.get("conflict_titles"),
+        optimize_result.get("optimized_titles"),
+        limit=3,
+    )
+    cover_suggestion = "；".join(
+        part
+        for part in [
+            " / ".join(normalize_text_list(cover_plan.get("copy_lines"), limit=2)),
+            normalize_text_list(cover_plan.get("layout_advice"), limit=1)[0] if normalize_text_list(cover_plan.get("layout_advice"), limit=1) else "",
+            normalize_text_value(cover_plan.get("color_scheme")),
+        ]
+        if part
+    )
+    content_suggestions = merge_text_lists(
+        [f"开头钩子：{item}" for item in remake_script_structure.get("opening_hooks", [])[:1]],
+        [f"中段节奏：{item}" for item in remake_script_structure.get("middle_rhythm", [])[:2]],
+        [f"结尾互动：{item}" for item in remake_script_structure.get("ending_interactions", [])[:1]],
+        [f"发布时间：{' / '.join(publish_strategy.get('best_publish_windows') or [])}"],
+        [f"评论引导：{(publish_strategy.get('suggested_comment_guides') or [''])[0]}"],
+        optimize_result.get("content_suggestions"),
+        limit=5,
+    )
+    analysis_points = merge_text_lists(
+        performance.get("reasons"),
+        [
+            f"同赛道参考标题更常见的写法是「{(benchmark_analysis.get('common_title_formulas') or [''])[0]}」。",
+            f"更稳的内容节奏通常是「{(remake_script_structure.get('opening_hooks') or [''])[0]} -> {(remake_script_structure.get('middle_rhythm') or [''])[0]} -> {(remake_script_structure.get('ending_interactions') or [''])[0]}」。",
+        ],
+        reusable_hit_points[:2],
+        limit=8,
+    )
+    analysis_payload = {
+        "analysis_points": analysis_points,
+        "benchmark_analysis": benchmark_analysis,
+        "remake_script_structure": remake_script_structure,
+        "advanced_title_sets": title_sets,
+        "cover_plan": cover_plan,
+        "tag_strategy": tag_strategy,
+        "publish_strategy": publish_strategy,
+        "reusable_hit_points": reusable_hit_points,
+        "title_suggestions": title_suggestions,
+        "cover_suggestion": cover_suggestion,
+        "content_suggestions": content_suggestions,
+    }
+    followup_topics = normalize_analysis_topics(topic_result, resolved.get("title", ""), limit=3)
+    if performance.get("is_hot"):
+        analysis_payload["followup_topics"] = followup_topics
+    else:
+        analysis_payload["next_topics"] = followup_topics
+    return analysis_payload
+
+
+def normalize_module_analysis_payload(
+    result: dict,
+    *,
+    resolved: dict,
+    performance: dict,
+    topic_result: dict,
+    optimize_result: dict,
+    reference_videos: list[dict],
+) -> dict:
+    analysis = dict(result.get("analysis") or {})
+    defaults = build_default_analysis_payload(resolved, performance, topic_result, optimize_result, reference_videos)
+    benchmark_defaults = defaults.get("benchmark_analysis") or {}
+    script_defaults = defaults.get("remake_script_structure") or {}
+    title_defaults = defaults.get("advanced_title_sets") or {}
+    cover_defaults = defaults.get("cover_plan") or {}
+    tag_defaults = defaults.get("tag_strategy") or {}
+    publish_defaults = defaults.get("publish_strategy") or {}
+
+    benchmark_analysis = dict(analysis.get("benchmark_analysis") or {})
+    benchmark_analysis["benchmark_videos"] = reference_videos[:3]
+    benchmark_analysis["common_title_formulas"] = merge_text_lists(
+        benchmark_analysis.get("common_title_formulas"),
+        benchmark_defaults.get("common_title_formulas"),
+        limit=3,
+    )
+    benchmark_analysis["common_rhythm_formulas"] = merge_text_lists(
+        benchmark_analysis.get("common_rhythm_formulas"),
+        benchmark_defaults.get("common_rhythm_formulas"),
+        limit=3,
+    )
+    benchmark_analysis["common_structure_formulas"] = merge_text_lists(
+        benchmark_analysis.get("common_structure_formulas"),
+        benchmark_defaults.get("common_structure_formulas"),
+        limit=3,
+    )
+
+    remake_script_structure = dict(analysis.get("remake_script_structure") or {})
+    remake_script_structure["opening_hooks"] = merge_text_lists(
+        remake_script_structure.get("opening_hooks"),
+        script_defaults.get("opening_hooks"),
+        limit=3,
+    )
+    remake_script_structure["middle_rhythm"] = merge_text_lists(
+        remake_script_structure.get("middle_rhythm"),
+        script_defaults.get("middle_rhythm"),
+        limit=3,
+    )
+    remake_script_structure["ending_interactions"] = merge_text_lists(
+        remake_script_structure.get("ending_interactions"),
+        script_defaults.get("ending_interactions"),
+        limit=3,
+    )
+
+    advanced_title_sets = dict(analysis.get("advanced_title_sets") or {})
+    advanced_title_sets["short_titles"] = merge_text_lists(
+        advanced_title_sets.get("short_titles"),
+        title_defaults.get("short_titles"),
+        limit=3,
+    )
+    advanced_title_sets["long_titles"] = merge_text_lists(
+        advanced_title_sets.get("long_titles"),
+        title_defaults.get("long_titles"),
+        limit=3,
+    )
+    advanced_title_sets["conflict_titles"] = merge_text_lists(
+        advanced_title_sets.get("conflict_titles"),
+        title_defaults.get("conflict_titles"),
+        limit=3,
+    )
+
+    cover_plan = dict(analysis.get("cover_plan") or {})
+    cover_plan["copy_lines"] = merge_text_lists(cover_plan.get("copy_lines"), cover_defaults.get("copy_lines"), limit=3)
+    cover_plan["layout_advice"] = merge_text_lists(
+        cover_plan.get("layout_advice"),
+        cover_defaults.get("layout_advice"),
+        limit=3,
+    )
+    cover_plan["color_scheme"] = normalize_text_value(cover_plan.get("color_scheme")) or normalize_text_value(
+        cover_defaults.get("color_scheme")
+    )
+    cover_plan["highlight_elements"] = merge_text_lists(
+        cover_plan.get("highlight_elements"),
+        cover_defaults.get("highlight_elements"),
+        limit=4,
+    )
+
+    tag_strategy = dict(analysis.get("tag_strategy") or {})
+    tag_strategy["core_traffic_tags"] = merge_text_lists(
+        tag_strategy.get("core_traffic_tags"),
+        tag_defaults.get("core_traffic_tags"),
+        limit=4,
+    )
+    tag_strategy["vertical_tags"] = merge_text_lists(
+        tag_strategy.get("vertical_tags"),
+        tag_defaults.get("vertical_tags"),
+        limit=4,
+    )
+    tag_strategy["hot_tags"] = merge_text_lists(tag_strategy.get("hot_tags"), tag_defaults.get("hot_tags"), limit=4)
+    tag_strategy["recommended_tags"] = merge_text_lists(
+        tag_strategy.get("recommended_tags"),
+        tag_strategy.get("core_traffic_tags"),
+        tag_strategy.get("vertical_tags"),
+        tag_strategy.get("hot_tags"),
+        limit=8,
+    )
+
+    publish_strategy = dict(analysis.get("publish_strategy") or {})
+    publish_strategy["best_publish_windows"] = merge_text_lists(
+        publish_strategy.get("best_publish_windows"),
+        publish_defaults.get("best_publish_windows"),
+        limit=3,
+    )
+    publish_strategy["should_ask_for_coin"] = normalize_bool_flag(
+        publish_strategy.get("should_ask_for_coin"),
+        default=normalize_bool_flag(publish_defaults.get("should_ask_for_coin")),
+    )
+    publish_strategy["coin_call_to_action"] = normalize_text_value(
+        publish_strategy.get("coin_call_to_action")
+    ) or normalize_text_value(publish_defaults.get("coin_call_to_action"))
+    publish_strategy["suggested_comment_guides"] = merge_text_lists(
+        publish_strategy.get("suggested_comment_guides"),
+        publish_defaults.get("suggested_comment_guides"),
+        limit=3,
+    )
+
+    reusable_hit_points = merge_text_lists(analysis.get("reusable_hit_points"), defaults.get("reusable_hit_points"), limit=5)
+    title_suggestions = merge_text_lists(
+        analysis.get("title_suggestions"),
+        advanced_title_sets.get("short_titles"),
+        advanced_title_sets.get("conflict_titles"),
+        optimize_result.get("optimized_titles"),
+        limit=3,
+    )
+    cover_suggestion = normalize_text_value(analysis.get("cover_suggestion")) or defaults.get("cover_suggestion", "")
+    content_suggestions = merge_text_lists(
+        analysis.get("content_suggestions"),
+        defaults.get("content_suggestions"),
+        limit=5,
+    )
+    analysis_points = merge_text_lists(analysis.get("analysis_points"), defaults.get("analysis_points"), limit=8)
+
+    normalized_analysis = {
+        "analysis_points": analysis_points,
+        "benchmark_analysis": benchmark_analysis,
+        "remake_script_structure": remake_script_structure,
+        "advanced_title_sets": advanced_title_sets,
+        "cover_plan": cover_plan,
+        "tag_strategy": tag_strategy,
+        "publish_strategy": publish_strategy,
+        "reusable_hit_points": reusable_hit_points,
+        "title_suggestions": title_suggestions,
+        "cover_suggestion": cover_suggestion,
+        "content_suggestions": content_suggestions,
+    }
+    if performance.get("is_hot"):
+        normalized_analysis["followup_topics"] = merge_text_lists(
+            analysis.get("followup_topics"),
+            defaults.get("followup_topics"),
+            limit=3,
+        )
+    else:
+        normalized_analysis["next_topics"] = merge_text_lists(
+            analysis.get("next_topics"),
+            defaults.get("next_topics"),
+            limit=3,
+        )
+    return normalized_analysis
 
 
 # 从 Agent 工具调用记录里提取可直接展示的参考视频链接。
@@ -3037,6 +3727,68 @@ def get_llm_workspace_agent() -> LLMWorkspaceAgent:
     return LLM_WORKSPACE_AGENT
 
 
+def finalize_module_analyze_result(result: dict, resolved: dict, market_snapshot: dict) -> dict:
+    payload = dict(result or {})
+    payload["resolved"] = resolved
+    performance = normalize_performance_payload(payload.get("performance"))
+    payload["performance"] = performance
+    topic_result = payload.get("topic_result") if isinstance(payload.get("topic_result"), dict) else {"ideas": []}
+    payload["topic_result"] = topic_result
+    reference_query = build_reference_query_text(resolved)
+    reference_videos = build_module_analyze_reference_videos(
+        market_snapshot,
+        payload.get("tool_observations") if isinstance(payload.get("tool_observations"), list) else [],
+        exclude_bvid=resolved.get("bv_id", ""),
+        query_text=reference_query,
+        resolved=resolved,
+    )
+    optimize_result = dict(payload.get("optimize_result") or {})
+    analysis = normalize_module_analysis_payload(
+        payload,
+        resolved=resolved,
+        performance=performance,
+        topic_result=topic_result,
+        optimize_result=optimize_result,
+        reference_videos=reference_videos,
+    )
+    optimize_result["diagnosis"] = normalize_text_value(optimize_result.get("diagnosis")) or normalize_text_value(
+        performance.get("summary")
+    )
+    optimize_result["optimized_titles"] = merge_text_lists(
+        optimize_result.get("optimized_titles"),
+        analysis.get("title_suggestions"),
+        limit=2,
+    )
+    optimize_result["cover_suggestion"] = normalize_text_value(optimize_result.get("cover_suggestion")) or normalize_text_value(
+        analysis.get("cover_suggestion")
+    )
+    optimize_result["content_suggestions"] = merge_text_lists(
+        optimize_result.get("content_suggestions"),
+        analysis.get("content_suggestions"),
+        limit=5,
+    )
+    payload["optimize_result"] = optimize_result
+    payload["analysis"] = analysis
+    copy_topic = (
+        clean_copy_text((payload.get("copy_result") or {}).get("topic", ""))
+        or clean_copy_text(((topic_result.get("ideas") or [{}])[0]).get("topic", ""))
+        or resolved.get("topic")
+        or resolved.get("title")
+        or "视频优化"
+    )
+    if performance.get("is_hot"):
+        payload["copy_result"] = None
+    else:
+        payload["copy_result"] = normalize_copy_result_payload(
+            payload.get("copy_result"),
+            copy_topic,
+            resolved.get("style", "干货"),
+        )
+    payload["reference_videos"] = reference_videos
+    payload.setdefault("runtime_mode", "llm_agent")
+    return payload
+
+
 # 在 LLM Agent 模式下执行内容创作模块的完整生成流程。
 @traceable(run_type="chain", name="web.run_llm_module_create", tags=["web", "llm", "rag", "module_create"])
 def run_llm_module_create(data: dict) -> dict:
@@ -3149,7 +3901,7 @@ def run_llm_module_create_fallback(data: dict) -> dict:
 @traceable(run_type="chain", name="web.run_llm_module_analyze", tags=["web", "llm", "rag", "module_analyze"])
 def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     agent = get_llm_workspace_agent()
-    reference_query = build_reference_query_text(resolved)
+    compact_snapshot = compact_market_snapshot_for_llm(market_snapshot, limit=3)
     response_contract = (
         "返回一个 JSON 对象，字段必须包含：\n"
         "- resolved: 对象，包含 bv_id, title, up_name, tname, partition, partition_label, stats\n"
@@ -3158,42 +3910,33 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
         "- optimize_result: 对象，包含 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions\n"
         "- copy_result: 对象或 null；如果你判断视频表现偏低，则必须返回一套新的标题/脚本/简介/标签/置顶评论，其中 titles 要用陈述型、叙事型、生活化表达，不要提问句和教学口吻；如果当前标题属于异地恋 / 情侣约会 / 520 日常 vlog，script 必须是短视频口播，严格按开头钩子、核心画面1、核心画面2、结尾互动写，内容要贴合酒店、早午餐、逛街拍照、小清吧、见面日常这些场景，不要出现切口、测反馈、完播、方向跑偏、实战拆解等运营词\n"
         "- analysis: 对象，包含 analysis_points，并根据判断补充 followup_topics 或 next_topics、title_suggestions、cover_suggestion、content_suggestions；followup_topics / next_topics 也必须是新的具体方向，不要提问句\n"
+        "- analysis.benchmark_analysis: 对象，包含 benchmark_videos(最多3条同赛道高表现样本), common_title_formulas, common_rhythm_formulas, common_structure_formulas\n"
+        "- analysis.remake_script_structure: 对象，包含 opening_hooks, middle_rhythm, ending_interactions\n"
+        "- analysis.advanced_title_sets: 对象，包含 short_titles, long_titles, conflict_titles，每组各 3 个可直接使用标题\n"
+        "- analysis.cover_plan: 对象，包含 copy_lines, layout_advice, color_scheme, highlight_elements\n"
+        "- analysis.tag_strategy: 对象，包含 core_traffic_tags, vertical_tags, hot_tags, recommended_tags\n"
+        "- analysis.publish_strategy: 对象，包含 best_publish_windows, should_ask_for_coin, coin_call_to_action, suggested_comment_guides\n"
+        "- analysis.reusable_hit_points: 字符串数组，总结这条视频可复制到下一条的爆款点\n"
     )
     result = agent.run_structured(
         task_name="module_analyze",
-        task_goal="基于后端已经解析出的当前视频真实信息，以及同类市场样本，判断它更接近爆款还是低表现，并解释原因，同时给出后续选题和优化方案。",
+        task_goal="基于后端已经解析出的当前视频真实信息、市场样本和本次自动完成的知识库检索，判断它更接近爆款还是低表现，并输出完整结构化分析。当前 payload 已经足够，除 retrieval 外不要再额外调工具，不要重复解析视频或重复拉取外部数据。",
         user_payload={
             "url": (data.get("url") or "").strip(),
             "parsed_video": resolved,
-            "market_snapshot": market_snapshot,
+            "market_snapshot": compact_snapshot,
             "memory_user_id": "web_module_analyze",
         },
         response_contract=response_contract,
-        allowed_tools=["retrieval", "hot_board_snapshot", "web_search", "code_interpreter"],
+        allowed_tools=["retrieval"],
+        required_tools=["retrieval"],
         required_final_keys=["resolved", "performance", "topic_result", "optimize_result", "analysis", "copy_result"],
+        max_steps=2,
+        load_history=False,
+        save_memory=False,
+        enable_reflection=False,
     )
-    result["resolved"] = resolved
-    result["performance"] = normalize_performance_payload(result.get("performance"))
-    if result.get("copy_result") is not None:
-        copy_topic = (
-            clean_copy_text((result.get("copy_result") or {}).get("topic", ""))
-            or clean_copy_text(((result.get("topic_result") or {}).get("ideas") or [{}])[0].get("topic", ""))
-            or resolved.get("topic")
-            or resolved.get("title")
-            or "视频优化"
-        )
-        result["copy_result"] = normalize_copy_result_payload(
-            result.get("copy_result"),
-            copy_topic,
-            resolved.get("style", "干货"),
-        )
-    result["reference_videos"] = build_reference_videos_from_market_snapshot(
-        market_snapshot,
-        exclude_bvid=resolved.get("bv_id", ""),
-        query_text=reference_query,
-        resolved=resolved,
-    )
-    return result
+    return finalize_module_analyze_result(result, resolved, market_snapshot)
 
 
 # 当分析 Agent 中枢不可用时，直接用单次 LLM 调用回退生成分析结果。
@@ -3201,7 +3944,6 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
 def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     llm = build_runtime_llm_client()
     llm.require_available()
-    reference_query = build_reference_query_text(resolved)
     compact_snapshot = compact_market_snapshot_for_llm(market_snapshot)
     system_prompt = (
         "你是 B 站视频分析助手。"
@@ -3222,38 +3964,18 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
         "6. 如果你判断 is_hot=false，则 copy_result 必须输出一版新文案，analysis 重点输出 analysis_points, next_topics, title_suggestions, cover_suggestion, content_suggestions。\n"
         "7. copy_result.titles 必须是陈述型、叙事型、生活化标题，不要提问句，不要教学口吻，不要出现“为什么 / 怎么 / 哪种 / 更容易起量 / 更容易进推荐”这类模板。\n"
         "8. 如果当前标题属于异地恋 / 情侣约会 / 520 日常 vlog，copy_result.script 必须写成可直接对镜口播的生活化脚本，严格保留 0-8s 开头钩子、8-28s 核心画面1、28-56s 核心画面2、56-75s 结尾互动；内容必须贴合酒店、早午餐、逛街拍照、小清吧、异地恋见面这些场景，禁止出现切口、测反馈、完播、方向跑偏、实战拆解等运营词。\n"
-        "9. analysis 里的 followup_topics / next_topics 也必须是具体新方向，不要把原视频标题后面机械加问题后缀。"
+        "9. analysis 里的 followup_topics / next_topics 也必须是具体新方向，不要把原视频标题后面机械加问题后缀。\n"
+        "10. analysis 必须额外包含：benchmark_analysis, remake_script_structure, advanced_title_sets, cover_plan, tag_strategy, publish_strategy, reusable_hit_points。\n"
+        "11. benchmark_analysis 要基于同赛道高表现样本，总结 common_title_formulas, common_rhythm_formulas, common_structure_formulas。\n"
+        "12. advanced_title_sets 里要输出 short_titles / long_titles / conflict_titles，每组 3 个。\n"
+        "13. cover_plan 要输出 copy_lines, layout_advice, color_scheme, highlight_elements。\n"
+        "14. publish_strategy 要输出 best_publish_windows, should_ask_for_coin, coin_call_to_action, suggested_comment_guides。"
     )
     result = llm.invoke_json_required(system_prompt, user_prompt)
     if not isinstance(result, dict):
         raise ValueError("LLM fallback 返回格式无效")
-    result["resolved"] = resolved
-    result["performance"] = normalize_performance_payload(result.get("performance"))
-    if result.get("copy_result") is not None:
-        copy_topic = (
-            clean_copy_text((result.get("copy_result") or {}).get("topic", ""))
-            or clean_copy_text(((result.get("topic_result") or {}).get("ideas") or [{}])[0].get("topic", ""))
-            or resolved.get("topic")
-            or resolved.get("title")
-            or "视频优化"
-        )
-        result["copy_result"] = normalize_copy_result_payload(
-            result.get("copy_result"),
-            copy_topic,
-            resolved.get("style", "干货"),
-        )
-    result.setdefault(
-        "reference_videos",
-        build_reference_videos_from_market_snapshot(
-            market_snapshot,
-            exclude_bvid=resolved.get("bv_id", ""),
-            query_text=reference_query,
-            resolved=resolved,
-        ),
-    )
-    result.setdefault("runtime_mode", "llm_agent")
     result.setdefault("agent_trace", ["llm_direct_fallback"])
-    return result
+    return finalize_module_analyze_result(result, resolved, market_snapshot)
 
 
 # 运行聊天助手，让 LLM Agent 按需调工具后返回自然语言答复。
@@ -3582,8 +4304,8 @@ def api_module_analyze():
         return jsonify({"success": False, "error": f"链接解析失败：{exc}"}), 400
 
     if runtime_llm_enabled():
+        market_snapshot = build_market_snapshot(resolved.get("partition"), resolved.get("up_ids"))
         try:
-            market_snapshot = build_market_snapshot(resolved.get("partition"), resolved.get("up_ids"))
             return jsonify({"success": True, "data": run_llm_module_analyze(data, resolved, market_snapshot)})
         except Exception as exc:
             if should_skip_same_provider_fallback(exc):
@@ -3602,7 +4324,6 @@ def api_module_analyze():
                     llm_error_http_status(exc),
                 )
             try:
-                market_snapshot = build_market_snapshot(resolved.get("partition"), resolved.get("up_ids"))
                 fallback_result = run_llm_module_analyze_fallback(data, resolved, market_snapshot)
                 fallback_result["llm_warning"] = f"Agent 中枢执行失败，已切换到 LLM 直出分析：{format_llm_error(exc)}"
                 return jsonify({"success": True, "data": fallback_result})

@@ -200,6 +200,18 @@ python main.py pipeline --bv BV1xx411c7mD --partition knowledge --style 干货 -
 - 可继续延展的选题方向
 - 对于低表现视频，额外生成一版新的文案参考
 
+当前 `module-analyze` 的 LLM 结果除了原有字段外，还会在 `analysis` 下补充：
+
+- 同赛道爆款对标分析
+- 可直接翻拍的脚本结构
+- 3 组可直接使用的优化标题
+- 封面文案与构图建议
+- 标签组合
+- 发布策略建议
+- 可复制爆款点总结
+
+并且保留旧字段兼容，不要求前端跟着改。
+
 ### 智能对话助手
 
 输入：
@@ -250,3 +262,9 @@ D:\agent
 - 有 Key 时 Web 层会切到严格的 LLM Agent 模式
 
 更详细说明见 `docs/` 目录。 
+
+如果你后面还要继续调 `module-analyze` 的输出结构或耗时，先看：
+
+- [docs/02_完整部署文档.md](D:\agent\docs\02_完整部署文档.md)
+- [docs/02_完整部署文档.md](docs/02_完整部署文档.md)
+  其中 `9. module-analyze 结构扩展与性能优化记录` 记录了这次排查到的问题和处理方式。

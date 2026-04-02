@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Sequence
 
@@ -299,6 +300,16 @@ class LLMWorkspaceAgent:
         except Exception:
             return
 
+    def _save_memory_async(self, user_id: str, task_name: str, user_payload: Dict[str, Any], final: Dict[str, Any]) -> None:
+        if not self.memory_store:
+            return
+
+        def worker() -> None:
+            self._save_memory(user_id, task_name, user_payload, final)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+
     # 运行受限的工具调用循环，直到模型给出合法最终结果或步数耗尽。
     @traceable(run_type="chain", name="llm_workspace_agent.run_structured", tags=["llm_agent", "rag"])
     def run_structured(
@@ -312,6 +323,9 @@ class LLMWorkspaceAgent:
         required_tools: Sequence[str] | None = None,
         required_final_keys: Sequence[str] | None = None,
         max_steps: int | None = None,
+        load_history: bool = True,
+        save_memory: bool = True,
+        enable_reflection: bool = True,
     ) -> Dict[str, Any]:
         self.llm.require_available()
 
@@ -326,7 +340,7 @@ class LLMWorkspaceAgent:
         limit = max_steps or self.max_steps
         user_id = self._build_history_key(task_name, user_payload)
         query_text = self._build_query_text(task_name, task_goal, user_payload)
-        history_block = self._history_block(user_id, query_text)
+        history_block = self._history_block(user_id, query_text) if load_history else "当前任务已跳过历史上下文检索。"
         self._auto_retrieve(allowed_tools=allowed_tools, query_text=query_text, scratchpad=scratchpad, used_tools=used_tools)
 
         system_prompt = (
@@ -401,19 +415,21 @@ class LLMWorkspaceAgent:
                     )
                     continue
 
-                final = self._reflect_final(
-                    task_name=task_name,
-                    task_goal=task_goal,
-                    user_payload=user_payload,
-                    response_contract=response_contract,
-                    final=dict(final),
-                    scratchpad=scratchpad,
-                    required_final_keys=required_final_keys,
-                )
+                if enable_reflection:
+                    final = self._reflect_final(
+                        task_name=task_name,
+                        task_goal=task_goal,
+                        user_payload=user_payload,
+                        response_contract=response_contract,
+                        final=dict(final),
+                        scratchpad=scratchpad,
+                        required_final_keys=required_final_keys,
+                    )
                 final.setdefault("agent_trace", used_tools)
                 final.setdefault("tool_observations", scratchpad)
                 final.setdefault("runtime_mode", "llm_agent")
-                self._save_memory(user_id, task_name, user_payload, final)
+                if save_memory:
+                    self._save_memory_async(user_id, task_name, user_payload, final)
                 return final
 
             if action not in allowed_tools:
