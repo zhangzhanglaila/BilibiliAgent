@@ -3901,7 +3901,6 @@ def run_llm_module_create_fallback(data: dict) -> dict:
 @traceable(run_type="chain", name="web.run_llm_module_analyze", tags=["web", "llm", "rag", "module_analyze"])
 def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     agent = get_llm_workspace_agent()
-    compact_snapshot = compact_market_snapshot_for_llm(market_snapshot, limit=3)
     response_contract = (
         "返回一个 JSON 对象，字段必须包含：\n"
         "- resolved: 对象，包含 bv_id, title, up_name, tname, partition, partition_label, stats\n"
@@ -3920,21 +3919,20 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
     )
     result = agent.run_structured(
         task_name="module_analyze",
-        task_goal="基于后端已经解析出的当前视频真实信息、市场样本和本次自动完成的知识库检索，判断它更接近爆款还是低表现，并输出完整结构化分析。当前 payload 已经足够，除 retrieval 外不要再额外调工具，不要重复解析视频或重复拉取外部数据。",
+        task_goal="基于后端已经解析出的当前视频真实信息和完整市场样本，结合知识库检索、热点榜单、联网搜索、代码解释器与长期记忆按需补充信息，判断它更接近爆款还是低表现，并输出完整结构化分析。优先复用当前 payload，只有在需要补充案例、最新趋势、外部公开信息或数据计算时再继续调工具。",
         user_payload={
             "url": (data.get("url") or "").strip(),
             "parsed_video": resolved,
-            "market_snapshot": compact_snapshot,
+            "market_snapshot": market_snapshot,
             "memory_user_id": "web_module_analyze",
         },
         response_contract=response_contract,
-        allowed_tools=["retrieval"],
-        required_tools=["retrieval"],
+        allowed_tools=["retrieval", "hot_board_snapshot", "web_search", "code_interpreter"],
         required_final_keys=["resolved", "performance", "topic_result", "optimize_result", "analysis", "copy_result"],
-        max_steps=2,
-        load_history=False,
-        save_memory=False,
-        enable_reflection=False,
+        max_steps=4,
+        load_history=True,
+        save_memory=True,
+        enable_reflection=True,
     )
     return finalize_module_analyze_result(result, resolved, market_snapshot)
 
@@ -3944,7 +3942,6 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
 def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     llm = build_runtime_llm_client()
     llm.require_available()
-    compact_snapshot = compact_market_snapshot_for_llm(market_snapshot)
     system_prompt = (
         "你是 B 站视频分析助手。"
         "当前已经拿到后端解析出的真实视频信息和同类样本，请直接完成爆款/低表现判断、原因拆解、优化建议和后续选题。"
@@ -3954,7 +3951,7 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
         "请根据下面的数据直接输出 JSON，对象字段必须包含："
         "resolved, performance, topic_result, optimize_result, copy_result, analysis。\n\n"
         f"当前视频真实信息：{json.dumps(resolved, ensure_ascii=False)}\n\n"
-        f"市场样本：{json.dumps(compact_snapshot, ensure_ascii=False)}\n\n"
+        f"市场样本：{json.dumps(market_snapshot, ensure_ascii=False)}\n\n"
         "要求：\n"
         "1. resolved 直接复用当前视频真实信息，不要改 BV、标题、播放等字段。\n"
         "2. performance 必须包含 label, is_hot, score, reasons, summary。\n"

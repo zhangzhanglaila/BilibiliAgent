@@ -42,7 +42,7 @@ Web 层采用双模式架构：
 ### LLM 链路（有 Key）
 
 - `module-create`：`LLMWorkspaceAgent` + `creator_briefing`，必要时可继续调用 `retrieval / web_search / code_interpreter`
-- `module-analyze`：`LLMWorkspaceAgent` + `video_briefing`，必要时可继续调用 `retrieval / web_search / code_interpreter`
+- `module-analyze`：`LLMWorkspaceAgent` + 后端解析出的 `parsed_video / market_snapshot`，按需调用 `retrieval / hot_board_snapshot / web_search / code_interpreter`，并启用长期记忆与 reflection
 - `chat`：`LLMWorkspaceAgent` 自主调用 `retrieval / creator_briefing / video_briefing / hot_board_snapshot / web_search / code_interpreter`
 
 ## 安装
@@ -211,6 +211,15 @@ python main.py pipeline --bv BV1xx411c7mD --partition knowledge --style 干货 -
 - 可复制爆款点总结
 
 并且保留旧字段兼容，不要求前端跟着改。
+
+`module-analyze` 当前完整呈现的 Agent 技术栈包括：
+
+- RAG 检索 `retrieval`
+- 热点榜单抓取 `hot_board_snapshot`
+- 联网搜索 `web_search`
+- 代码解释器 `code_interpreter`
+- 长期记忆加载与异步写回
+- reflection 结果反思与二次质检
 
 ### 智能对话助手
 
