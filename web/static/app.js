@@ -990,15 +990,23 @@ function knowledgeUpdateProgressView(job = {}) {
   const boardText = job.board_type || '等待分配榜单';
   const itemText = job.current_title || '等待处理样本';
   return `
-    ${loadingCard('正在更新热门知识库', message, ['准备任务', '抓取榜单', '同步样本', '完成更新'], percent)}
-    <div class="summary-strip summary-strip--metrics">
+    <section class="knowledge-update-progress">
+      ${loadingCard('正在更新热门知识库', message, ['准备任务', '抓取榜单', '同步样本', '完成更新'], percent)}
+    </section>
+    <div class="summary-strip summary-strip--metrics knowledge-update-progress__metrics">
       ${metricCard('实时进度', formatProgressLabel(percent), '按真实抓取与入库进度更新')}
       ${metricCard('榜单进度', `${num(job.processed_boards || 0)} / ${num(job.total_boards || 0)}`, '已完成榜单数 / 总榜单数')}
       ${metricCard('样本进度', `${num(job.processed_items || 0)} / ${num(job.total_items || 0)}`, '已同步样本数 / 预计总样本数')}
     </div>
-    <div class="summary-strip">
-      <div class="info-card"><h4>当前榜单</h4><p>${escapeHtml(boardText)}</p></div>
-      <div class="info-card"><h4>当前样本</h4><p>${escapeHtml(itemText)}</p></div>
+    <div class="summary-strip knowledge-update-progress__context">
+      <div class="info-card knowledge-update-progress__card">
+        <h4>当前榜单</h4>
+        <p>${escapeHtml(boardText)}</p>
+      </div>
+      <div class="info-card knowledge-update-progress__card knowledge-update-progress__card--sample">
+        <h4>当前样本</h4>
+        <p>${escapeHtml(itemText)}</p>
+      </div>
     </div>
   `;
 }

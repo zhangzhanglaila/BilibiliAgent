@@ -1012,6 +1012,42 @@ button {
   margin-top: 18px;
 }
 
+.knowledge-update-progress {
+  margin-bottom: 18px;
+}
+
+.knowledge-update-progress__metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.knowledge-update-progress__metrics .stat-card {
+  min-height: 100%;
+  padding: 20px 22px;
+}
+
+.knowledge-update-progress__context {
+  grid-template-columns: minmax(220px, 0.9fr) minmax(320px, 1.6fr);
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.knowledge-update-progress__card {
+  min-height: 100%;
+  padding: 20px 22px;
+}
+
+.knowledge-update-progress__card h4 {
+  margin: 0;
+}
+
+.knowledge-update-progress__card p {
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.8;
+  word-break: break-word;
+}
+
 .knowledge-status-metrics .stat-card {
   min-height: 100%;
   padding: 20px 22px;
@@ -1863,6 +1899,8 @@ button {
   .mode-banner,
   .summary-strip,
   .summary-strip--metrics,
+  .knowledge-update-progress__metrics,
+  .knowledge-update-progress__context,
   .topic-grid,
   .copy-title-grid,
   .reference-grid,
@@ -1911,6 +1949,8 @@ button {
   .runtime-config-form__grid,
   .summary-strip,
   .summary-strip--metrics,
+  .knowledge-update-progress__metrics,
+  .knowledge-update-progress__context,
   .topic-grid,
   .copy-title-grid,
   .reference-grid,
