@@ -2539,6 +2539,10 @@ def reference_video_needs_metric_refresh(item: dict) -> bool:
     return view is None or view <= 0 or like is None or (like <= 0 and like_rate <= 0.0)
 
 
+def reference_video_needs_cover_refresh(item: dict) -> bool:
+    return not normalize_text_value(item.get("cover"))
+
+
 def reference_video_needs_semantic_refresh(item: dict) -> bool:
     partition = str(item.get("partition") or "").strip()
     topic = str(item.get("topic") or "").strip()
@@ -2563,8 +2567,10 @@ def build_reference_semantic_text(item: dict) -> str:
 # 为最终展示前的参考视频补齐播放、点赞和基础信息。
 def enrich_reference_video_for_display(item: dict, require_semantics: bool = False) -> dict:
     enriched = dict(item or {})
-    need_refresh = reference_video_needs_metric_refresh(enriched) or (
-        require_semantics and reference_video_needs_semantic_refresh(enriched)
+    need_refresh = (
+        reference_video_needs_metric_refresh(enriched)
+        or reference_video_needs_cover_refresh(enriched)
+        or (require_semantics and reference_video_needs_semantic_refresh(enriched))
     )
     if not need_refresh:
         return enriched
@@ -2844,18 +2850,23 @@ def build_reference_videos_from_market_snapshot(
     ranked = sorted(entries, key=lambda entry: (entry[0], entry[1]), reverse=True)
     return [
         {
-            "title": item.get("title", ""),
-            "url": item.get("url", ""),
-            "author": item.get("author", ""),
-            "cover": item.get("cover", ""),
-            "view": safe_int(item.get("view")),
-            "like": safe_optional_int(item.get("like")),
-            "like_rate": float(item.get("like_rate") or 0.0),
-            "source": item.get("source", ""),
-        }
-        for _, _, item in ranked[:6]
-        if item.get("url")
-    ]
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "author": item.get("author", ""),
+                "cover": item.get("cover", ""),
+                "view": safe_int(item.get("view")),
+                "like": safe_optional_int(item.get("like")),
+                "like_rate": float(item.get("like_rate") or 0.0),
+                "source": item.get("source", ""),
+                "bvid": item.get("bvid", ""),
+                "partition": item.get("partition", ""),
+                "partition_label": item.get("partition_label", ""),
+                "topic": item.get("topic", ""),
+                "keywords": item.get("keywords", []),
+            }
+            for _, _, item in ranked[:6]
+            if item.get("url")
+        ]
 
 
 def normalize_text_value(value: object) -> str:
@@ -3010,6 +3021,11 @@ def build_reference_videos_from_retrieval_matches(
                 "like": safe_optional_int(item.get("like")),
                 "like_rate": float(item.get("like_rate") or 0.0),
                 "source": item.get("source", ""),
+                "bvid": item.get("bvid", ""),
+                "partition": item.get("partition", ""),
+                "partition_label": item.get("partition_label", ""),
+                "topic": item.get("topic", ""),
+                "keywords": item.get("keywords", []),
             }
         )
     return result
@@ -3030,26 +3046,50 @@ def build_module_analyze_reference_videos(
         resolved=resolved,
         limit=6,
     )
-    if len(retrieval_videos) >= 4:
-        return retrieval_videos[:6]
-
     market_videos = build_reference_videos_from_market_snapshot(
         market_snapshot,
         exclude_bvid=exclude_bvid,
         query_text=query_text,
         resolved=resolved,
     )
+
     merged: list[dict] = []
     seen: set[str] = set()
     for item in retrieval_videos + market_videos:
+        identity_keys = build_reference_identity_keys(item)
         url = (item.get("url") or "").strip()
-        if not url or url in seen:
+        if not url:
             continue
-        seen.add(url)
+        if not identity_keys:
+            identity_keys = [f"url:{url}"]
+        if any(key in seen for key in identity_keys):
+            continue
+        for key in identity_keys:
+            seen.add(key)
         merged.append(item)
-        if len(merged) >= 6:
+
+    enriched_result: list[dict] = []
+    for item in merged:
+        enriched = enrich_reference_video_for_display(item)
+        if not normalize_text_value(enriched.get("cover")):
+            continue
+        if not has_complete_reference_display_metrics(enriched):
+            continue
+        enriched_result.append(
+            {
+                "title": enriched.get("title", ""),
+                "url": enriched.get("url", ""),
+                "author": enriched.get("author", ""),
+                "cover": enriched.get("cover", ""),
+                "view": safe_int(enriched.get("view")),
+                "like": safe_optional_int(enriched.get("like")),
+                "like_rate": float(enriched.get("like_rate") or 0.0),
+                "source": enriched.get("source", ""),
+            }
+        )
+        if len(enriched_result) >= 6:
             break
-    return merged
+    return enriched_result
 
 
 def infer_title_formula(title: str) -> str:

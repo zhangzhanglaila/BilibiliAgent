@@ -72,6 +72,7 @@ web/templates + web/static     -> 前端页面
 9. [agents/optimization_agent.py](../agents/optimization_agent.py)
 10. [graph.py](../graph.py)
 11. [main.py](../main.py)
+12. [08_Agent智能体模块专项技术文档.md](./08_Agent智能体模块专项技术文档.md)
 
 ## 4. 当前 Web 页面到底有哪些模块
 
@@ -107,9 +108,11 @@ web/templates + web/static     -> 前端页面
 ### 5.3 知识库链路
 
 1. `/api/knowledge/upload`
-2. `/api/knowledge/update`
-3. `/api/knowledge/sample`
-4. `/api/knowledge/search`
+2. 页面当前会先调 `POST /api/knowledge/update/start`
+3. 再轮询 `GET /api/knowledge/update/<job_id>`
+4. `/api/knowledge/sample`
+5. `/api/knowledge/search`
+6. 如果直接调用后端同步接口，仍保留 `POST /api/knowledge/update`
 
 ### 5.4 聊天链路
 
@@ -193,7 +196,7 @@ CLI 和兼容接口要单独看。
 - 先把 Web 主链路和知识库接口跑通
 - 先理解页面输入如何一路传到 `web/app.py`
 - 再理解规则模式和 LLM Agent 模式的分叉
-- 最后再看 Agent 内部策略和提示词
+- 最后再看 [08_Agent智能体模块专项技术文档.md](./08_Agent智能体模块专项技术文档.md) 里的 Agent 工具循环、RAG、记忆和 Reflection
 
 如果你只打算先改一个需求，推荐从：
 
