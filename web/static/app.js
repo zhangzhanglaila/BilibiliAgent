@@ -47,6 +47,7 @@ const state = {
   activeModule: 'analyze',
   knowledgeActiveSubtab: 'upload',
   knowledgeStatus: null,
+  knowledgeUpdateTask: null,
   knowledgeForm: {
     updateLimit: 10,
     viewLimit: 6,
@@ -943,6 +944,9 @@ function setKnowledgeSubtab(tab) {
     button.classList.toggle('is-active', button.dataset.knowledgeSubtab === next);
   });
   renderKnowledgeActionPane(next);
+  if (next === 'sync') {
+    syncKnowledgeUpdateButtonState();
+  }
   const box = $('#knowledgeStageResult');
   if (!box) return;
   box.innerHTML = state.knowledgeResults[next] || knowledgePlaceholder(next);
@@ -966,6 +970,142 @@ function knowledgeSyncDefaultResult(payload = {}) {
   );
 }
 
+function knowledgeUpdateBoardSummary(result = {}) {
+  const boards = Array.isArray(result.boards) ? result.boards : [];
+  if (!boards.length) return '';
+  return `<div class="summary-strip summary-strip--metrics">${boards.map(item => metricCard(item.board_type || '榜单', `写入 ${num(item.saved_count || 0)}`, `覆盖 ${num(item.updated_count || 0)} / 失败 ${Array.isArray(item.failed) ? item.failed.length : 0}`)).join('')}</div>`;
+}
+
+function knowledgeUpdateSummaryHtml(job = {}) {
+  const result = job.result || {};
+  return `
+    ${infoCard('更新完成', `本次共写入 ${result.total_saved || 0} 条热门样本，其中覆盖更新 ${result.total_updated || 0} 条，失败 ${result.total_failed || 0} 条。`)}
+    ${knowledgeUpdateBoardSummary(result)}
+  `;
+}
+
+function knowledgeUpdateProgressView(job = {}) {
+  const percent = clampProgressValue(job.percent ?? 0);
+  const message = job.message || '系统正在抓取全站热门榜、分区热门榜、每周必看和入站必刷。';
+  const boardText = job.board_type || '等待分配榜单';
+  const itemText = job.current_title || '等待处理样本';
+  return `
+    ${loadingCard('正在更新热门知识库', message, ['准备任务', '抓取榜单', '同步样本', '完成更新'], percent)}
+    <div class="summary-strip summary-strip--metrics">
+      ${metricCard('实时进度', formatProgressLabel(percent), '按真实抓取与入库进度更新')}
+      ${metricCard('榜单进度', `${num(job.processed_boards || 0)} / ${num(job.total_boards || 0)}`, '已完成榜单数 / 总榜单数')}
+      ${metricCard('样本进度', `${num(job.processed_items || 0)} / ${num(job.total_items || 0)}`, '已同步样本数 / 预计总样本数')}
+    </div>
+    <div class="summary-strip">
+      <div class="info-card"><h4>当前榜单</h4><p>${escapeHtml(boardText)}</p></div>
+      <div class="info-card"><h4>当前样本</h4><p>${escapeHtml(itemText)}</p></div>
+    </div>
+  `;
+}
+
+function stopKnowledgeUpdatePolling() {
+  if (state.knowledgeUpdateTask?.timer) {
+    window.clearTimeout(state.knowledgeUpdateTask.timer);
+  }
+  state.knowledgeUpdateTask = null;
+}
+
+function syncKnowledgeUpdateButtonState() {
+  const job = state.knowledgeUpdateTask?.job || null;
+  if (!job || !['queued', 'running'].includes(job.status)) {
+    setActionButtonLoading('knowledgeUpdateBtn', false);
+    return;
+  }
+  const desc = `${formatProgressLabel(job.percent ?? 0)} · ${job.message || '正在抓取并去重'}`;
+  setActionButtonLoading('knowledgeUpdateBtn', true, '更新中', desc);
+}
+
+function renderKnowledgeUpdateJob(job = {}) {
+  state.knowledgeUpdateTask = {
+    ...(state.knowledgeUpdateTask || {}),
+    jobId: job.id || state.knowledgeUpdateTask?.jobId || '',
+    job,
+    timer: state.knowledgeUpdateTask?.timer || null,
+  };
+  renderKnowledgeResult(knowledgeUpdateProgressView(job), 'sync');
+  syncKnowledgeUpdateButtonState();
+}
+
+function finishKnowledgeUpdateJob(job = {}, options = {}) {
+  const knowledgeStatus = job.knowledge_status || state.knowledgeStatus || {};
+  state.knowledgeStatus = knowledgeStatus;
+  renderKnowledgeStatusBar(knowledgeStatus);
+  renderKnowledgeResult(knowledgeStatusView(knowledgeStatus, knowledgeUpdateSummaryHtml(job)), 'sync');
+  stopKnowledgeUpdatePolling();
+  syncKnowledgeUpdateButtonState();
+  setStatus('知识库已更新', 'success');
+  if (!options.silent) {
+    const result = job.result || {};
+    showToast('更新成功', `本次写入 ${result.total_saved || 0} 条热门样本`);
+  }
+}
+
+function failKnowledgeUpdateJob(job = {}, errorMessage = '', options = {}) {
+  const detail = errorMessage || job.message || job.error || '知识库更新失败';
+  const progressHtml = job && (job.percent || job.processed_items || job.processed_boards)
+    ? knowledgeUpdateProgressView(job)
+    : '';
+  renderKnowledgeResult(`${progressHtml}${infoCard('知识库更新失败', detail, 'danger')}`, 'sync');
+  stopKnowledgeUpdatePolling();
+  syncKnowledgeUpdateButtonState();
+  setStatus('知识库更新失败', 'error');
+  if (!options.silent) {
+    showToast('更新失败', detail, 'error');
+  }
+}
+
+function scheduleKnowledgeUpdatePoll(delay = 900) {
+  if (!state.knowledgeUpdateTask?.jobId) return;
+  if (state.knowledgeUpdateTask.timer) {
+    window.clearTimeout(state.knowledgeUpdateTask.timer);
+  }
+  state.knowledgeUpdateTask.timer = window.setTimeout(() => {
+    pollKnowledgeUpdateJob(state.knowledgeUpdateTask?.jobId || '', { silent: state.knowledgeUpdateTask?.silent });
+  }, delay);
+}
+
+async function pollKnowledgeUpdateJob(jobId, options = {}) {
+  if (!jobId) return;
+  try {
+    const job = await requestGetJson(`/api/knowledge/update/${encodeURIComponent(jobId)}`);
+    if (!state.knowledgeUpdateTask || state.knowledgeUpdateTask.jobId !== jobId) return;
+    state.knowledgeUpdateTask.job = job;
+    if (job.status === 'completed') {
+      finishKnowledgeUpdateJob(job, options);
+      return;
+    }
+    if (job.status === 'failed') {
+      failKnowledgeUpdateJob(job, job.message || job.error || '', options);
+      return;
+    }
+    renderKnowledgeUpdateJob(job);
+    setStatus(job.message || '正在更新知识库', 'loading');
+    scheduleKnowledgeUpdatePoll();
+  } catch (error) {
+    if (!state.knowledgeUpdateTask || state.knowledgeUpdateTask.jobId !== jobId) return;
+    failKnowledgeUpdateJob(state.knowledgeUpdateTask.job || {}, `进度读取失败：${error.message}`, options);
+  }
+}
+
+function resumeKnowledgeUpdateJob(job = {}, options = {}) {
+  if (!job?.id) return;
+  stopKnowledgeUpdatePolling();
+  state.knowledgeUpdateTask = {
+    jobId: job.id,
+    job,
+    timer: null,
+    silent: Boolean(options.silent),
+  };
+  renderKnowledgeUpdateJob(job);
+  setStatus(job.message || '正在更新知识库', 'loading');
+  scheduleKnowledgeUpdatePoll(options.immediate ? 0 : 900);
+}
+
 // 页面加载时读取知识库状态。
 async function loadKnowledgeBaseStatus() {
   if (!$('#knowledgeStatusBar')) return;
@@ -973,9 +1113,13 @@ async function loadKnowledgeBaseStatus() {
     const data = await requestGetJson('/api/knowledge/status');
     state.knowledgeStatus = data;
     renderKnowledgeStatusBar(data);
-    state.knowledgeResults.sync = knowledgeSyncDefaultResult(data);
-    if (state.knowledgeActiveSubtab === 'sync') {
-      renderKnowledgeResult(state.knowledgeResults.sync, 'sync');
+    if (data.active_update_job?.id && ['queued', 'running'].includes(data.active_update_job.status)) {
+      resumeKnowledgeUpdateJob(data.active_update_job, { silent: true });
+    } else {
+      state.knowledgeResults.sync = knowledgeSyncDefaultResult(data);
+      if (state.knowledgeActiveSubtab === 'sync') {
+        renderKnowledgeResult(state.knowledgeResults.sync, 'sync');
+      }
     }
   } catch (error) {
     renderKnowledgeStatusBar({ available: false, document_count: 0, last_updated_at: '读取失败' });
@@ -1099,32 +1243,18 @@ async function updateKnowledgeBase() {
   syncKnowledgeFormStateFromDom();
   const limit = Math.max(1, Math.min(20, Number(state.knowledgeForm.updateLimit || 10) || 10));
 
-  setActionButtonLoading('knowledgeUpdateBtn', true, '更新中', '正在抓取并去重');
-  renderKnowledgeResult(loadingCard('正在更新热门知识库', '系统会抓取全站热门榜、分区热门榜、每周必看和入站必刷，并把结构化结果追加写入 Chroma。', ['抓取榜单', '提取优点', '写入向量库']), 'sync');
-  setStatus('正在更新知识库', 'loading');
-
   try {
-    const data = await requestJson('/api/knowledge/update', { limit });
-    const result = data.update_result || {};
-    const boards = Array.isArray(result.boards) ? result.boards : [];
-    const boardSummary = boards.length
-      ? `<div class="summary-strip summary-strip--metrics">${boards.map(item => metricCard(item.board_type || '榜单', `写入 ${num(item.saved_count || 0)}`, `覆盖 ${num(item.updated_count || 0)} / 失败 ${Array.isArray(item.failed) ? item.failed.length : 0}`)).join('')}</div>`
-      : '';
-    const summaryHtml = `
-      ${infoCard('更新完成', `本次共写入 ${result.total_saved || 0} 条热门样本，其中覆盖更新 ${result.total_updated || 0} 条，失败 ${result.total_failed || 0} 条。`)}
-      ${boardSummary}
-    `;
-    state.knowledgeStatus = data.knowledge_status || state.knowledgeStatus;
-    renderKnowledgeStatusBar(state.knowledgeStatus || {});
-    renderKnowledgeResult(knowledgeStatusView(data.knowledge_status || {}, summaryHtml), 'sync');
-    setStatus('知识库已更新', 'success');
-    showToast('更新成功', `本次写入 ${result.total_saved || 0} 条热门样本`);
+    const data = await requestJson('/api/knowledge/update/start', { limit });
+    const job = data.job || {};
+    if (!job.id) {
+      throw new Error('知识库更新任务启动失败，未返回任务 ID。');
+    }
+    resumeKnowledgeUpdateJob(job, { silent: Boolean(data.already_running), immediate: true });
+    if (data.already_running) {
+      showToast('任务继续执行中', '已有热门知识库更新任务在运行，已切换到当前实时进度。');
+    }
   } catch (error) {
-    renderKnowledgeResult(infoCard('知识库更新失败', error.message, 'danger'), 'sync');
-    setStatus('知识库更新失败', 'error');
-    showToast('更新失败', error.message, 'error');
-  } finally {
-    setActionButtonLoading('knowledgeUpdateBtn', false);
+    failKnowledgeUpdateJob(state.knowledgeUpdateTask?.job || {}, error.message);
   }
 }
 

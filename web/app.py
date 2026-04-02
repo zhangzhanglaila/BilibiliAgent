@@ -1,14 +1,18 @@
 """Flask web entry for the Bilibili content ideation and analysis workspace."""
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import re
 import sys
+import threading
+import time
 from base64 import b64decode
 from html import unescape
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from flask import Flask, jsonify, render_template, request
 
@@ -270,11 +274,191 @@ VIDEO_TNAME_HINTS = {
     255: "颜值·网红舞",
 }
 SUPPORTED_KNOWLEDGE_UPLOAD_SUFFIXES = {".txt", ".md", ".docx", ".pdf"}
+KNOWLEDGE_UPDATE_JOB_LOCK = threading.Lock()
+KNOWLEDGE_UPDATE_EXECUTION_LOCK = threading.Lock()
+KNOWLEDGE_UPDATE_JOBS: dict[str, dict] = {}
+KNOWLEDGE_UPDATE_ACTIVE_JOB_ID: str | None = None
+KNOWLEDGE_UPDATE_JOB_TTL_SECONDS = 60 * 60
 
 
 # 判断当前是否已经保存了可用于启用 LLM Agent 的运行时配置。
 def has_saved_runtime_llm_config() -> bool:
     return bool((RUNTIME_LLM_CONFIG or {}).get("api_key", "").strip())
+
+
+def now_text() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+
+def snapshot_knowledge_update_job(job: dict | None) -> dict | None:
+    if not job:
+        return None
+    payload = deepcopy(job)
+    payload.pop("updated_at_ts", None)
+    return payload
+
+
+def cleanup_knowledge_update_jobs_locked() -> None:
+    expires_before = time.time() - KNOWLEDGE_UPDATE_JOB_TTL_SECONDS
+    expired_job_ids = [
+        job_id
+        for job_id, job in KNOWLEDGE_UPDATE_JOBS.items()
+        if str(job.get("status") or "") not in {"queued", "running"}
+        and float(job.get("updated_at_ts") or 0) < expires_before
+    ]
+    for job_id in expired_job_ids:
+        KNOWLEDGE_UPDATE_JOBS.pop(job_id, None)
+
+
+def active_knowledge_update_job_locked() -> dict | None:
+    if not KNOWLEDGE_UPDATE_ACTIVE_JOB_ID:
+        return None
+    job = KNOWLEDGE_UPDATE_JOBS.get(KNOWLEDGE_UPDATE_ACTIVE_JOB_ID)
+    if not job:
+        return None
+    if str(job.get("status") or "") not in {"queued", "running"}:
+        return None
+    return job
+
+
+def get_active_knowledge_update_job() -> dict | None:
+    with KNOWLEDGE_UPDATE_JOB_LOCK:
+        cleanup_knowledge_update_jobs_locked()
+        return snapshot_knowledge_update_job(active_knowledge_update_job_locked())
+
+
+def get_knowledge_update_job(job_id: str) -> dict | None:
+    with KNOWLEDGE_UPDATE_JOB_LOCK:
+        cleanup_knowledge_update_jobs_locked()
+        return snapshot_knowledge_update_job(KNOWLEDGE_UPDATE_JOBS.get(job_id))
+
+
+def update_knowledge_update_job(job_id: str, payload: dict) -> dict | None:
+    with KNOWLEDGE_UPDATE_JOB_LOCK:
+        job = KNOWLEDGE_UPDATE_JOBS.get(job_id)
+        if job is None:
+            return None
+        job.update(payload)
+        job["id"] = job_id
+        job["updated_at"] = now_text()
+        job["updated_at_ts"] = time.time()
+        if str(job.get("status") or "") in {"completed", "failed"} and not job.get("completed_at"):
+            job["completed_at"] = job["updated_at"]
+        return snapshot_knowledge_update_job(job)
+
+
+def clear_active_knowledge_update_job(job_id: str) -> None:
+    global KNOWLEDGE_UPDATE_ACTIVE_JOB_ID
+    with KNOWLEDGE_UPDATE_JOB_LOCK:
+        if KNOWLEDGE_UPDATE_ACTIVE_JOB_ID == job_id:
+            KNOWLEDGE_UPDATE_ACTIVE_JOB_ID = None
+
+
+def run_knowledge_update_job(job_id: str, limit: int) -> None:
+    acquired = KNOWLEDGE_UPDATE_EXECUTION_LOCK.acquire(blocking=False)
+    if not acquired:
+        clear_active_knowledge_update_job(job_id)
+        update_knowledge_update_job(
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "percent": 0.0,
+                "message": "已有热门知识库更新任务正在执行，请稍后重试",
+                "error": "已有热门知识库更新任务正在执行，请稍后重试",
+            },
+        )
+        return
+
+    try:
+        update_knowledge_update_job(
+            job_id,
+            {
+                "status": "running",
+                "stage": "prepare",
+                "percent": 0.0,
+                "message": "正在准备热门知识库更新任务",
+                "started_at": now_text(),
+            },
+        )
+
+        def progress_callback(progress: dict) -> None:
+            update_knowledge_update_job(job_id, progress)
+
+        result = update_chroma_knowledge_base(per_board_limit=limit, progress_callback=progress_callback)
+        clear_active_knowledge_update_job(job_id)
+        update_knowledge_update_job(
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "percent": 100.0,
+                "message": "热门知识库更新完成",
+                "result": result,
+                "knowledge_status": build_knowledge_base_status(),
+            },
+        )
+    except Exception as exc:
+        clear_active_knowledge_update_job(job_id)
+        job = get_knowledge_update_job(job_id) or {}
+        update_knowledge_update_job(
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "percent": float(job.get("percent") or 0),
+                "message": f"知识库更新失败：{exc}",
+                "error": str(exc),
+            },
+        )
+    finally:
+        KNOWLEDGE_UPDATE_EXECUTION_LOCK.release()
+
+
+def start_knowledge_update_job(limit: int) -> tuple[dict | None, bool, str]:
+    global KNOWLEDGE_UPDATE_ACTIVE_JOB_ID
+    with KNOWLEDGE_UPDATE_JOB_LOCK:
+        cleanup_knowledge_update_jobs_locked()
+        active_job = active_knowledge_update_job_locked()
+        if active_job:
+            return snapshot_knowledge_update_job(active_job), True, ""
+        if KNOWLEDGE_UPDATE_EXECUTION_LOCK.locked():
+            return None, False, "已有热门知识库更新任务正在执行，请稍后重试。"
+
+        job_id = uuid4().hex
+        created_at = now_text()
+        KNOWLEDGE_UPDATE_JOBS[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "stage": "queued",
+            "percent": 0.0,
+            "message": "更新任务已创建，等待执行",
+            "limit": limit,
+            "created_at": created_at,
+            "started_at": "",
+            "updated_at": created_at,
+            "updated_at_ts": time.time(),
+            "completed_at": "",
+            "processed_items": 0,
+            "total_items": 0,
+            "processed_boards": 0,
+            "total_boards": 0,
+            "board_type": "",
+            "current_title": "",
+            "result": None,
+            "knowledge_status": None,
+            "error": "",
+        }
+        KNOWLEDGE_UPDATE_ACTIVE_JOB_ID = job_id
+        snapshot = snapshot_knowledge_update_job(KNOWLEDGE_UPDATE_JOBS[job_id])
+
+    threading.Thread(
+        target=run_knowledge_update_job,
+        args=(job_id, limit),
+        daemon=True,
+        name=f"knowledge-update-{job_id[:8]}",
+    ).start()
+    return snapshot, False, ""
 
 
 # 判断当前开关状态下是否真正启用了 LLM Agent 模式。
@@ -2750,6 +2934,7 @@ def build_knowledge_base_status() -> dict:
     status["supported_upload_types"] = sorted(SUPPORTED_KNOWLEDGE_UPLOAD_SUFFIXES)
     status["memory_backend"] = getattr(LONG_TERM_MEMORY, "backend", "disabled")
     status["memory_collection"] = getattr(LONG_TERM_MEMORY, "collection_name", "user_long_term_memory")
+    status["active_update_job"] = get_active_knowledge_update_job()
     return status
 
 
@@ -3240,6 +3425,8 @@ def api_knowledge_upload():
 def api_knowledge_update():
     data = request.get_json(silent=True) or {}
     limit = max(1, min(safe_int(data.get("limit") or 10), 20))
+    if not KNOWLEDGE_UPDATE_EXECUTION_LOCK.acquire(blocking=False):
+        return jsonify({"success": False, "error": "已有热门知识库更新任务正在执行，请稍后重试。"}), 409
     try:
         result = update_chroma_knowledge_base(per_board_limit=limit)
         return jsonify(
@@ -3253,6 +3440,36 @@ def api_knowledge_update():
         )
     except Exception as exc:
         return jsonify({"success": False, "error": f"知识库更新失败：{exc}"}), 500
+    finally:
+        KNOWLEDGE_UPDATE_EXECUTION_LOCK.release()
+
+
+@app.post("/api/knowledge/update/start")
+# 启动热门知识库异步更新任务，并返回任务 ID 供前端轮询。
+def api_knowledge_update_start():
+    data = request.get_json(silent=True) or {}
+    limit = max(1, min(safe_int(data.get("limit") or 10), 20))
+    job, already_running, error = start_knowledge_update_job(limit)
+    if error:
+        return jsonify({"success": False, "error": error}), 409
+    return jsonify(
+        {
+            "success": True,
+            "data": {
+                "job": job or {},
+                "already_running": already_running,
+            },
+        }
+    )
+
+
+@app.get("/api/knowledge/update/<job_id>")
+# 返回热门知识库异步更新任务的实时状态。
+def api_knowledge_update_job(job_id: str):
+    job = get_knowledge_update_job(job_id.strip())
+    if not job:
+        return jsonify({"success": False, "error": "未找到对应的知识库更新任务。"}), 404
+    return jsonify({"success": True, "data": job})
 
 
 @app.get("/")
