@@ -33,6 +33,7 @@ from llm_client import LLMClient, format_llm_error, llm_error_http_status, shoul
 from main import run_copy, run_operate, run_optimize, run_pipeline, run_topic
 from memory.long_term_memory import LongTermMemory
 from models import to_plain_data
+from observability import configure_langsmith, traceable
 from tools.code_interpreter import CodeInterpreterTool
 from tools.search_tool import SearchTool
 
@@ -41,6 +42,7 @@ app = Flask(
     template_folder=str(Path(__file__).resolve().parent / "templates"),
     static_folder=str(Path(__file__).resolve().parent / "static"),
 )
+LANGSMITH_RUNTIME = configure_langsmith("web")
 
 SHORT_LINK_HOSTS = ("b23.tv", "bili2233.cn")
 TRACKING_LINK_HOSTS = ("cm.bilibili.com",)
@@ -2938,6 +2940,7 @@ def build_knowledge_base_status() -> dict:
     return status
 
 
+@traceable(run_type="tool", name="web.creator_briefing_tool_handler", tags=["tool", "creator_briefing", "rag"])
 def creator_briefing_tool_handler(payload: dict) -> dict:
     result = build_creator_briefing(
         payload.get("field", ""),
@@ -2956,6 +2959,7 @@ def creator_briefing_tool_handler(payload: dict) -> dict:
     return result
 
 
+@traceable(run_type="tool", name="web.video_briefing_tool_handler", tags=["tool", "video_briefing", "rag"])
 def video_briefing_tool_handler(payload: dict) -> dict:
     result = build_video_briefing(payload.get("url", ""))
     save_tool_result_to_knowledge_base(
@@ -2969,6 +2973,7 @@ def video_briefing_tool_handler(payload: dict) -> dict:
     return result
 
 
+@traceable(run_type="tool", name="web.hot_board_snapshot_tool_handler", tags=["tool", "hot_board_snapshot", "rag"])
 def hot_board_snapshot_tool_handler(payload: dict) -> dict:
     result = build_hot_board_snapshot(payload.get("partition", "knowledge"))
     save_tool_result_to_knowledge_base(
@@ -3033,6 +3038,7 @@ def get_llm_workspace_agent() -> LLMWorkspaceAgent:
 
 
 # 在 LLM Agent 模式下执行内容创作模块的完整生成流程。
+@traceable(run_type="chain", name="web.run_llm_module_create", tags=["web", "llm", "rag", "module_create"])
 def run_llm_module_create(data: dict) -> dict:
     agent = get_llm_workspace_agent()
     default_style = (data.get("style") or "干货").strip() or "干货"
@@ -3095,6 +3101,7 @@ def run_llm_module_create(data: dict) -> dict:
 
 
 # 当 Agent 中枢不可用时，直接用单次 LLM 调用回退生成创作结果。
+@traceable(run_type="chain", name="web.run_llm_module_create_fallback", tags=["web", "llm", "fallback", "module_create"])
 def run_llm_module_create_fallback(data: dict) -> dict:
     llm = build_runtime_llm_client()
     llm.require_available()
@@ -3139,6 +3146,7 @@ def run_llm_module_create_fallback(data: dict) -> dict:
 
 
 # 在 LLM Agent 模式下执行视频分析模块的完整分析流程。
+@traceable(run_type="chain", name="web.run_llm_module_analyze", tags=["web", "llm", "rag", "module_analyze"])
 def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     agent = get_llm_workspace_agent()
     reference_query = build_reference_query_text(resolved)
@@ -3189,6 +3197,7 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
 
 
 # 当分析 Agent 中枢不可用时，直接用单次 LLM 调用回退生成分析结果。
+@traceable(run_type="chain", name="web.run_llm_module_analyze_fallback", tags=["web", "llm", "fallback", "module_analyze"])
 def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     llm = build_runtime_llm_client()
     llm.require_available()
@@ -3248,6 +3257,7 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
 
 
 # 运行聊天助手，让 LLM Agent 按需调工具后返回自然语言答复。
+@traceable(run_type="chain", name="web.run_llm_chat", tags=["web", "llm", "rag", "workspace_chat"])
 def run_llm_chat(data: dict) -> dict:
     agent = get_llm_workspace_agent()
     message = (data.get("message") or "").strip()

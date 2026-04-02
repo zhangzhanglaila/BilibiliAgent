@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from config import CONFIG
+from observability import end_trace, trace_block
 
 try:
     import tiktoken
@@ -642,43 +643,65 @@ class KnowledgeBase:
         clean_query = (query or "").strip()
         if not clean_query:
             return {"query": clean_query, "matches": []}
-        self._require_vector_backend()
+        with trace_block(
+            "knowledge_base.retrieve",
+            run_type="retriever",
+            inputs={
+                "query": clean_query,
+                "limit": limit,
+                "metadata_filter": metadata_filter or {},
+            },
+            metadata={
+                "backend": self.backend,
+                "collection_name": self.collection_name,
+            },
+            tags=["knowledge_base", "retrieval", "rag"],
+        ) as run:
+            self._require_vector_backend()
 
-        if self.backend == "json_fallback":
-            query_vector = self.embeddings.embed_query(clean_query)
-            candidates: List[Dict[str, Any]] = []
-            for item in self._load_fallback_records():
-                if not self._record_matches_metadata(item, metadata_filter):
-                    continue
-                text = str(item.get("text") or "")
-                similarity = self._vector_score(query_vector, list(item.get("embedding") or []))
-                lexical_bonus = self._fallback_score(clean_query, text) * 0.2
-                distance = max(0.0, 1.0 - similarity - lexical_bonus)
-                candidates.append(
-                    {
-                        "id": str(item.get("document_id") or ""),
-                        "text": text,
-                        "metadata": dict(item.get("metadata") or {}),
-                        "score": float(distance),
-                    }
-                )
-            candidates.sort(key=lambda item: (float(item.get("score") or 0.0), str(item.get("id") or "")))
-            return {"query": clean_query, "matches": candidates[:limit]}
+            if self.backend == "json_fallback":
+                query_vector = self.embeddings.embed_query(clean_query)
+                candidates: List[Dict[str, Any]] = []
+                for item in self._load_fallback_records():
+                    if not self._record_matches_metadata(item, metadata_filter):
+                        continue
+                    text = str(item.get("text") or "")
+                    similarity = self._vector_score(query_vector, list(item.get("embedding") or []))
+                    lexical_bonus = self._fallback_score(clean_query, text) * 0.2
+                    distance = max(0.0, 1.0 - similarity - lexical_bonus)
+                    candidates.append(
+                        {
+                            "id": str(item.get("document_id") or ""),
+                            "text": text,
+                            "metadata": dict(item.get("metadata") or {}),
+                            "score": float(distance),
+                        }
+                    )
+                candidates.sort(key=lambda item: (float(item.get("score") or 0.0), str(item.get("id") or "")))
+                result = {"query": clean_query, "matches": candidates[:limit]}
+                end_trace(run, {"match_count": len(result["matches"]), "query": clean_query})
+                return result
 
-        if self.vectorstore is not None:
-            try:
-                return {"query": clean_query, "matches": self._vector_matches_from_langchain(clean_query, limit, metadata_filter)}
-            except Exception as exc:
-                raise RuntimeError(f"Chroma 向量检索失败（{self.backend}）：{exc}") from exc
+            if self.vectorstore is not None:
+                try:
+                    result = {"query": clean_query, "matches": self._vector_matches_from_langchain(clean_query, limit, metadata_filter)}
+                    end_trace(run, {"match_count": len(result["matches"]), "query": clean_query})
+                    return result
+                except Exception as exc:
+                    raise RuntimeError(f"Chroma 向量检索失败（{self.backend}）：{exc}") from exc
 
-        if self.collection is not None:
-            try:
-                return {"query": clean_query, "matches": self._vector_matches_from_chromadb(clean_query, limit, metadata_filter)}
-            except Exception as exc:
-                raise RuntimeError(f"Chroma 向量检索失败（{self.backend}）：{exc}") from exc
+            if self.collection is not None:
+                try:
+                    result = {"query": clean_query, "matches": self._vector_matches_from_chromadb(clean_query, limit, metadata_filter)}
+                    end_trace(run, {"match_count": len(result["matches"]), "query": clean_query})
+                    return result
+                except Exception as exc:
+                    raise RuntimeError(f"Chroma 向量检索失败（{self.backend}）：{exc}") from exc
 
-        self._require_vector_backend()
-        return {"query": clean_query, "matches": []}
+            self._require_vector_backend()
+            result = {"query": clean_query, "matches": []}
+            end_trace(run, {"match_count": 0, "query": clean_query})
+            return result
 
 
 DEFAULT_KNOWLEDGE_BASE = KnowledgeBase()

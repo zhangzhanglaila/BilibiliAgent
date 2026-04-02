@@ -41,9 +41,9 @@ Web 层采用双模式架构：
 
 ### LLM 链路（有 Key）
 
-- `module-create`：`LLMWorkspaceAgent` + `creator_briefing`
-- `module-analyze`：`LLMWorkspaceAgent` + `video_briefing`
-- `chat`：`LLMWorkspaceAgent` 自主调用工具
+- `module-create`：`LLMWorkspaceAgent` + `creator_briefing`，必要时可继续调用 `retrieval / web_search / code_interpreter`
+- `module-analyze`：`LLMWorkspaceAgent` + `video_briefing`，必要时可继续调用 `retrieval / web_search / code_interpreter`
+- `chat`：`LLMWorkspaceAgent` 自主调用 `retrieval / creator_briefing / video_briefing / hot_board_snapshot / web_search / code_interpreter`
 
 ## 安装
 
@@ -69,10 +69,18 @@ cp .env.example .env
 
 ```env
 # edit D:\agent\.env
-LLM_PROVIDER=openai
-LLM_API_KEY=your-real-key
-LLM_BASE_URL=https://zapi.aicc0.com/v1
-LLM_MODEL=gpt-5.4
+LLM_PROVIDER=codex
+LLM_API_KEY=replace-with-your-key
+OPENAI_API_KEY=replace-with-your-key
+LLM_BASE_URL=http://codex.kalin.asia:8317/v1
+LLM_MODEL=gpt-5.2-codex
+LLM_REASONING_EFFORT=low
+LLM_DISABLE_RESPONSE_STORAGE=true
+LANGCHAIN_TRACING_V2=false
+LANGSMITH_TRACING=false
+LANGSMITH_API_KEY=
+LANGCHAIN_API_KEY=
+LANGSMITH_PROJECT=bilibili-hot-rag
 ```
 
 可选配置：
@@ -80,12 +88,60 @@ LLM_MODEL=gpt-5.4
 - `LLM_API_KEY`
 - `LLM_BASE_URL`
 - `LLM_MODEL`
+- `LLM_REASONING_EFFORT`
+- `LLM_DISABLE_RESPONSE_STORAGE`
+- `LANGCHAIN_TRACING_V2`
+- `LANGSMITH_API_KEY`
+- `LANGSMITH_PROJECT`
 - `DEFAULT_PARTITION`
 - `DEFAULT_PEER_UPS`
 
 如果没有填写 LLM Key，系统仍可运行，会自动使用纯代码规则模式。
 
 如果填写了 `LLM_API_KEY`，Web 层会自动切换到 LLM Agent 模式。
+
+### 下次更换 Key / 模型
+
+只需要改 [`.env`](D:\agent\.env) 里这几项：
+
+- `LLM_PROVIDER`
+- `LLM_API_KEY`
+- `OPENAI_API_KEY`
+- `LLM_BASE_URL`
+- `LLM_MODEL`
+- `LLM_REASONING_EFFORT`
+- `LLM_DISABLE_RESPONSE_STORAGE`
+
+推荐流程：
+
+1. 先备份旧 `.env`。
+2. 替换上面 7 个字段。
+3. 重启 `python web/app.py`。
+4. 打开首页看右上或运行模式区域，确认已显示新的 provider / model / base_url。
+
+说明：
+
+- 页面里的运行时配置表单只覆盖 `provider / url / key / model`。
+- `LLM_REASONING_EFFORT` 和 `LLM_DISABLE_RESPONSE_STORAGE` 这类固定策略，当前仍建议直接写 `.env`。
+
+### LangSmith 可观测性
+
+当前项目已经接入 LangSmith，但默认关闭。
+
+启用时只需要在 [`.env`](D:\agent\.env) 打开这几项：
+
+- `LANGCHAIN_TRACING_V2=true`
+- `LANGSMITH_TRACING=true`
+- `LANGSMITH_API_KEY=你的 LangSmith Key`
+- `LANGCHAIN_API_KEY=你的 LangSmith Key`
+- `LANGSMITH_PROJECT=bilibili-hot-rag`
+
+当前会自动 trace：
+
+- 所有通过 `LLMClient` 发出的 LLM 调用
+- 知识库 `KnowledgeBase.retrieve()` 检索
+- `LLMWorkspaceAgent.run_structured()` 整体 RAG/工具调用流程
+- Web 侧 `module-create / module-analyze / chat` 顶层链路
 
 ## 启动
 

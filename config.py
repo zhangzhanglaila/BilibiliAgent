@@ -39,6 +39,13 @@ PARTITION_ALIASES = {
 }
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class AppConfig:
     request_interval: float = float(os.getenv("REQUEST_INTERVAL", "1.2"))
@@ -48,6 +55,13 @@ class AppConfig:
     llm_api_key: str = os.getenv("LLM_API_KEY", "")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "https://zapi.aicc0.com/v1")
     llm_model: str = os.getenv("LLM_MODEL", "gpt-5.4")
+    llm_reasoning_effort: str = os.getenv("LLM_REASONING_EFFORT", "").strip().lower()
+    llm_disable_response_storage: bool = env_bool("LLM_DISABLE_RESPONSE_STORAGE", False)
+    langsmith_tracing: bool = env_bool("LANGSMITH_TRACING", env_bool("LANGCHAIN_TRACING_V2", False))
+    langsmith_api_key: str = os.getenv("LANGSMITH_API_KEY", os.getenv("LANGCHAIN_API_KEY", ""))
+    langsmith_project: str = os.getenv("LANGSMITH_PROJECT", os.getenv("LANGCHAIN_PROJECT", "bilibili-hot-rag"))
+    langsmith_endpoint: str = os.getenv("LANGSMITH_ENDPOINT", os.getenv("LANGCHAIN_ENDPOINT", "")).strip()
+    langchain_callbacks_background: bool = env_bool("LANGCHAIN_CALLBACKS_BACKGROUND", True)
     llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "75"))
     llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
     llm_retry_backoff_seconds: float = float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "1.6"))

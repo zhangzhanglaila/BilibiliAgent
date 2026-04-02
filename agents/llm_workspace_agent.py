@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Sequence
 from knowledge_base import retrieve as kb_retrieve
 from llm_client import LLMClient
 from memory.long_term_memory import LongTermMemory
+from observability import end_trace, trace_block, traceable
 
 
 @dataclass
@@ -142,10 +143,22 @@ class LLMWorkspaceAgent:
     ) -> None:
         if "retrieval" not in allowed_tools or "retrieval" not in self.tools:
             return
-        try:
-            observation = self.tools["retrieval"].handler({"query": query_text, "limit": 4})
-        except Exception as exc:
-            raise RuntimeError(f"知识库检索失败，无法继续执行当前任务：{exc}") from exc
+        with trace_block(
+            "agent_tool.retrieval",
+            run_type="retriever",
+            inputs={"query": query_text, "limit": 4},
+            tags=["agent_tool", "retrieval", "rag"],
+        ) as run:
+            try:
+                observation = self.tools["retrieval"].handler({"query": query_text, "limit": 4})
+            except Exception as exc:
+                raise RuntimeError(f"知识库检索失败，无法继续执行当前任务：{exc}") from exc
+            end_trace(
+                run,
+                {
+                    "match_count": len((observation or {}).get("matches") or []) if isinstance(observation, dict) else 0,
+                },
+            )
         if isinstance(observation, dict) and str(observation.get("error") or "").strip():
             raise RuntimeError(f"知识库检索失败，无法继续执行当前任务：{observation['error']}")
         used_tools.append("retrieval")
@@ -287,6 +300,7 @@ class LLMWorkspaceAgent:
             return
 
     # 运行受限的工具调用循环，直到模型给出合法最终结果或步数耗尽。
+    @traceable(run_type="chain", name="llm_workspace_agent.run_structured", tags=["llm_agent", "rag"])
     def run_structured(
         self,
         *,
@@ -413,10 +427,18 @@ class LLMWorkspaceAgent:
                 continue
 
             tool = self.tools[action]
-            try:
-                observation = tool.handler(action_input)
-            except Exception as exc:
-                observation = {"error": str(exc)}
+            with trace_block(
+                f"agent_tool.{action}",
+                run_type="tool",
+                inputs=action_input,
+                metadata={"task_name": task_name},
+                tags=["agent_tool", action],
+            ) as run:
+                try:
+                    observation = tool.handler(action_input)
+                except Exception as exc:
+                    observation = {"error": str(exc)}
+                end_trace(run, {"observation_preview": self._payload_text(observation)[:1000]})
             used_tools.append(action)
             scratchpad.append(
                 {

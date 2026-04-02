@@ -1,6 +1,8 @@
 langgraph>=0.2.40
 langchain>=0.3.0
+langchain-core>=0.3.0
 langchain-openai>=0.2.0
+langsmith>=0.1.95
 langchain-chroma>=0.1.2
 chromadb>=0.5.5
 langchain-experimental>=0.3.0

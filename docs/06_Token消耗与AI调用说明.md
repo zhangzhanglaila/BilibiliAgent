@@ -31,6 +31,13 @@
 - `/api/module-create` 调 `LLMWorkspaceAgent`
 - `/api/module-analyze` 调 `LLMWorkspaceAgent`
 - `/api/chat` 可用
+- Agent 在执行过程中，可能继续调用：
+  - `retrieval`
+  - `creator_briefing`
+  - `video_briefing`
+  - `hot_board_snapshot`
+  - `web_search`
+  - `code_interpreter`
 
 结果：
 

@@ -8,6 +8,10 @@ from typing import Any, Dict, List
 from graph import BilibiliAgentGraph
 from knowledge_sync import ingest_uploaded_file, update_chroma_knowledge_base
 from models import to_plain_data
+from observability import configure_langsmith, flush_traces
+
+
+LANGSMITH_RUNTIME = configure_langsmith("cli")
 
 
 # 把命令行里逗号分隔的 UP 主 ID 文本解析成整数列表。
@@ -213,54 +217,56 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    try:
+        if args.command == "topic":
+            result = run_topic(
+                partition_name=args.partition,
+                up_ids=parse_up_ids(args.up_ids),
+                seed_topic=args.topic or None,
+            )
+            print_topic_result(result)
+            return
 
-    if args.command == "topic":
-        result = run_topic(
-            partition_name=args.partition,
-            up_ids=parse_up_ids(args.up_ids),
-            seed_topic=args.topic or None,
-        )
-        print_topic_result(result)
-        return
+        if args.command == "copy":
+            result = run_copy(topic=args.topic, style=args.style)
+            print_copy_result(result)
+            return
 
-    if args.command == "copy":
-        result = run_copy(topic=args.topic, style=args.style)
-        print_copy_result(result)
-        return
+        if args.command == "operate":
+            result = run_operate(bv_id=args.bv, dry_run=args.dry_run)
+            print_operation_result(result)
+            return
 
-    if args.command == "operate":
-        result = run_operate(bv_id=args.bv, dry_run=args.dry_run)
-        print_operation_result(result)
-        return
+        if args.command == "optimize":
+            result = run_optimize(bv_id=args.bv)
+            print_optimization_result(result)
+            return
 
-    if args.command == "optimize":
-        result = run_optimize(bv_id=args.bv)
-        print_optimization_result(result)
-        return
+        if args.command == "pipeline":
+            result = run_pipeline(
+                bv_id=args.bv,
+                partition_name=args.partition,
+                up_ids=parse_up_ids(args.up_ids),
+                style=args.style,
+                seed_topic=args.topic or None,
+            )
+            print_topic_result(result["topic_result"])
+            print_copy_result(result["copywriting_result"])
+            print_operation_result(result["operation_result"])
+            print_optimization_result(result["optimization_result"])
+            return
 
-    if args.command == "pipeline":
-        result = run_pipeline(
-            bv_id=args.bv,
-            partition_name=args.partition,
-            up_ids=parse_up_ids(args.up_ids),
-            style=args.style,
-            seed_topic=args.topic or None,
-        )
-        print_topic_result(result["topic_result"])
-        print_copy_result(result["copywriting_result"])
-        print_operation_result(result["operation_result"])
-        print_optimization_result(result["optimization_result"])
-        return
+        if args.command == "ingest-file":
+            result = run_ingest_file(args.path)
+            print_ingest_result(result)
+            return
 
-    if args.command == "ingest-file":
-        result = run_ingest_file(args.path)
-        print_ingest_result(result)
-        return
-
-    if args.command == "update-kb":
-        result = run_update_kb(per_board_limit=max(1, min(int(args.limit or 10), 20)))
-        print_kb_update_result(result)
-        return
+        if args.command == "update-kb":
+            result = run_update_kb(per_board_limit=max(1, min(int(args.limit or 10), 20)))
+            print_kb_update_result(result)
+            return
+    finally:
+        flush_traces()
 
 
 if __name__ == "__main__":

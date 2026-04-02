@@ -12,6 +12,7 @@ import requests
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from config import CONFIG
+from observability import end_trace, trace_block
 
 try:
     from langchain_openai import ChatOpenAI
@@ -124,6 +125,8 @@ class LLMClient:
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
+        disable_response_storage: bool | None = None,
         timeout_seconds: int | None = None,
         max_retries: int | None = None,
         retry_backoff_seconds: float | None = None,
@@ -132,6 +135,12 @@ class LLMClient:
         self.api_key = (api_key if api_key is not None else CONFIG.llm_api_key).strip()
         self.base_url = (base_url if base_url is not None else CONFIG.llm_base_url).strip()
         self.model_name = (model if model is not None else CONFIG.llm_model).strip()
+        self.reasoning_effort = (
+            str(reasoning_effort if reasoning_effort is not None else CONFIG.llm_reasoning_effort).strip().lower()
+        )
+        self.disable_response_storage = bool(
+            CONFIG.llm_disable_response_storage if disable_response_storage is None else disable_response_storage
+        )
         self.timeout_seconds = int(timeout_seconds if timeout_seconds is not None else CONFIG.llm_timeout_seconds)
         self.max_retry_count = int(max_retries if max_retries is not None else CONFIG.llm_max_retries)
         self.retry_backoff_seconds = float(
@@ -140,14 +149,19 @@ class LLMClient:
         self.enabled = bool(self.api_key and (ChatOpenAI or self.base_url))
         self.model = None
         if self.enabled and ChatOpenAI:
-            self.model = ChatOpenAI(
-                model=self.model_name,
-                api_key=self.api_key,
-                base_url=self.base_url,
-                temperature=0.7,
-                timeout=self.timeout_seconds,
-                max_retries=0,
-            )
+            chat_openai_kwargs: dict[str, Any] = {
+                "model": self.model_name,
+                "api_key": self.api_key,
+                "base_url": self.base_url,
+                "temperature": 0.7,
+                "timeout": self.timeout_seconds,
+                "max_retries": 0,
+            }
+            if self.reasoning_effort:
+                chat_openai_kwargs["reasoning_effort"] = self.reasoning_effort
+            if self.disable_response_storage:
+                chat_openai_kwargs["store"] = False
+            self.model = ChatOpenAI(**chat_openai_kwargs)
 
     # 判断当前客户端是否具备可用的模型实例。
     def available(self) -> bool:
@@ -176,46 +190,67 @@ class LLMClient:
             ],
             "temperature": 0.7,
         }
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
+        if self.disable_response_storage:
+            payload["store"] = False
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
 
-        try:
-            response = requests.post(
-                endpoint,
-                headers=headers,
-                json=payload,
-                timeout=self.timeout_seconds,
+        with trace_block(
+            "llm_client.http_fallback",
+            run_type="llm",
+            inputs={
+                "provider": self.provider,
+                "model": self.model_name,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+            },
+            metadata={
+                "base_url": self.base_url,
+                "reasoning_effort": self.reasoning_effort,
+                "disable_response_storage": self.disable_response_storage,
+            },
+            tags=["llm", "http_fallback"],
+        ) as run:
+            try:
+                response = requests.post(
+                    endpoint,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout_seconds,
+                )
+            except requests.RequestException as exc:
+                message = str(exc)
+                if "WinError 10013" in message:
+                    return self._invoke_via_powershell_http(endpoint, payload)
+                raise RuntimeError(message) from exc
+
+            if response.status_code >= 400:
+                raise RuntimeError(response.text.strip() or f"HTTP {response.status_code}")
+
+            try:
+                data = response.json()
+            except Exception as exc:
+                raise RuntimeError("LLM HTTP fallback returned invalid JSON") from exc
+
+            content = (
+                (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
+                or (((data.get("choices") or [{}])[0]).get("delta") or {}).get("content")
+                or ""
             )
-        except requests.RequestException as exc:
-            message = str(exc)
-            if "WinError 10013" in message:
-                return self._invoke_via_powershell_http(endpoint, payload)
-            raise RuntimeError(message) from exc
-
-        if response.status_code >= 400:
-            raise RuntimeError(response.text.strip() or f"HTTP {response.status_code}")
-
-        try:
-            data = response.json()
-        except Exception as exc:
-            raise RuntimeError("LLM HTTP fallback returned invalid JSON") from exc
-
-        content = (
-            (((data.get("choices") or [{}])[0]).get("message") or {}).get("content")
-            or (((data.get("choices") or [{}])[0]).get("delta") or {}).get("content")
-            or ""
-        )
-        if isinstance(content, list):
-            content = "\n".join(
-                str(item.get("text") or item.get("content") or "")
-                for item in content
-                if isinstance(item, dict)
-            ).strip()
-        if not isinstance(content, str) or not content.strip():
-            raise RuntimeError("LLM HTTP fallback returned empty content")
-        return SimpleNamespace(content=content)
+            if isinstance(content, list):
+                content = "\n".join(
+                    str(item.get("text") or item.get("content") or "")
+                    for item in content
+                    if isinstance(item, dict)
+                ).strip()
+            if not isinstance(content, str) or not content.strip():
+                raise RuntimeError("LLM HTTP fallback returned empty content")
+            end_trace(run, {"content_preview": content[:500]})
+            return SimpleNamespace(content=content)
 
     # 在部分 Windows 环境里，Python 套接字会被拦，但 PowerShell 的 Web 请求还能正常走。
     def _invoke_via_powershell_http(self, endpoint: str, payload: dict[str, Any]):
@@ -236,28 +271,43 @@ class LLMClient:
             "}; "
             "Write-Output $content"
         )
-        try:
-            completed = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", command],
-                capture_output=True,
-                text=True,
-                timeout=max(1, int(self.timeout_seconds)) + 5,
-                check=False,
-            )
-        except Exception as exc:
-            raise RuntimeError(str(exc)) from exc
+        with trace_block(
+            "llm_client.powershell_http_fallback",
+            run_type="llm",
+            inputs={
+                "provider": self.provider,
+                "model": self.model_name,
+                "endpoint": endpoint,
+            },
+            metadata={
+                "base_url": self.base_url,
+                "reasoning_effort": self.reasoning_effort,
+            },
+            tags=["llm", "powershell_fallback"],
+        ) as run:
+            try:
+                completed = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", command],
+                    capture_output=True,
+                    text=True,
+                    timeout=max(1, int(self.timeout_seconds)) + 5,
+                    check=False,
+                )
+            except Exception as exc:
+                raise RuntimeError(str(exc)) from exc
 
-        if completed.returncode != 0:
-            error_text = (completed.stderr or completed.stdout or "").strip()
-            raise RuntimeError(error_text or "PowerShell HTTP fallback failed")
+            if completed.returncode != 0:
+                error_text = (completed.stderr or completed.stdout or "").strip()
+                raise RuntimeError(error_text or "PowerShell HTTP fallback failed")
 
-        if (completed.stderr or "").strip() and not (completed.stdout or "").strip():
-            raise RuntimeError((completed.stderr or "").strip())
+            if (completed.stderr or "").strip() and not (completed.stdout or "").strip():
+                raise RuntimeError((completed.stderr or "").strip())
 
-        content = (completed.stdout or "").strip()
-        if not isinstance(content, str) or not content.strip():
-            raise RuntimeError("PowerShell HTTP fallback returned empty content")
-        return SimpleNamespace(content=content)
+            content = (completed.stdout or "").strip()
+            if not isinstance(content, str) or not content.strip():
+                raise RuntimeError("PowerShell HTTP fallback returned empty content")
+            end_trace(run, {"content_preview": content[:500]})
+            return SimpleNamespace(content=content)
 
     # 把不同 SDK 形态的返回内容统一抽成纯文本。
     def _coerce_result_text(self, result: Any) -> str:
@@ -324,29 +374,51 @@ class LLMClient:
         attempts = max(1, self.max_retry_count + 1)
         last_error: LLMInvocationError | None = None
 
-        for attempt in range(1, attempts + 1):
-            try:
-                if self.model is not None:
-                    return self.model.invoke(messages)
-                return self._invoke_via_http(system_prompt, user_prompt)
-            except Exception as exc:
-                if self._http_fallback_available() and self.model is not None:
-                    try:
-                        return self._invoke_via_http(system_prompt, user_prompt)
-                    except Exception as http_exc:
-                        exc = http_exc
-                category = classify_llm_error(exc)
-                wrapped = LLMInvocationError(
-                    format_llm_error(exc),
-                    raw_message=_error_text(exc),
-                    category=category,
-                    transient=is_retryable_llm_error(exc),
-                )
-                last_error = wrapped
-                if attempt >= attempts or not wrapped.transient:
-                    raise wrapped
-                # 重试放在这里统一处理，这样所有上层调用拿到的错误分类和退避策略都一致。
-                time.sleep(self.retry_backoff_seconds * attempt)
+        with trace_block(
+            "llm_client.invoke_messages",
+            run_type="chain",
+            inputs={
+                "provider": self.provider,
+                "model": self.model_name,
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+            },
+            metadata={
+                "base_url": self.base_url,
+                "reasoning_effort": self.reasoning_effort,
+                "disable_response_storage": self.disable_response_storage,
+                "max_retry_count": self.max_retry_count,
+            },
+            tags=["llm", "agent"],
+        ) as run:
+            for attempt in range(1, attempts + 1):
+                try:
+                    if self.model is not None:
+                        result = self.model.invoke(messages)
+                    else:
+                        result = self._invoke_via_http(system_prompt, user_prompt)
+                    end_trace(run, {"attempts": attempt, "content_preview": self._coerce_result_text(result)[:500]})
+                    return result
+                except Exception as exc:
+                    if self._http_fallback_available() and self.model is not None:
+                        try:
+                            result = self._invoke_via_http(system_prompt, user_prompt)
+                            end_trace(run, {"attempts": attempt, "content_preview": self._coerce_result_text(result)[:500]})
+                            return result
+                        except Exception as http_exc:
+                            exc = http_exc
+                    category = classify_llm_error(exc)
+                    wrapped = LLMInvocationError(
+                        format_llm_error(exc),
+                        raw_message=_error_text(exc),
+                        category=category,
+                        transient=is_retryable_llm_error(exc),
+                    )
+                    last_error = wrapped
+                    if attempt >= attempts or not wrapped.transient:
+                        raise wrapped
+                    # 重试放在这里统一处理，这样所有上层调用拿到的错误分类和退避策略都一致。
+                    time.sleep(self.retry_backoff_seconds * attempt)
 
         raise last_error or LLMInvocationError("LLM 调用失败")
 

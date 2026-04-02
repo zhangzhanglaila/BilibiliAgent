@@ -634,4 +634,6 @@ def update_chroma_knowledge_base(
     per_board_limit: int = 10,
     progress_callback: ProgressCallback | None = None,
 ) -> Dict[str, Any]:
+    if progress_callback is None:
+        return crawl_and_store_bilibili_hot_videos(per_board_limit=per_board_limit)
     return crawl_and_store_bilibili_hot_videos(per_board_limit=per_board_limit, progress_callback=progress_callback)
