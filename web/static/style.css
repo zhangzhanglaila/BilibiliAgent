@@ -1006,6 +1006,17 @@ button {
   grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
+.knowledge-status-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.knowledge-status-metrics .stat-card {
+  min-height: 100%;
+  padding: 20px 22px;
+}
+
 .stat-card,
 .copy-card,
 .topic-card,

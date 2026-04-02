@@ -81,6 +81,37 @@ def normalize_kb_text(text: str) -> str:
     return clean.strip()
 
 
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return default
+
+
+def parse_duration_seconds(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    if text.isdigit():
+        return int(text)
+    if ":" not in text:
+        return safe_int(text, 0)
+
+    parts = [segment.strip() for segment in text.split(":")]
+    if not parts or any(not part.isdigit() for part in parts):
+        return 0
+
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + int(part)
+    return seconds
+
+
 def keyword_tokens(text: str) -> List[str]:
     return re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9]{2,20}", str(text or "").lower())
 
@@ -234,14 +265,15 @@ def _structured_video_text(board_type: str, item: dict, detail: dict, tags: List
     title = str(detail.get("title") or item.get("title") or "").strip()
     owner = (detail.get("owner") or item.get("owner") or {})
     partition = str(detail.get("tname") or item.get("tname") or "").strip()
-    view = int(stat.get("view") or item.get("view") or 0)
-    like = int(stat.get("like") or item.get("like") or 0)
-    reply = int(stat.get("reply") or item.get("reply") or 0)
-    pub_ts = int(detail.get("pubdate") or item.get("pubdate") or 0)
+    duration = parse_duration_seconds(detail.get("duration") or item.get("duration") or 0)
+    view = safe_int(stat.get("view") or item.get("view") or 0)
+    like = safe_int(stat.get("like") or item.get("like") or 0)
+    reply = safe_int(stat.get("reply") or item.get("reply") or 0)
+    pub_ts = safe_int(detail.get("pubdate") or item.get("pubdate") or 0)
     advantages = {
         "标题亮点": _title_advantage(title),
-        "脚本结构": _script_advantage(int(detail.get("duration") or item.get("duration") or 0), str(detail.get("desc") or "")),
-        "节奏把控": _rhythm_advantage(int(detail.get("duration") or item.get("duration") or 0), view, like),
+        "脚本结构": _script_advantage(duration, str(detail.get("desc") or "")),
+        "节奏把控": _rhythm_advantage(duration, view, like),
         "互动设计": _interaction_advantage(title, reply, hotwords),
         "标签策略": _tag_advantage(tags, partition or "综合"),
     }
@@ -287,7 +319,8 @@ def _ingest_hot_items(board_type: str, items: Iterable[dict], limit: int = 10, b
         if not bvid:
             continue
         detail = _video_detail(bvid) or dict(item)
-        aid = int(detail.get("aid") or item.get("aid") or 0)
+        title = str(detail.get("title") or item.get("title") or "").strip()
+        aid = safe_int(detail.get("aid") or item.get("aid") or 0)
         tags = _video_tags(detail or item)
         hotwords = _comment_hotwords(aid) if aid > 0 else []
         text = _structured_video_text(board_type, item, detail, tags, hotwords, board_url=board_url)

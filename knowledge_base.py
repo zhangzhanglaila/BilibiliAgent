@@ -1,9 +1,11 @@
-"""RAG knowledge base backed exclusively by Chroma."""
+"""RAG knowledge base with Chroma-first storage and a local JSON fallback."""
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
@@ -181,11 +183,14 @@ class KnowledgeBase:
         self.persist_directory = Path(persist_directory or CONFIG.vector_db_path)
         self.persist_directory.mkdir(parents=True, exist_ok=True)
         self.collection_name = collection_name
+        self.fallback_store_path = self.persist_directory / f"{self.collection_name}__fallback_store.json"
+        self._fallback_lock = threading.RLock()
         self.embeddings = build_default_embeddings()
         self.vectorstore = None
         self.collection = None
         self.backend = "disabled"
         self.init_error = ""
+        self.backend_detail = ""
         if Chroma is not None:
             try:
                 self.vectorstore = Chroma(
@@ -206,12 +211,76 @@ class KnowledgeBase:
             except Exception as exc:
                 self.collection = None
                 self.init_error = str(exc)
-        if self.available():
+        if self.vectorstore is None and self.collection is None:
+            missing_packages = []
+            if Chroma is None:
+                missing_packages.append("langchain-chroma")
+            if chromadb is None:
+                missing_packages.append("chromadb")
+            detail_parts = []
+            if missing_packages:
+                detail_parts.append(f"缺少依赖：{', '.join(missing_packages)}")
+            if self.init_error:
+                detail_parts.append(self.init_error)
+            self._enable_json_fallback("；".join(detail_parts))
+        if self.available() and self.backend != "json_fallback":
             try:
                 self._ensure_embedding_dimension()
             except Exception as exc:
                 self.init_error = str(exc)
                 raise
+
+    def _enable_json_fallback(self, detail: str = "") -> None:
+        self.backend = "json_fallback"
+        self.backend_detail = detail.strip()
+        if not self.fallback_store_path.exists():
+            self._write_fallback_payload([])
+
+    def _write_fallback_payload(self, records: List[Dict[str, Any]]) -> None:
+        payload = {
+            "collection_name": self.collection_name,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "items": records,
+        }
+        temp_path = self.fallback_store_path.with_suffix(f"{self.fallback_store_path.suffix}.tmp")
+        with self._fallback_lock:
+            temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            temp_path.replace(self.fallback_store_path)
+
+    def _load_fallback_records(self) -> List[Dict[str, Any]]:
+        if not self.fallback_store_path.exists():
+            self._write_fallback_payload([])
+            return []
+        with self._fallback_lock:
+            try:
+                payload = json.loads(self.fallback_store_path.read_text(encoding="utf-8"))
+            except Exception:
+                return []
+        items = payload.get("items") if isinstance(payload, dict) else payload
+        return [dict(item or {}) for item in (items or []) if isinstance(item, dict)]
+
+    def _record_matches_metadata(self, record: Dict[str, Any], metadata_filter: Dict[str, Any] | None = None) -> bool:
+        filters = dict(metadata_filter or {})
+        if not filters:
+            return True
+        metadata = dict(record.get("metadata") or {})
+        document_id = str(record.get("document_id") or metadata.get("document_id") or "")
+        for key, value in filters.items():
+            if key == "document_id":
+                if document_id != str(value):
+                    return False
+                continue
+            if str(metadata.get(key) or "") != str(value):
+                return False
+        return True
+
+    def _vector_score(self, query_vector: List[float], item_vector: List[float]) -> float:
+        if not query_vector or not item_vector:
+            return 0.0
+        size = min(len(query_vector), len(item_vector))
+        if size <= 0:
+            return 0.0
+        return sum(float(query_vector[index]) * float(item_vector[index]) for index in range(size))
 
     def _split_text(self, text: str, chunk_size: int = 320, overlap: int = 60) -> List[str]:
         clean = (text or "").strip()
@@ -247,16 +316,18 @@ class KnowledgeBase:
         return [chunk for chunk in chunks if chunk]
 
     def _require_vector_backend(self) -> None:
-        if self.vectorstore is not None or self.collection is not None:
+        if self.vectorstore is not None or self.collection is not None or self.backend == "json_fallback":
             return
         detail = self.init_error or "Chroma backend not initialized"
         raise RuntimeError(f"知识库当前不可用：未检测到可用的 Chroma 向量库。{detail}")
 
     def available(self) -> bool:
-        return self.vectorstore is not None or self.collection is not None
+        return self.vectorstore is not None or self.collection is not None or self.backend == "json_fallback"
 
     def count(self) -> int:
         self._require_vector_backend()
+        if self.backend == "json_fallback":
+            return len(self._load_fallback_records())
         if self.vectorstore is not None:
             collection = getattr(self.vectorstore, "_collection", None)
             if collection is None:
@@ -285,6 +356,7 @@ class KnowledgeBase:
         return {
             "available": self.available(),
             "backend": self.backend,
+            "backend_detail": self.backend_detail,
             "persist_directory": str(self.persist_directory),
             "collection_name": self.collection_name,
             "document_count": self.count() if self.available() else 0,
@@ -389,6 +461,20 @@ class KnowledgeBase:
         self._recreate_collection(ids, documents, metadatas)
 
     def sample(self, limit: int = 10, offset: int = 0, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if self.backend == "json_fallback":
+            start = max(0, int(offset or 0))
+            size = max(1, min(int(limit or 10), 50))
+            records = [item for item in self._load_fallback_records() if self._record_matches_metadata(item, metadata_filter)]
+            page = records[start:start + size]
+            items = [
+                {
+                    "id": str(item.get("document_id") or ""),
+                    "text": str(item.get("text") or ""),
+                    "metadata": dict(item.get("metadata") or {}),
+                }
+                for item in page
+            ]
+            return {"items": items, "limit": limit, "offset": offset}
         collection = self._active_collection()
         payload = collection.get(
             limit=max(1, min(int(limit or 10), 50)),
@@ -411,6 +497,11 @@ class KnowledgeBase:
         return {"items": items, "limit": limit, "offset": offset}
 
     def exists(self, document_id: str | None = None, metadata_filter: Dict[str, Any] | None = None) -> bool:
+        if self.backend == "json_fallback":
+            where = dict(metadata_filter or {})
+            if document_id:
+                where["document_id"] = document_id
+            return any(self._record_matches_metadata(item, where) for item in self._load_fallback_records())
         collection = self._active_collection()
         where = dict(metadata_filter or {})
         if document_id:
@@ -419,6 +510,18 @@ class KnowledgeBase:
         return bool(payload.get("ids"))
 
     def delete(self, document_id: str | None = None, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        if self.backend == "json_fallback":
+            where = dict(metadata_filter or {})
+            if document_id:
+                where["document_id"] = document_id
+            if not where:
+                raise ValueError("删除知识库文档时必须提供 document_id 或 metadata_filter。")
+            records = self._load_fallback_records()
+            kept = [item for item in records if not self._record_matches_metadata(item, where)]
+            deleted_count = len(records) - len(kept)
+            if deleted_count:
+                self._write_fallback_payload(kept)
+            return {"deleted_count": deleted_count, "where": where}
         collection = self._active_collection()
         where = dict(metadata_filter or {})
         if document_id:
@@ -450,12 +553,29 @@ class KnowledgeBase:
             ids.append(f"{document.id}:{index}")
             metadatas.append(metadata)
 
+        embeddings = self.embeddings.embed_documents(chunks)
+
+        if self.backend == "json_fallback":
+            records = self._load_fallback_records()
+            for chunk_id, chunk, metadata, embedding in zip(ids, chunks, metadatas, embeddings):
+                records.append(
+                    {
+                        "id": chunk_id,
+                        "document_id": document.id,
+                        "text": chunk,
+                        "metadata": metadata,
+                        "embedding": embedding,
+                    }
+                )
+            self._write_fallback_payload(records)
+            return {"status": "updated" if existed else "ok", "document_id": document.id, "chunk_count": len(chunks)}
+
         collection = self._active_collection()
         collection.upsert(
             ids=ids,
             documents=chunks,
             metadatas=metadatas,
-            embeddings=self.embeddings.embed_documents(chunks),
+            embeddings=embeddings,
         )
 
         return {"status": "updated" if existed else "ok", "document_id": document.id, "chunk_count": len(chunks)}
@@ -523,6 +643,27 @@ class KnowledgeBase:
         if not clean_query:
             return {"query": clean_query, "matches": []}
         self._require_vector_backend()
+
+        if self.backend == "json_fallback":
+            query_vector = self.embeddings.embed_query(clean_query)
+            candidates: List[Dict[str, Any]] = []
+            for item in self._load_fallback_records():
+                if not self._record_matches_metadata(item, metadata_filter):
+                    continue
+                text = str(item.get("text") or "")
+                similarity = self._vector_score(query_vector, list(item.get("embedding") or []))
+                lexical_bonus = self._fallback_score(clean_query, text) * 0.2
+                distance = max(0.0, 1.0 - similarity - lexical_bonus)
+                candidates.append(
+                    {
+                        "id": str(item.get("document_id") or ""),
+                        "text": text,
+                        "metadata": dict(item.get("metadata") or {}),
+                        "score": float(distance),
+                    }
+                )
+            candidates.sort(key=lambda item: (float(item.get("score") or 0.0), str(item.get("id") or "")))
+            return {"query": clean_query, "matches": candidates[:limit]}
 
         if self.vectorstore is not None:
             try:

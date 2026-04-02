@@ -702,6 +702,10 @@ function knowledgeStatusView(payload = {}, summaryHtml = '') {
   const pathText = payload.vector_db_path || payload.persist_directory || './vector_db';
   const memoryText = payload.memory_backend || 'disabled';
   const uploadTypes = Array.isArray(payload.supported_upload_types) ? payload.supported_upload_types : [];
+  const usingJsonFallback = backendText === 'json_fallback';
+  const detailHtml = payload.backend_detail
+    ? `<div class="info-card ${usingJsonFallback ? '' : 'info-card--danger'}"><h4>${usingJsonFallback ? '回退说明' : '后端说明'}</h4><p>${escapeHtml(payload.backend_detail)}</p></div>`
+    : '';
   const errorHtml = payload.init_error
     ? `<div class="info-card info-card--danger"><h4>初始化错误</h4><p>${escapeHtml(payload.init_error)}</p></div>`
     : '';
@@ -712,16 +716,17 @@ function knowledgeStatusView(payload = {}, summaryHtml = '') {
   return `
     <section class="copy-block">
       <div class="block-title">
-        <div><h4>Chroma 知识库状态</h4><p>${available ? '当前向量库已可用，后续检索会优先走这里。' : '当前未检测到可用的 Chroma 向量库，相关检索和入库会直接报错。'}</p></div>
+        <div><h4>知识库状态</h4><p>${available ? (usingJsonFallback ? '当前未启用 Chroma，系统已回退到本地 JSON 存储，上传、同步、检索仍可继续使用。' : '当前向量库已可用，后续检索会优先走这里。') : '当前未检测到可用知识库后端，相关检索和入库会报错。'}</p></div>
         <span class="type-badge ${available ? '' : 'type-badge--danger'}">${escapeHtml(available ? '可用' : '不可用')}</span>
       </div>
-      <div class="summary-strip summary-strip--metrics">
-        ${metricCard('向量后端', backendText, '当前知识库使用的后端类型')}
-        ${metricCard('文档数量', countText, '当前 collection 中的文档总数')}
-        ${metricCard('记忆后端', memoryText, '长期记忆同样走 Chroma，不再写本地 JSON')}
+      <div class="summary-strip summary-strip--metrics knowledge-status-metrics">
+        ${metricCard('知识库后端', backendText, '当前知识库使用的后端类型')}
+        ${metricCard('文档数量', countText, '当前知识库后端中的文档总数')}
+        ${metricCard('记忆后端', memoryText, '当前长期记忆使用的后端状态')}
       </div>
       <div class="info-card"><h4>向量库路径</h4><p>${escapeHtml(pathText)}</p></div>
       ${embeddingHtml}
+      ${detailHtml}
       ${uploadTypes.length ? `<div><div class="meta-line">支持上传格式</div>${tags(uploadTypes)}</div>` : ''}
       ${summaryHtml}
       ${errorHtml}
@@ -735,7 +740,8 @@ function knowledgeStatusBarView(payload = {}) {
   const dot = available ? '✅' : '⚠️';
   const count = num(payload.document_count || 0);
   const lastUpdated = payload.last_updated_at || '未知';
-  return `${dot} Chroma向量库${available ? '可用' : '不可用'} | 当前文档总数：${count} | 最后更新时间：${escapeHtml(lastUpdated)}`;
+  const backendText = payload.backend || 'disabled';
+  return `${dot} 知识库${available ? '可用' : '不可用'} | 后端：${escapeHtml(backendText)} | 当前文档总数：${count} | 最后更新时间：${escapeHtml(lastUpdated)}`;
 }
 
 // 把知识库文档列表渲染成可读卡片。
