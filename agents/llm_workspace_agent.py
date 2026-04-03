@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 import json
-import re
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Sequence
 
+from config import CONFIG
 from knowledge_base import retrieve as kb_retrieve
 from llm_client import LLMClient
 from memory.long_term_memory import LongTermMemory
@@ -25,7 +25,7 @@ class RetrievalTool(AgentTool):
         super().__init__(
             name="retrieval",
             description=description
-            or "从本地知识库检索爆款案例、选题经验、行业信息与历史沉淀。输入: {query, limit, metadata_filter}",
+            or "从本地知识库检索历史案例、沉淀经验、业务知识与结构化资料。输入: {query, limit, metadata_filter}",
             handler=lambda payload: kb_retrieve(
                 str(payload.get("query") or ""),
                 limit=max(1, min(int(payload.get("limit") or 4), 8)),
@@ -35,10 +35,8 @@ class RetrievalTool(AgentTool):
 
 
 class LLMWorkspaceAgent:
-    AUTO_WEB_SEARCH_HARD_SCORE_THRESHOLD = 0.65
-    AUTO_WEB_SEARCH_WEAK_SCORE_THRESHOLD = 0.48
+    """Constrained ReAct runtime driven by the LLM."""
 
-    # 初始化受控 Agent 运行时，注册工具并设置最大推理步数。
     def __init__(
         self,
         tools: Sequence[AgentTool],
@@ -51,7 +49,6 @@ class LLMWorkspaceAgent:
         self.max_steps = max_steps
         self.memory_store = memory_store or LongTermMemory()
 
-    # 把允许使用的工具列表渲染成提示词里的工具说明块。
     def _tool_block(self, allowed_tools: Sequence[str]) -> str:
         lines = []
         for name in allowed_tools:
@@ -59,7 +56,6 @@ class LLMWorkspaceAgent:
             lines.append(f"- {tool.name}: {tool.description}")
         return "\n".join(lines)
 
-    # 把历史工具调用记录整理成提示词，供模型基于已有观察继续决策。
     def _scratchpad_block(self, scratchpad: List[Dict[str, Any]]) -> str:
         if not scratchpad:
             return "暂无工具调用记录。"
@@ -77,7 +73,6 @@ class LLMWorkspaceAgent:
             )
         return "\n\n".join(blocks)
 
-    # 校验最终结果里是否包含调用方要求的关键字段。
     def _validate_final(self, final: Dict[str, Any], required_final_keys: Sequence[str]) -> List[str]:
         missing = []
         for key in required_final_keys:
@@ -138,285 +133,76 @@ class LLMWorkspaceAgent:
             lines.append(f"{index}. {text}")
         return "\n".join(lines)
 
-    def _build_auto_web_search_query(
+    def _budget_for_task(
         self,
         *,
         task_name: str,
-        user_payload: Dict[str, Any],
-        query_text: str,
-    ) -> str:
-        candidates = [
-            str(user_payload.get("message") or "").strip(),
-        ]
-        parsed_video = user_payload.get("parsed_video")
-        if isinstance(parsed_video, dict):
-            candidates.append(
-                " ".join(
-                    value
-                    for value in [
-                        str(parsed_video.get("title") or "").strip(),
-                        str(parsed_video.get("up_name") or "").strip(),
-                        str(parsed_video.get("partition_label") or parsed_video.get("partition") or "").strip(),
-                    ]
-                    if value
-                ).strip()
-            )
-        candidates.extend(
-            [
-                str(user_payload.get("url") or "").strip(),
-                str(user_payload.get("video_url") or "").strip(),
-            ]
-        )
-        creator_context = user_payload.get("creator_context")
-        if isinstance(creator_context, dict):
-            candidates.append(
-                " ".join(
-                    value
-                    for value in [
-                        str(creator_context.get("field") or "").strip(),
-                        str(creator_context.get("direction") or "").strip(),
-                        str(creator_context.get("idea") or "").strip(),
-                        str(creator_context.get("partition") or "").strip(),
-                    ]
-                    if value
-                ).strip()
-            )
-        candidates.append(
-            " ".join(
-                value
-                for value in [
-                    str(user_payload.get("field") or "").strip(),
-                    str(user_payload.get("direction") or "").strip(),
-                    str(user_payload.get("idea") or "").strip(),
-                    str(user_payload.get("partition") or "").strip(),
-                ]
-                if value
-            ).strip()
-        )
-        candidates.append(query_text.strip())
-
-        for candidate in candidates:
-            clean = " ".join(candidate.split()).strip()
-            if clean:
-                return clean[:240]
-        return f"{task_name} {query_text}".strip()[:240]
-
-    def _extract_query_fragments(self, text: str) -> List[str]:
-        clean = str(text or "").strip().lower()
-        if not clean:
-            return []
-        clean = re.sub(r"[^\w\u4e00-\u9fff]+", " ", clean)
-        raw_chunks = re.findall(r"[\u4e00-\u9fff]{2,}|[a-z0-9][a-z0-9._-]{1,}", clean)
-        phrase_stopwords = [
-            "你知道",
-            "请问",
-            "介绍一下",
-            "介绍",
-            "告诉我",
-            "帮我",
-            "查一下",
-            "查查",
-            "是谁",
-            "是什么",
-            "怎么样",
-            "怎么",
-            "为什么",
-            "一下",
-            "有关",
-            "关于",
-            "知道",
-            "了解",
-        ]
-        token_stopwords = {
-            "什么",
-            "哪里",
-            "哪个",
-            "这个",
-            "那个",
-            "一下",
-            "是不是",
-            "可以",
-            "是谁",
-            "知道",
-            "请问",
-            "介绍",
-            "帮我",
-            "告诉",
-        }
-        fragments: set[str] = set()
-        for chunk in raw_chunks:
-            if re.fullmatch(r"[\u4e00-\u9fff]+", chunk):
-                normalized = chunk
-                for phrase in phrase_stopwords:
-                    normalized = normalized.replace(phrase, " ")
-                for part in normalized.split():
-                    part = part.strip()
-                    if len(part) < 2 or part in token_stopwords:
-                        continue
-                    fragments.add(part)
-                    if len(part) > 4:
-                        for size in range(4, 1, -1):
-                            for index in range(0, len(part) - size + 1):
-                                sub = part[index:index + size]
-                                if sub not in token_stopwords:
-                                    fragments.add(sub)
-            else:
-                token = chunk.strip()
-                if len(token) >= 2:
-                    fragments.add(token)
-        return sorted((fragment for fragment in fragments if fragment), key=len, reverse=True)[:24]
-
-    def _retrieval_match_haystack(self, match: Dict[str, Any]) -> str:
-        metadata = match.get("metadata") if isinstance(match.get("metadata"), dict) else {}
-        parts = [str(match.get("text") or "").strip()]
-        if metadata:
-            parts.append(json.dumps(metadata, ensure_ascii=False))
-        return " ".join(part for part in parts if part).lower()
-
-    def _should_auto_web_search(
-        self,
-        *,
-        search_query: str,
-        retrieval_observation: Dict[str, Any],
-    ) -> tuple[bool, Dict[str, Any]]:
-        matches = retrieval_observation.get("matches") if isinstance(retrieval_observation, dict) else []
-        matches = [item for item in (matches or []) if isinstance(item, dict)]
-        if not matches:
-            return True, {"reason": "retrieval_empty", "best_score": None, "matched_fragments": []}
-
-        scored_matches: List[tuple[float, Dict[str, Any]]] = []
-        for item in matches:
-            try:
-                score = float(item.get("score"))
-            except Exception:
-                continue
-            scored_matches.append((score, item))
-        scored_matches.sort(key=lambda entry: entry[0])
-        best_score = scored_matches[0][0] if scored_matches else None
-
-        fragments = [
-            fragment
-            for fragment in self._extract_query_fragments(search_query)
-            if (re.fullmatch(r"[\u4e00-\u9fff]+", fragment) and len(fragment) >= 3) or len(fragment) >= 2
-        ]
-        matched_fragments: List[str] = []
-        if fragments:
-            for _, item in scored_matches[:3]:
-                haystack = self._retrieval_match_haystack(item)
-                current = [fragment for fragment in fragments if fragment in haystack]
-                if len(current) > len(matched_fragments):
-                    matched_fragments = current
-
-        if best_score is None:
-            return True, {"reason": "retrieval_score_missing", "best_score": None, "matched_fragments": matched_fragments}
-        if best_score >= self.AUTO_WEB_SEARCH_HARD_SCORE_THRESHOLD:
-            return True, {"reason": "retrieval_low_confidence", "best_score": best_score, "matched_fragments": matched_fragments}
-        if fragments and not matched_fragments and best_score >= self.AUTO_WEB_SEARCH_WEAK_SCORE_THRESHOLD:
-            return True, {"reason": "retrieval_irrelevant", "best_score": best_score, "matched_fragments": []}
-        return False, {"reason": "retrieval_sufficient", "best_score": best_score, "matched_fragments": matched_fragments}
-
-    def _auto_web_search_if_needed(
-        self,
-        *,
-        task_name: str,
-        user_payload: Dict[str, Any],
-        query_text: str,
         allowed_tools: Sequence[str],
-        scratchpad: List[Dict[str, Any]],
-        used_tools: List[str],
-        retrieval_observation: Dict[str, Any],
-    ) -> None:
-        if "web_search" not in allowed_tools or "web_search" not in self.tools:
-            return
-
-        search_query = self._build_auto_web_search_query(
-            task_name=task_name,
-            user_payload=user_payload,
-            query_text=query_text,
-        )
-        should_search, summary = self._should_auto_web_search(
-            search_query=search_query,
-            retrieval_observation=retrieval_observation,
-        )
-        if not should_search:
-            return
-
-        scratchpad.append(
-            {
-                "action": "retrieval_validation",
-                "action_input": {"query": search_query},
-                "observation": {
-                    "auto_web_search": True,
-                    **summary,
-                },
-            }
-        )
-
-        action_input = {
-            "query": search_query,
-            "limit": 5,
-            "trigger": "retrieval_fallback",
-            "reason": summary.get("reason", "retrieval_fallback"),
-        }
-        tool = self.tools["web_search"]
-        with trace_block(
-            "agent_tool.web_search",
-            run_type="tool",
-            inputs=action_input,
-            metadata={"task_name": task_name, "auto_triggered": True},
-            tags=["agent_tool", "web_search", "auto_fallback"],
-        ) as run:
-            try:
-                observation = tool.handler(action_input)
-            except Exception as exc:
-                observation = {"error": str(exc)}
-            end_trace(run, {"observation_preview": self._payload_text(observation)[:1000]})
-        used_tools.append("web_search")
-        scratchpad.append(
-            {
-                "action": "web_search",
-                "action_input": action_input,
-                "observation": observation,
-            }
-        )
-
-    def _auto_retrieve(
-        self,
-        *,
-        allowed_tools: Sequence[str],
-        query_text: str,
-        scratchpad: List[Dict[str, Any]],
-        used_tools: List[str],
+        max_steps: int | None = None,
     ) -> Dict[str, Any]:
-        if "retrieval" not in allowed_tools or "retrieval" not in self.tools:
-            return {"query": query_text, "matches": []}
-        with trace_block(
-            "agent_tool.retrieval",
-            run_type="retriever",
-            inputs={"query": query_text, "limit": 4},
-            tags=["agent_tool", "retrieval", "rag"],
-        ) as run:
-            try:
-                observation = self.tools["retrieval"].handler({"query": query_text, "limit": 4})
-            except Exception as exc:
-                raise RuntimeError(f"知识库检索失败，无法继续执行当前任务：{exc}") from exc
-            end_trace(
-                run,
-                {
-                    "match_count": len((observation or {}).get("matches") or []) if isinstance(observation, dict) else 0,
-                },
-            )
-        if isinstance(observation, dict) and str(observation.get("error") or "").strip():
-            raise RuntimeError(f"知识库检索失败，无法继续执行当前任务：{observation['error']}")
-        used_tools.append("retrieval")
-        scratchpad.append(
-            {
-                "action": "retrieval",
-                "action_input": {"query": query_text, "limit": 4},
-                "observation": observation,
-            }
+        budget = dict(CONFIG.llm_agent_budget(task_name))
+        if max_steps is not None:
+            budget["max_steps"] = max(1, int(max_steps))
+        else:
+            budget["max_steps"] = max(1, int(budget.get("max_steps") or self.max_steps or 1))
+        budget["max_tool_calls"] = max(1, int(budget.get("max_tool_calls") or 1))
+        budget["repeat_action_limit"] = max(1, int(budget.get("repeat_action_limit") or 1))
+        raw_tool_limits = dict(budget.get("tool_limits") or {})
+        default_tool_limit = budget["max_tool_calls"]
+        budget["tool_limits"] = {
+            name: max(1, int(raw_tool_limits.get(name, default_tool_limit)))
+            for name in allowed_tools
+        }
+        return budget
+
+    def _tool_budget_block(self, budget: Dict[str, Any]) -> str:
+        tool_limits = ", ".join(
+            f"{name}<={limit}"
+            for name, limit in dict(budget.get("tool_limits") or {}).items()
+        ) or "无"
+        return (
+            f"- max_steps: {budget.get('max_steps')}\n"
+            f"- max_tool_calls: {budget.get('max_tool_calls')}\n"
+            f"- repeat_action_limit: {budget.get('repeat_action_limit')}\n"
+            f"- tool_limits: {tool_limits}"
         )
-        return observation
+
+    def _normalize_action_input(self, action_input: Dict[str, Any]) -> str:
+        try:
+            return json.dumps(action_input, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(action_input)
+
+    def _tool_budget_error(
+        self,
+        *,
+        action: str,
+        action_input: Dict[str, Any],
+        budget: Dict[str, Any],
+        total_tool_calls: int,
+        tool_usage_counts: Dict[str, int],
+        repeated_action_inputs: Dict[str, int],
+        recent_tool_actions: List[str],
+    ) -> str:
+        max_tool_calls = int(budget.get("max_tool_calls") or 1)
+        if total_tool_calls >= max_tool_calls:
+            return f"工具调用总次数已达上限 {max_tool_calls}，请基于已有 observation 完成判断。"
+
+        tool_limit = int(dict(budget.get("tool_limits") or {}).get(action, max_tool_calls))
+        if tool_usage_counts.get(action, 0) >= tool_limit:
+            return f"工具 {action} 调用次数已达上限 {tool_limit}，请改用其他工具或直接输出 final。"
+
+        repeat_limit = int(budget.get("repeat_action_limit") or 1)
+        action_signature = f"{action}:{self._normalize_action_input(action_input)}"
+        if repeated_action_inputs.get(action_signature, 0) >= repeat_limit:
+            return f"工具 {action} 使用相同参数重复调用已达上限 {repeat_limit}，请调整 query 或直接输出 final。"
+
+        if len(recent_tool_actions) >= repeat_limit and all(
+            previous_action == action
+            for previous_action in recent_tool_actions[-repeat_limit:]
+        ):
+            return f"工具 {action} 连续重复调用已达上限 {repeat_limit}，请整合已有 observation 后再决策。"
+        return ""
 
     def _score_candidate(self, candidate: Dict[str, Any], required_final_keys: Sequence[str]) -> float:
         missing_keys = self._validate_final(candidate, required_final_keys)
@@ -473,7 +259,7 @@ class LLMWorkspaceAgent:
                 candidates.append(candidate)
 
         if not candidates:
-            raise RuntimeError("未生成可用候选结果")
+            raise RuntimeError("未生成可用候选结果。")
 
         scored = sorted(
             (
@@ -557,7 +343,6 @@ class LLMWorkspaceAgent:
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
 
-    # 运行受限的工具调用循环，直到模型给出合法最终结果或步数耗尽。
     @traceable(run_type="chain", name="llm_workspace_agent.run_structured", tags=["llm_agent", "rag"])
     def run_structured(
         self,
@@ -584,59 +369,47 @@ class LLMWorkspaceAgent:
         required_final_keys = list(required_final_keys or [])
         scratchpad: List[Dict[str, Any]] = []
         used_tools: List[str] = []
-        limit = max_steps or self.max_steps
+        tool_usage_counts: Dict[str, int] = {}
+        repeated_action_inputs: Dict[str, int] = {}
+        recent_tool_actions: List[str] = []
         user_id = self._build_history_key(task_name, user_payload)
         query_text = self._build_query_text(task_name, task_goal, user_payload)
         history_block = self._history_block(user_id, query_text) if load_history else "当前任务已跳过历史上下文检索。"
-        retrieval_observation = self._auto_retrieve(
-            allowed_tools=allowed_tools,
-            query_text=query_text,
-            scratchpad=scratchpad,
-            used_tools=used_tools,
-        )
-        self._auto_web_search_if_needed(
-            task_name=task_name,
-            user_payload=user_payload,
-            query_text=query_text,
-            allowed_tools=allowed_tools,
-            scratchpad=scratchpad,
-            used_tools=used_tools,
-            retrieval_observation=retrieval_observation,
-        )
+        budget = self._budget_for_task(task_name=task_name, allowed_tools=allowed_tools, max_steps=max_steps)
 
         system_prompt = (
             "你是 B 站创作工作台的 LLM Agent 中枢。\n"
-            "当前处于严格 LLM 模式：所有分析、判断、决策、生成都必须基于用户输入、历史上下文和工具返回信息实时完成。\n"
-            "不要套用固定阈值、预设模板、硬编码结论，也不要把任务退回规则引擎。\n"
-            "如需历史经验、案例、文案沉淀，优先使用 retrieval。\n"
-            "如需实时信息、热点、平台活动、竞品情况，可以使用 web_search。\n"
-            "如需执行代码、做数据处理或可视化，可以使用 code_interpreter。\n"
-            "如果系统已经补充了 web_search 结果，应优先综合本地检索和联网结果作答；只有两边都没有有效信息时，才要求用户补充线索。\n"
-            "你可以多步调用工具；当信息足够时，再输出最终 JSON。"
+            "你必须采用 ReAct 范式：先基于用户输入和已有 observation 思考，再决定是否调用工具，最终输出结构化 JSON。\n"
+            "所有判断都由你自主完成，不使用硬编码阈值，不依赖固定规则链。\n"
+            "检索优先但不强制：当本地知识库可能包含历史经验、沉淀资料、案例或已知结构化信息时，优先考虑 retrieval；"
+            "如果问题明显依赖最新公开信息，或 retrieval 返回的信息不足、不匹配、已过期，再调用 web_search。\n"
+            "如果要使用 web_search，你需要自己生成最优搜索关键词再发起调用。\n"
+            "如果系统已经给了你预加载上下文，先利用这些信息，只有在还不够时再继续调工具。\n"
+            "严格遵守工具预算，不要为了凑步骤而无意义调用工具。"
         )
 
-        # 整个 Agent 只允许在“调工具”或“给最终结果”之间有限次循环，方便排查问题，
-        # 也避免模型在开放式推理里越跑越偏。
-        for _ in range(limit):
+        for _ in range(int(budget.get("max_steps") or 1)):
             user_prompt = (
                 f"任务名称：{task_name}\n"
                 f"任务目标：{task_goal}\n"
                 f"用户输入：{json.dumps(user_payload, ensure_ascii=False)}\n\n"
                 f"长期记忆：\n{history_block}\n\n"
                 f"可用工具：\n{self._tool_block(allowed_tools)}\n\n"
+                f"工具预算：\n{self._tool_budget_block(budget)}\n\n"
                 f"必须至少使用的工具：{json.dumps(required_tools, ensure_ascii=False)}\n"
                 f"已经使用的工具：{json.dumps(used_tools, ensure_ascii=False)}\n\n"
-                f"历史观察：\n{self._scratchpad_block(scratchpad)}\n\n"
-                "你必须只返回 JSON 对象，格式如下：\n"
+                f"历史 observation：\n{self._scratchpad_block(scratchpad)}\n\n"
+                "你必须只返回一个 JSON 对象，格式如下：\n"
                 "{\n"
                 '  "action": "工具名 或 final",\n'
                 '  "action_input": {},\n'
                 '  "final": null 或 最终结果对象\n'
                 "}\n\n"
                 "规则：\n"
-                "1. 如果信息还不够，action 必须是某个工具名，final 必须为 null。\n"
+                "1. 如果信息仍不足，action 必须是某个工具名，final 必须为 null。\n"
                 "2. 如果 action=final，final 必须完整满足下面的响应契约。\n"
-                "3. 不要输出 markdown，不要输出解释，不要输出多余字段。\n\n"
+                "3. 不要输出 markdown，不要输出解释，不要输出多余字段。\n"
+                "4. 如果 retrieval 和 web_search 都已经返回了有效信息，final 中应整合两者，不要只引用其中一边。\n\n"
                 f"最终响应契约：\n{response_contract}"
             )
             decision = self.llm.invoke_json_required(system_prompt, user_prompt)
@@ -704,6 +477,25 @@ class LLMWorkspaceAgent:
                 )
                 continue
 
+            budget_error = self._tool_budget_error(
+                action=action,
+                action_input=action_input,
+                budget=budget,
+                total_tool_calls=len(used_tools),
+                tool_usage_counts=tool_usage_counts,
+                repeated_action_inputs=repeated_action_inputs,
+                recent_tool_actions=recent_tool_actions,
+            )
+            if budget_error:
+                scratchpad.append(
+                    {
+                        "action": "validation_error",
+                        "action_input": {"blocked_action": action, "blocked_input": action_input},
+                        "observation": {"error": budget_error},
+                    }
+                )
+                continue
+
             tool = self.tools[action]
             with trace_block(
                 f"agent_tool.{action}",
@@ -717,7 +509,12 @@ class LLMWorkspaceAgent:
                 except Exception as exc:
                     observation = {"error": str(exc)}
                 end_trace(run, {"observation_preview": self._payload_text(observation)[:1000]})
+
             used_tools.append(action)
+            tool_usage_counts[action] = tool_usage_counts.get(action, 0) + 1
+            action_signature = f"{action}:{self._normalize_action_input(action_input)}"
+            repeated_action_inputs[action_signature] = repeated_action_inputs.get(action_signature, 0) + 1
+            recent_tool_actions.append(action)
             scratchpad.append(
                 {
                     "action": action,
@@ -726,4 +523,4 @@ class LLMWorkspaceAgent:
                 }
             )
 
-        raise RuntimeError("LLM Agent 未能在限定步骤内完成任务。")
+        raise RuntimeError("LLM Agent 未能在限定步数内完成任务。")

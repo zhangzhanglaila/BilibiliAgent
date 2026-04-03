@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import sys
-import tempfile
 import unittest
 import shutil
 from pathlib import Path
 from unittest.mock import patch
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -22,7 +22,11 @@ from tools.search_tool import SearchTool
 
 class RagIntegrationTests(unittest.TestCase):
     def _make_tempdir(self) -> str:
-        return tempfile.mkdtemp()
+        temp_root = ROOT / "tests" / ".tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        target = temp_root / f"case_{uuid4().hex}"
+        target.mkdir(parents=True, exist_ok=True)
+        return str(target)
 
     def test_knowledge_base_add_and_retrieve(self) -> None:
         tempdir = self._make_tempdir()
@@ -115,7 +119,7 @@ class RagIntegrationTests(unittest.TestCase):
             shutil.rmtree(tempdir, ignore_errors=True)
 
     def test_search_tool_returns_structured_warning_without_key(self) -> None:
-        tool = SearchTool(api_key="")
+        tool = SearchTool(api_key="", tavily_api_key="")
 
         result = tool.search("B站 热点 活动", limit=3)
 

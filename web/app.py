@@ -35,7 +35,6 @@ from main import run_copy, run_operate, run_optimize, run_pipeline, run_topic
 from memory.long_term_memory import LongTermMemory
 from models import to_plain_data
 from observability import configure_langsmith, traceable
-from tools.code_interpreter import CodeInterpreterTool
 from tools.search_tool import SearchTool
 
 app = Flask(
@@ -255,7 +254,6 @@ RAW_COPY_AGENT = CopywritingAgent()
 KNOWLEDGE_BASE = KnowledgeBase(persist_directory=CONFIG.vector_db_path)
 LONG_TERM_MEMORY = LongTermMemory(persist_directory=CONFIG.vector_db_path)
 WEB_SEARCH = SearchTool()
-CODE_INTERPRETER = CodeInterpreterTool()
 LLM_WORKSPACE_AGENT: LLMWorkspaceAgent | None = None
 LLM_WORKSPACE_SIGNATURE: tuple[str, ...] | None = None
 RUNTIME_LLM_ENABLED = CONFIG.llm_enabled()
@@ -282,6 +280,12 @@ KNOWLEDGE_UPDATE_EXECUTION_LOCK = threading.Lock()
 KNOWLEDGE_UPDATE_JOBS: dict[str, dict] = {}
 KNOWLEDGE_UPDATE_ACTIVE_JOB_ID: str | None = None
 KNOWLEDGE_UPDATE_JOB_TTL_SECONDS = 60 * 60
+LLM_SCENE_ALLOWED_TOOLS = {
+    "module_create": ["retrieval", "web_search"],
+    "module_analyze": ["retrieval", "web_search", "video_briefing", "hot_board_snapshot"],
+    "workspace_chat": ["retrieval", "web_search", "video_briefing", "hot_board_snapshot"],
+}
+CREATOR_BRIEFING_TRIGGER_KEYWORDS = ("选题", "赛道", "分区", "热点", "竞品", "爆款")
 
 
 # 判断当前是否已经保存了可用于启用 LLM Agent 的运行时配置。
@@ -3717,6 +3721,38 @@ def hot_board_snapshot_tool_handler(payload: dict) -> dict:
     return result
 
 
+def allowed_tools_for_scene(scene_name: str) -> list[str]:
+    return list(LLM_SCENE_ALLOWED_TOOLS.get(scene_name, LLM_SCENE_ALLOWED_TOOLS["workspace_chat"]))
+
+
+def should_preload_creator_briefing(data: dict) -> bool:
+    query_text = " ".join(
+        str(data.get(key) or "").strip()
+        for key in ["field", "direction", "idea", "partition"]
+        if str(data.get(key) or "").strip()
+    )
+    if not query_text:
+        return False
+    return any(keyword in query_text for keyword in CREATOR_BRIEFING_TRIGGER_KEYWORDS)
+
+
+def load_creator_preprocessed_context(data: dict) -> dict:
+    if not should_preload_creator_briefing(data):
+        return {}
+    try:
+        briefing = creator_briefing_tool_handler(
+            {
+                "field": (data.get("field") or "").strip(),
+                "direction": (data.get("direction") or "").strip(),
+                "idea": (data.get("idea") or "").strip(),
+                "partition": (data.get("partition") or "knowledge").strip() or "knowledge",
+            }
+        )
+    except Exception:
+        return {}
+    return {"creator_briefing": compact_creator_briefing_for_llm(briefing)}
+
+
 # 懒加载并返回全局 LLMWorkspaceAgent 实例。
 def get_llm_workspace_agent() -> LLMWorkspaceAgent:
     global LLM_WORKSPACE_AGENT, LLM_WORKSPACE_SIGNATURE
@@ -3736,11 +3772,6 @@ def get_llm_workspace_agent() -> LLMWorkspaceAgent:
             memory_store=LONG_TERM_MEMORY,
             tools=[
                 AgentTool(
-                    name="creator_briefing",
-                    description="根据领域、方向、想法和分区，抓取热点榜、分区样本、同类样本原始数据。输入: {field, direction, idea, partition}",
-                    handler=creator_briefing_tool_handler,
-                ),
-                AgentTool(
                     name="video_briefing",
                     description="解析 B 站视频链接，返回视频公开数据，并抓取相同分区与同类 UP 的原始样本。输入: {url}",
                     handler=video_briefing_tool_handler,
@@ -3755,11 +3786,6 @@ def get_llm_workspace_agent() -> LLMWorkspaceAgent:
                     name="web_search",
                     description="实时搜索热点、平台活动、竞品趋势和外部公开信息。输入: {query, limit}",
                     handler=lambda payload: WEB_SEARCH.search(payload.get("query", ""), int(payload.get("limit") or 5)),
-                ),
-                AgentTool(
-                    name="code_interpreter",
-                    description="执行 Python 代码，完成数据处理、分析和简单可视化准备。输入: {code, variables}",
-                    handler=CODE_INTERPRETER.run,
                 ),
             ],
         )
@@ -3834,6 +3860,7 @@ def finalize_module_analyze_result(result: dict, resolved: dict, market_snapshot
 def run_llm_module_create(data: dict) -> dict:
     agent = get_llm_workspace_agent()
     default_style = (data.get("style") or "干货").strip() or "干货"
+    preloaded_context = load_creator_preprocessed_context(data)
     response_contract = (
         "返回一个 JSON 对象，字段必须包含：\n"
         "- normalized_profile: 字符串，整理后的创作方向\n"
@@ -3847,20 +3874,19 @@ def run_llm_module_create(data: dict) -> dict:
     try:
         result = agent.run_structured(
         task_name="module_create",
-        task_goal="基于用户输入和实时市场样本，为创作者输出更容易起量的 3 个选题，并生成完整可发布文案。",
+        task_goal="基于用户输入、按需预加载的创作简报和工具 observation，为创作者输出更容易起量的 3 个选题，并生成完整可发布文案。",
         user_payload={
             "field": (data.get("field") or "").strip(),
             "direction": (data.get("direction") or "").strip(),
             "idea": (data.get("idea") or "").strip(),
             "partition": (data.get("partition") or "knowledge").strip() or "knowledge",
             "style": (data.get("style") or "干货").strip() or "干货",
+            "preloaded_context": preloaded_context,
             "memory_user_id": "web_module_create",
         },
         response_contract=response_contract,
-        allowed_tools=["retrieval", "creator_briefing", "web_search", "code_interpreter"],
-        required_tools=["creator_briefing"],
+        allowed_tools=allowed_tools_for_scene("module_create"),
         required_final_keys=["normalized_profile", "seed_topic", "partition", "style", "chosen_topic", "topic_result", "copy_result"],
-            max_steps=2,
         )
         copy_topic = (
             clean_copy_text(result.get("chosen_topic", ""))
@@ -3959,7 +3985,7 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
     )
     result = agent.run_structured(
         task_name="module_analyze",
-        task_goal="基于后端已经解析出的当前视频真实信息和完整市场样本，结合知识库检索、热点榜单、联网搜索、代码解释器与长期记忆按需补充信息，判断它更接近爆款还是低表现，并输出完整结构化分析。优先复用当前 payload，只有在需要补充案例、最新趋势、外部公开信息或数据计算时再继续调工具。",
+        task_goal="基于后端已经解析出的当前视频真实信息和完整市场样本，结合知识库检索、热点榜单、视频简报、联网搜索与长期记忆按需补充信息，判断它更接近爆款还是低表现，并输出完整结构化分析。优先复用当前 payload，只有在需要补充案例、最新趋势或外部公开信息时再继续调工具。",
         user_payload={
             "url": (data.get("url") or "").strip(),
             "parsed_video": resolved,
@@ -3967,9 +3993,8 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
             "memory_user_id": "web_module_analyze",
         },
         response_contract=response_contract,
-        allowed_tools=["retrieval", "hot_board_snapshot", "web_search", "code_interpreter"],
+        allowed_tools=allowed_tools_for_scene("module_analyze"),
         required_final_keys=["resolved", "performance", "topic_result", "optimize_result", "analysis", "copy_result"],
-        max_steps=4,
         load_history=True,
         save_memory=True,
         enable_reflection=True,
@@ -4049,7 +4074,7 @@ def run_llm_chat(data: dict) -> dict:
             "memory_user_id": "web_workspace_chat",
         },
         response_contract=response_contract,
-        allowed_tools=["retrieval", "creator_briefing", "video_briefing", "hot_board_snapshot", "web_search", "code_interpreter"],
+        allowed_tools=allowed_tools_for_scene("workspace_chat"),
         required_final_keys=["reply", "suggested_next_actions", "mode"],
     )
     chat_query_text = " ".join(

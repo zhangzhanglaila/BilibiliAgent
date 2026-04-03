@@ -46,6 +46,16 @@ def env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw.strip())
+    except Exception:
+        return default
+
+
 @dataclass
 class AppConfig:
     request_interval: float = float(os.getenv("REQUEST_INTERVAL", "1.2"))
@@ -66,10 +76,23 @@ class AppConfig:
     llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
     llm_retry_backoff_seconds: float = float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "1.6"))
     serpapi_api_key: str = os.getenv("SERPAPI_API_KEY", "")
+    tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
     vector_db_path: str = os.getenv("VECTOR_DB_PATH", "./vector_db")
     embedding_model_name: str = os.getenv("EMBEDDING_MODEL_NAME", "BAAI/bge-small-zh-v1.5")
     embedding_device: str = os.getenv("EMBEDDING_DEVICE", "")
     embedding_cache_dir: str = os.getenv("EMBEDDING_CACHE_DIR", "./model_cache")
+    llm_agent_default_max_steps: int = env_int("LLM_AGENT_DEFAULT_MAX_STEPS", 5)
+    llm_agent_default_max_tool_calls: int = env_int("LLM_AGENT_DEFAULT_MAX_TOOL_CALLS", 4)
+    llm_agent_default_repeat_action_limit: int = env_int("LLM_AGENT_DEFAULT_REPEAT_ACTION_LIMIT", 2)
+    llm_agent_create_max_steps: int = env_int("LLM_AGENT_CREATE_MAX_STEPS", 4)
+    llm_agent_create_max_tool_calls: int = env_int("LLM_AGENT_CREATE_MAX_TOOL_CALLS", 3)
+    llm_agent_create_repeat_action_limit: int = env_int("LLM_AGENT_CREATE_REPEAT_ACTION_LIMIT", 2)
+    llm_agent_analyze_max_steps: int = env_int("LLM_AGENT_ANALYZE_MAX_STEPS", 5)
+    llm_agent_analyze_max_tool_calls: int = env_int("LLM_AGENT_ANALYZE_MAX_TOOL_CALLS", 5)
+    llm_agent_analyze_repeat_action_limit: int = env_int("LLM_AGENT_ANALYZE_REPEAT_ACTION_LIMIT", 2)
+    llm_agent_chat_max_steps: int = env_int("LLM_AGENT_CHAT_MAX_STEPS", 4)
+    llm_agent_chat_max_tool_calls: int = env_int("LLM_AGENT_CHAT_MAX_TOOL_CALLS", 4)
+    llm_agent_chat_repeat_action_limit: int = env_int("LLM_AGENT_CHAT_REPEAT_ACTION_LIMIT", 2)
     bili_sessdata: str = os.getenv("BILI_SESSDATA", "")
     bili_csrf: str = os.getenv("BILI_BILI_JCT", "")
     default_partition: str = os.getenv("DEFAULT_PARTITION", "knowledge")
@@ -98,6 +121,63 @@ class AppConfig:
     # 根据归一化后的分区名取出对应的 B 站 tid。
     def partition_tid(self, partition_name: str | None = None) -> int:
         return PARTITION_TIDS[self.normalize_partition(partition_name)]
+
+    def llm_agent_budget(self, task_name: str) -> dict:
+        default_budget = {
+            "max_steps": self.llm_agent_default_max_steps,
+            "max_tool_calls": self.llm_agent_default_max_tool_calls,
+            "repeat_action_limit": self.llm_agent_default_repeat_action_limit,
+            "tool_limits": {
+                "retrieval": 2,
+                "web_search": 2,
+            },
+        }
+        budgets = {
+            "module_create": {
+                "max_steps": self.llm_agent_create_max_steps,
+                "max_tool_calls": self.llm_agent_create_max_tool_calls,
+                "repeat_action_limit": self.llm_agent_create_repeat_action_limit,
+                "tool_limits": {
+                    "retrieval": 2,
+                    "web_search": 2,
+                },
+            },
+            "module_analyze": {
+                "max_steps": self.llm_agent_analyze_max_steps,
+                "max_tool_calls": self.llm_agent_analyze_max_tool_calls,
+                "repeat_action_limit": self.llm_agent_analyze_repeat_action_limit,
+                "tool_limits": {
+                    "retrieval": 2,
+                    "web_search": 2,
+                    "video_briefing": 1,
+                    "hot_board_snapshot": 1,
+                },
+            },
+            "workspace_chat": {
+                "max_steps": self.llm_agent_chat_max_steps,
+                "max_tool_calls": self.llm_agent_chat_max_tool_calls,
+                "repeat_action_limit": self.llm_agent_chat_repeat_action_limit,
+                "tool_limits": {
+                    "retrieval": 2,
+                    "web_search": 2,
+                    "video_briefing": 1,
+                    "hot_board_snapshot": 1,
+                },
+            },
+        }
+        selected = budgets.get(task_name, default_budget)
+        return {
+            "max_steps": max(1, int(selected.get("max_steps", default_budget["max_steps"]))),
+            "max_tool_calls": max(1, int(selected.get("max_tool_calls", default_budget["max_tool_calls"]))),
+            "repeat_action_limit": max(
+                1,
+                int(selected.get("repeat_action_limit", default_budget["repeat_action_limit"])),
+            ),
+            "tool_limits": {
+                str(name): max(1, int(limit))
+                for name, limit in dict(selected.get("tool_limits") or default_budget["tool_limits"]).items()
+            },
+        }
 
 
 CONFIG = AppConfig()
