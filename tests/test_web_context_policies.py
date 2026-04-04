@@ -43,7 +43,27 @@ class WebContextPolicyTests(unittest.TestCase):
             "tname": "颜值",
             "keywords": ["旗袍", "美女"],
         }
-        with patch("web.app.serialize_video_metric", return_value={"title": "Benchmark Sample", "url": "https://example.com"}):
+        serialized_samples = [
+            {
+                "bvid": "BV1abcde1234",
+                "title": "旗袍美女变装展示",
+                "author": "测试UP1",
+                "url": "https://example.com/1",
+                "view": 100000,
+                "like": 5000,
+                "source": "同方向爆款:旗袍",
+            },
+            {
+                "bvid": "BV2abcde1234",
+                "title": "旗袍近景颜值卡点",
+                "author": "测试UP2",
+                "url": "https://example.com/2",
+                "view": 90000,
+                "like": 4200,
+                "source": "同方向爆款:旗袍",
+            },
+        ]
+        with patch("web.app.serialize_video_metric", side_effect=serialized_samples):
             with patch("web.app.RAW_TOPIC_AGENT.fetch_hot_peer_videos", return_value=[{"id": 1}, {"id": 2}]):
                 snapshot = build_hot_peer_market_snapshot(resolved)
 

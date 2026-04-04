@@ -32,9 +32,14 @@
 - `/api/module-analyze` 调 `LLMWorkspaceAgent`
 - `/api/chat` 可用
 - 但三条链路的工具集合并不相同：
-  - `module-create`：`retrieval`、`creator_briefing`、`web_search`、`code_interpreter`
-  - `module-analyze`：`retrieval`、`hot_board_snapshot`、`web_search`、`code_interpreter`
-  - `chat`：`retrieval`、`creator_briefing`、`video_briefing`、`hot_board_snapshot`、`web_search`、`code_interpreter`
+  - `module-create`：`retrieval`、`web_search`
+  - `module-analyze`：`retrieval`、`web_search`
+  - `chat`：`retrieval`、`web_search`、`video_briefing`、`hot_board_snapshot`
+
+补充说明：
+
+- `module-analyze` 当前视频信息和同方向爆款 `peer_samples` 由后端代码在进入 Agent 前预加载
+- 因此当前 `module-analyze` 不再开放 `video_briefing`、`hot_board_snapshot`、`code_interpreter`
 
 结果：
 

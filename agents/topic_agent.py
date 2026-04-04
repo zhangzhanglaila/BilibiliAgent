@@ -127,6 +127,34 @@ RELATIONSHIP_CONFLICT_TOKENS = ("相处", "吵架", "冷战", "沟通", "婚姻"
 KNOWLEDGE_SEED_TOKENS = ("科普", "知识", "原理", "为什么", "误区", "区别", "差异", "解析", "解读", "真相")
 REVIEW_SEED_TOKENS = ("测评", "评测", "开箱", "实测", "对比", "推荐", "避坑", "值不值", "体验")
 FUN_SEED_TOKENS = ("搞笑", "整活", "吐槽", "沙雕", "抽象", "盘点", "挑战", "名场面", "翻车")
+HOT_PEER_QUERY_STOPWORDS = {
+    "b站",
+    "哔哩哔哩",
+    "视频",
+    "短视频",
+    "爆款",
+    "热门",
+    "高播放",
+    "高点赞",
+    "高赞",
+    "高播放量",
+    "分区",
+    "赛道",
+    "对标",
+    "样本",
+    "案例",
+}
+HOT_PEER_QUERY_WEAK_TERMS = {
+    "生活",
+    "娱乐",
+    "知识",
+    "科技",
+    "游戏",
+    "音乐",
+    "记录",
+    "练习",
+    "分享",
+}
 
 
 class TopicAgent:
@@ -265,17 +293,30 @@ class TopicAgent:
         if isinstance(value, (int, float)):
             return int(value)
 
-        text = str(value).strip().lower().replace(",", "")
+        text = re.sub(r"<[^>]+>", "", str(value or "")).strip().lower()
+        text = (
+            text.replace(",", "")
+            .replace("，", "")
+            .replace("\u00a0", "")
+            .replace(" ", "")
+            .replace("＋", "+")
+        )
         if not text:
             return 0
 
         multiplier = 1
-        if text.endswith("万"):
-            multiplier = 10000
-            text = text[:-1]
-        elif text.endswith("亿"):
-            multiplier = 100000000
-            text = text[:-1]
+        for unit, unit_multiplier in (
+            ("亿", 100000000),
+            ("万", 10000),
+            ("千", 1000),
+            ("b", 1000000000),
+            ("m", 1000000),
+            ("k", 1000),
+            ("w", 10000),
+        ):
+            if unit in text:
+                multiplier = unit_multiplier
+                break
 
         match = re.search(r"\d+(?:\.\d+)?", text)
         if not match:
@@ -284,6 +325,40 @@ class TopicAgent:
             return int(float(match.group(0)) * multiplier)
         except Exception:
             return 0
+
+    def _normalize_hot_peer_text(self, value: Any) -> str:
+        return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").lower())
+
+    def _extract_hot_peer_query_terms(self, queries: Iterable[str]) -> List[str]:
+        terms: List[str] = []
+        seen: set[str] = set()
+
+        for query in queries:
+            raw_query = str(query or "").strip()
+            if not raw_query:
+                continue
+            raw_terms = re.findall(r"[A-Za-z][A-Za-z0-9]*(?:\s+[A-Za-z0-9]+){0,3}|[\u4e00-\u9fff]{2,}", raw_query)
+            for raw_term in raw_terms:
+                normalized = self._normalize_hot_peer_text(raw_term)
+                if (
+                    len(normalized) < 2
+                    or normalized in HOT_PEER_QUERY_STOPWORDS
+                    or normalized in HOT_PEER_QUERY_WEAK_TERMS
+                    or normalized in seen
+                ):
+                    continue
+                seen.add(normalized)
+                terms.append(normalized)
+        return sorted(terms, key=lambda item: (-len(item), item))
+
+    def _hot_peer_query_matches(self, candidate_text: str, query_terms: Iterable[str]) -> bool:
+        normalized_terms = [str(term or "").strip() for term in query_terms if str(term or "").strip()]
+        if not normalized_terms:
+            return True
+        normalized_candidate = self._normalize_hot_peer_text(candidate_text)
+        if not normalized_candidate:
+            return False
+        return any(term in normalized_candidate for term in normalized_terms)
 
     # 调公开 Web API 拉取 JSON，便于补同方向爆款对标样本。
     def _fetch_public_json(self, url: str) -> Dict[str, Any]:
@@ -295,11 +370,11 @@ class TopicAgent:
         return payload
 
     # 从搜索结果里抽取一批候选视频。
-    def _fetch_hot_peer_candidates(self, query: str, page_size: int) -> List[Dict[str, Any]]:
+    def _fetch_hot_peer_candidates(self, query: str, page_size: int, order: str = "click") -> List[Dict[str, Any]]:
         params = {
             "search_type": "video",
             "keyword": query,
-            "order": "click",
+            "order": order,
             "page": 1,
             "page_size": max(1, min(page_size, 20)),
         }
@@ -466,6 +541,7 @@ class TopicAgent:
         normalized_recent_days = max(int(recent_days or 0), 0)
         normalized_min_view = max(int(min_view or 0), 0)
         normalized_min_like = max(int(min_like or 0), 0)
+        query_terms = self._extract_hot_peer_query_terms(normalized_queries)
         cache_key = (
             "hot_peer",
             tuple(normalized_queries[:4]),
@@ -484,7 +560,11 @@ class TopicAgent:
 
         for query in normalized_queries[:4]:
             try:
-                candidates = self._fetch_hot_peer_candidates(query, page_size=max(normalized_limit * 3, 10))
+                candidates = self._fetch_hot_peer_candidates(
+                    query,
+                    page_size=max(normalized_limit * 3, 10),
+                    order="pubdate" if normalized_recent_days else "click",
+                )
             except Exception:
                 candidates = []
             finally:
@@ -559,6 +639,18 @@ class TopicAgent:
                 metric = self._build_metrics(fallback_payload, f"同方向爆款搜索:{candidate.get('query', '')}")
                 metric.pubdate = pubdate
 
+            candidate_text = " ".join(
+                part
+                for part in [
+                    metric.title,
+                    metric.author,
+                    str((detail or {}).get("tname") or ""),
+                    str((detail or {}).get("desc") or ""),
+                ]
+                if str(part or "").strip()
+            )
+            if query_terms and not self._hot_peer_query_matches(candidate_text, query_terms):
+                continue
             if metric.view < normalized_min_view or metric.like < normalized_min_like:
                 continue
             videos.append(metric)

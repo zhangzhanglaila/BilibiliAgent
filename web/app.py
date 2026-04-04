@@ -167,6 +167,58 @@ VIDEO_KEYWORD_STOPWORDS = {
     "原创",
     "弹幕",
 }
+MUSIC_REFERENCE_KEYWORDS = (
+    "音乐",
+    "原创音乐",
+    "演奏",
+    "翻唱",
+    "翻弹",
+    "弹唱",
+    "cover",
+    "remix",
+    "配乐",
+    "转调",
+    "和声",
+    "乐器",
+    "钢琴",
+    "钢琴曲",
+    "吉他",
+    "贝斯",
+    "小提琴",
+    "大提琴",
+    "古筝",
+    "古琴",
+    "琵琶",
+    "二胡",
+    "萨克斯",
+    "长笛",
+    "架子鼓",
+)
+VIDEO_BENCHMARK_QUERY_STOPWORDS = {
+    *VIDEO_KEYWORD_STOPWORDS,
+    "爆款",
+    "热门",
+    "高播放",
+    "高点赞",
+    "高赞",
+    "高播放量",
+    "分区",
+    "赛道",
+    "样本",
+    "对标",
+    "短视频",
+}
+VIDEO_BENCHMARK_WEAK_TERMS = {
+    "记录",
+    "练习",
+    "分享",
+    "日常",
+    "生活",
+    "娱乐",
+    "知识",
+    "科技",
+    "游戏",
+}
 CREATOR_PARTITION_ANGLES = {
     "knowledge": ["问题拆解", "保姆级步骤", "避坑清单", "实测对比"],
     "tech": ["结果对比", "真实实测", "省钱替代", "新手避坑"],
@@ -247,6 +299,35 @@ RUNTIME_MODE_LABELS = {
     "rules": "无 Key 逻辑模式",
     "llm_agent": "LLM Agent 模式",
 }
+
+
+def looks_like_music_reference(text: str) -> bool:
+    normalized = normalize_reference_text(text)
+    return bool(normalized) and any(token in normalized for token in MUSIC_REFERENCE_KEYWORDS)
+
+
+def extract_latin_reference_phrases(text: str) -> list[str]:
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for match in re.findall(r"[A-Za-z][A-Za-z0-9]*(?:\s+[A-Za-z0-9]+){0,3}", text or ""):
+        phrase = re.sub(r"\s+", " ", match).strip()
+        marker = phrase.lower()
+        if len(phrase) < 2 or marker in seen:
+            continue
+        seen.add(marker)
+        phrases.append(phrase)
+    return phrases[:4]
+
+
+def append_benchmark_query(queries: list[str], seen: set[str], parts: list[str]) -> None:
+    value = re.sub(r"\s+", " ", " ".join(str(part or "").strip() for part in parts if str(part or "").strip())).strip(
+        " ，,。.;；:-_|"
+    )
+    marker = value.lower()
+    if len(value) < 2 or marker in seen:
+        return
+    seen.add(marker)
+    queries.append(value)
 
 RAW_TOPIC_AGENT = TopicAgent()
 RAW_COPY_AGENT = CopywritingAgent()
@@ -341,11 +422,13 @@ VIDEO_ANALYZE_SYSTEM_PROMPT = (
     "如果是低表现：对标同赛道样本，给出标题、封面、内容结构、标签、发布策略等全维度改进建议，并生成可直接使用的新文案与脚本。\n\n"
     "【工具调用链路】\n"
     "1. 当前输入里的 parsed_video 与 preloaded_context.video 已经是后端预加载的当前视频真实信息，不允许再重新解析当前视频，不允许调用 video_briefing。\n"
-    "2. 第一步必须调用 retrieval，检索同垂类、同赛道的静态爆款样本。query 必须围绕视频所属分区、垂类、关键词生成，"
-    "不得包含历史任务词汇。\n"
-    "3. preloaded_context.market_snapshot.peer_samples 是代码预抓的同方向爆款对标视频，不是同 UP 样本，也不是 LLM 生成内容。\n"
-    "4. 只有当 retrieval 返回样本不足时，才允许调用 web_search 搜索最新赛道规则或补充案例。\n"
-    "5. 所有工具调用完成后直接输出 final 结构化结果，禁止无意义循环。\n\n"
+    "2. 第一步必须调用 retrieval，检索同垂类、同赛道的静态爆款样本。query 必须优先参考 "
+    "preloaded_context.video.benchmark_queries 和 benchmark_terms，优先使用具体方向词，不要退化成“生活 / 记录 / 短视频”这类泛词。\n"
+    "3. preloaded_context.market_snapshot.peer_samples 是代码预抓的同方向爆款对标视频，不是同 UP 样本，也不是 LLM 生成内容；"
+    "如果这里非空，analysis.benchmark_analysis.benchmark_videos 必须优先引用这些样本。\n"
+    "4. 禁止输出任何“先重新解析当前视频 / 调 video_briefing / 再看一次当前视频详情”之类的计划，因为当前视频已解析完成。\n"
+    "5. 只有当 retrieval 返回样本不足时，才允许调用 web_search 搜索最新赛道规则或补充案例。\n"
+    "6. 所有工具调用完成后直接输出 final 结构化结果，禁止无意义循环。\n\n"
     "【判定要求】\n"
     "1. 必须明确输出 performance.score，并给出爆款/低表现结论。\n"
     "2. analysis.benchmark_analysis.benchmark_videos 必须尽量给出同赛道直接对标参考视频。\n"
@@ -1022,6 +1105,8 @@ def map_partition(tname: str, tid: int, context_text: str = "") -> str:
         return "tech"
     if any(keyword in text for keyword in ["游戏", "电竞"]):
         return "game"
+    if looks_like_music_reference(text):
+        return "ent"
     if any(keyword in text for keyword in ["舞蹈", "卡点", "变速卡点", "热舞", "变装", "颜值", "美女", "身材", "小姐姐"]):
         return "ent"
     if any(keyword in text for keyword in LIFE_CONTENT_KEYWORDS):
@@ -1068,6 +1153,8 @@ def normalize_video_tname(tname: str, tid: int, keywords: object = None, title: 
 
     keyword_list = extract_video_keywords(keywords)
     text = f"{title} {' '.join(keyword_list)}".lower()
+    if looks_like_music_reference(text):
+        return "音乐"
     if any(token in text for token in SEA_HARVEST_KEYWORDS):
         return "赶海"
     if any(token in text for token in ["颜值", "美女", "身材", "小姐姐", "变装"]):
@@ -2148,54 +2235,109 @@ def build_empty_market_snapshot(partition_name: str) -> dict:
     }
 
 
-# 为视频分析模块构造“同方向爆款”检索词，避免退化成同 UP 样本。
-def build_video_benchmark_queries(resolved: dict) -> list[str]:
+# 为视频分析模块归纳方向词、检索词和更可靠的对标分区。
+def build_video_benchmark_profile(resolved: dict) -> dict:
     partition_label = str(resolved.get("partition_label") or "").strip()
     tname = str(resolved.get("tname") or "").strip()
-    keywords = extract_video_keywords(resolved.get("keywords"))
-    title_terms = extract_reference_terms(" ".join([resolved.get("title", ""), resolved.get("topic", "")]))
-
-    candidate_queries = [
-        [partition_label, tname, *keywords[:2], "爆款"],
-        [partition_label, tname, *title_terms[:2], "热门"],
-        [partition_label, *keywords[:3], "高播放"],
-        [tname, *keywords[:2], *title_terms[:1], "高点赞"],
+    title = str(resolved.get("title") or "").strip()
+    topic = str(resolved.get("topic") or "").strip()
+    raw_keywords = extract_video_keywords(resolved.get("keywords"))
+    keywords = [keyword for keyword in raw_keywords if keyword not in VIDEO_BENCHMARK_WEAK_TERMS]
+    title_terms = [
+        term
+        for term in extract_reference_terms(" ".join([title, topic]))
+        if term not in VIDEO_BENCHMARK_QUERY_STOPWORDS and term not in VIDEO_BENCHMARK_WEAK_TERMS
     ]
+    latin_phrases = extract_latin_reference_phrases(" ".join([title, topic]))
+    combined_text = " ".join([title, topic, tname, partition_label, *raw_keywords])
+    effective_partition = str(resolved.get("partition") or "").strip()
+    lane_label = tname or partition_label
+    if looks_like_music_reference(combined_text):
+        effective_partition = "ent"
+        lane_label = "音乐"
+        if "钢琴" in combined_text and "钢琴" not in keywords:
+            keywords.insert(0, "钢琴")
+
+    terms: list[str] = []
+    for term in keywords + latin_phrases + title_terms:
+        clean = re.sub(r"\s+", " ", str(term or "").strip()).strip(" ，,。.;；:-_|")
+        marker = clean.lower()
+        if (
+            len(clean) < 2
+            or marker in VIDEO_BENCHMARK_QUERY_STOPWORDS
+            or clean in VIDEO_BENCHMARK_WEAK_TERMS
+            or clean in terms
+        ):
+            continue
+        if any(marker != existing.lower() and marker in existing.lower() for existing in terms):
+            continue
+        terms.append(clean)
+        if len(terms) >= 6:
+            break
 
     queries: list[str] = []
-    for parts in candidate_queries:
-        signal_parts = [str(part or "").strip() for part in parts if str(part or "").strip() not in {"爆款", "热门", "高播放", "高点赞"}]
-        if not signal_parts:
-            continue
-        query = " ".join(str(part or "").strip() for part in parts if str(part or "").strip())
-        if len(query) < 2 or query in queries:
-            continue
-        queries.append(query)
-    return queries[:4]
+    seen_queries: set[str] = set()
+    append_benchmark_query(queries, seen_queries, [lane_label, *terms[:2]])
+    append_benchmark_query(queries, seen_queries, terms[:3])
+    append_benchmark_query(queries, seen_queries, [terms[0], terms[1], terms[2] if len(terms) > 2 else ""] if terms else [])
+    if title:
+        append_benchmark_query(queries, seen_queries, [title[:32]])
+    if not queries:
+        append_benchmark_query(queries, seen_queries, [lane_label or partition_label, title[:20]])
+
+    return {
+        "effective_partition": effective_partition or str(resolved.get("partition") or "").strip(),
+        "effective_partition_label": PARTITION_LABELS.get(effective_partition, effective_partition) if effective_partition else partition_label,
+        "lane_label": lane_label or partition_label,
+        "terms": terms[:6],
+        "queries": queries[:4],
+    }
+
+
+# 为视频分析模块构造“同方向爆款”检索词，避免退化成同 UP 样本。
+def build_video_benchmark_queries(resolved: dict) -> list[str]:
+    return list(build_video_benchmark_profile(resolved).get("queries") or [])
 
 
 # 仅为视频分析模块预抓同方向爆款对标样本，不混入同 UP 数据。
 def build_hot_peer_market_snapshot(resolved: dict) -> dict:
-    snapshot = build_empty_market_snapshot(resolved.get("partition"))
-    queries = build_video_benchmark_queries(resolved)
+    profile = build_video_benchmark_profile(resolved)
+    snapshot = build_empty_market_snapshot(profile.get("effective_partition") or resolved.get("partition"))
+    if profile.get("effective_partition_label"):
+        snapshot["partition_label"] = profile.get("effective_partition_label")
+    queries = list(profile.get("queries") or [])
     if not queries:
         return snapshot
+    ranking_resolved = dict(resolved or {})
+    ranking_resolved["partition"] = snapshot["partition"]
+    ranking_resolved["partition_label"] = snapshot["partition_label"]
+    if profile.get("lane_label") and not ranking_resolved.get("tname"):
+        ranking_resolved["tname"] = profile.get("lane_label")
+    if profile.get("terms"):
+        ranking_resolved["keywords"] = list(profile.get("terms") or [])
+    query_text = " ".join([str(profile.get("lane_label") or "").strip(), *list(profile.get("terms") or [])]).strip()
     try:
-        peer_samples = [
-            {
+        raw_samples = RAW_TOPIC_AGENT.fetch_hot_peer_videos(
+            queries,
+            exclude_bvid=resolved.get("bv_id", ""),
+            limit=VIDEO_ANALYZE_HOT_PEER_LIMIT,
+            recent_days=VIDEO_ANALYZE_HOT_PEER_RECENT_DAYS,
+            min_view=VIDEO_ANALYZE_HOT_PEER_MIN_VIEW,
+            min_like=VIDEO_ANALYZE_HOT_PEER_MIN_LIKE,
+        )
+        peer_samples = []
+        for item in raw_samples[: VIDEO_ANALYZE_HOT_PEER_LIMIT * 2]:
+            candidate = {
                 **serialize_video_metric(item),
                 "partition": snapshot["partition"],
                 "partition_label": snapshot["partition_label"],
             }
-            for item in RAW_TOPIC_AGENT.fetch_hot_peer_videos(
-                queries,
-                exclude_bvid=resolved.get("bv_id", ""),
-                limit=VIDEO_ANALYZE_HOT_PEER_LIMIT,
-                recent_days=VIDEO_ANALYZE_HOT_PEER_RECENT_DAYS,
-                min_view=VIDEO_ANALYZE_HOT_PEER_MIN_VIEW,
-                min_like=VIDEO_ANALYZE_HOT_PEER_MIN_LIKE,
-            )[:VIDEO_ANALYZE_HOT_PEER_LIMIT]
-        ]
+            _, meta = build_reference_rank_entry(candidate, query_text=query_text, resolved=ranking_resolved)
+            if query_text and has_strict_reference_signal(ranking_resolved, query_text) and not meta.get("is_related"):
+                continue
+            peer_samples.append(candidate)
+            if len(peer_samples) >= VIDEO_ANALYZE_HOT_PEER_LIMIT:
+                break
     except Exception:
         peer_samples = []
     snapshot["peer_samples"] = peer_samples
@@ -3778,10 +3920,10 @@ def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
 
 # 直接把 resolved 重排成更适合放进 LLM 提示词的视频结构。
 def build_llm_video_payload_from_resolved(resolved: dict, url: str) -> dict:
-    retrieval_partition = str(resolved.get("partition") or "").strip()
-    retrieval_partition_label = (
-        str(resolved.get("partition_label") or "").strip()
-        or PARTITION_LABELS.get(retrieval_partition, retrieval_partition)
+    benchmark_profile = build_video_benchmark_profile(resolved)
+    retrieval_partition = str(benchmark_profile.get("effective_partition") or resolved.get("partition") or "").strip()
+    retrieval_partition_label = str(benchmark_profile.get("effective_partition_label") or "").strip() or PARTITION_LABELS.get(
+        retrieval_partition, retrieval_partition
     )
 
     return {
@@ -3800,6 +3942,9 @@ def build_llm_video_payload_from_resolved(resolved: dict, url: str) -> dict:
         "stats": dict(resolved.get("stats") or {}),
         "retrieval_partition": retrieval_partition,
         "retrieval_partition_label": retrieval_partition_label,
+        "benchmark_lane_label": benchmark_profile.get("lane_label", ""),
+        "benchmark_terms": list(benchmark_profile.get("terms") or []),
+        "benchmark_queries": list(benchmark_profile.get("queries") or []),
     }
 
 
