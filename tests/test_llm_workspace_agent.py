@@ -33,7 +33,7 @@ class LLMWorkspaceAgentTests(unittest.TestCase):
     def test_run_structured_does_not_prefetch_tools(self) -> None:
         llm = FakeLLM(
             [
-                {"action": "web_search", "action_input": {"query": "B站 热点", "limit": 3}, "final": None},
+                {"action": "web_search", "action_input": {"query": "bilibili hot", "limit": 3}, "final": None},
                 {"action": "final", "action_input": {}, "final": {"reply": "ok"}},
             ]
         )
@@ -51,9 +51,9 @@ class LLMWorkspaceAgentTests(unittest.TestCase):
 
         result = agent.run_structured(
             task_name="workspace_chat",
-            task_goal="回答用户问题",
-            user_payload={"message": "最近 B 站有什么热点"},
-            response_contract="返回一个 JSON 对象，字段必须包含：reply",
+            task_goal="answer the user",
+            user_payload={"message": "what is hot now"},
+            response_contract="return JSON with reply",
             allowed_tools=["web_search"],
             required_final_keys=["reply"],
             load_history=False,
@@ -64,11 +64,146 @@ class LLMWorkspaceAgentTests(unittest.TestCase):
         self.assertEqual(result["agent_trace"], ["web_search"])
         self.assertEqual(result["tool_observations"][0]["action"], "web_search")
 
+    def test_run_structured_requires_required_tools_before_final(self) -> None:
+        llm = FakeLLM(
+            [
+                {"action": "final", "action_input": {}, "final": {"reply": "too early"}},
+                {"action": "retrieval", "action_input": {"query": "赶海", "limit": 2}, "final": None},
+                {"action": "video_briefing", "action_input": {"url": "https://www.bilibili.com/video/BV1demo"}, "final": None},
+                {"action": "final", "action_input": {}, "final": {"reply": "done"}},
+            ]
+        )
+        agent = LLMWorkspaceAgent(
+            llm_client=llm,
+            memory_store=None,
+            tools=[
+                AgentTool(
+                    name="retrieval",
+                    description="retrieval",
+                    handler=lambda payload: {"query": payload.get("query", ""), "matches": [{"text": "sample"}]},
+                ),
+                AgentTool(
+                    name="video_briefing",
+                    description="video_briefing",
+                    handler=lambda payload: {"video": {"title": "sample video"}},
+                ),
+            ],
+        )
+
+        result = agent.run_structured(
+            task_name="module_analyze",
+            task_goal="analyze one video",
+            user_payload={"url": "https://www.bilibili.com/video/BV1demo"},
+            response_contract="return JSON with reply",
+            allowed_tools=["retrieval", "video_briefing"],
+            required_tools=["retrieval", "video_briefing"],
+            required_final_keys=["reply"],
+            load_history=False,
+            save_memory=False,
+            enable_reflection=False,
+        )
+
+        self.assertEqual(result["agent_trace"], ["retrieval", "video_briefing"])
+        errors = [
+            item.get("observation", {}).get("error", "")
+            for item in result["tool_observations"]
+            if item.get("action") == "validation_error"
+        ]
+        self.assertTrue(any("仍需先调用工具" in error for error in errors))
+
+    def test_run_structured_enforces_required_tool_order(self) -> None:
+        llm = FakeLLM(
+            [
+                {"action": "retrieval", "action_input": {"query": "赶海", "limit": 2}, "final": None},
+                {"action": "video_briefing", "action_input": {"url": "https://www.bilibili.com/video/BV1demo"}, "final": None},
+                {"action": "retrieval", "action_input": {"query": "赶海", "limit": 2}, "final": None},
+                {"action": "final", "action_input": {}, "final": {"reply": "done"}},
+            ]
+        )
+        agent = LLMWorkspaceAgent(
+            llm_client=llm,
+            memory_store=None,
+            tools=[
+                AgentTool(
+                    name="video_briefing",
+                    description="video",
+                    handler=lambda payload: {"video": {"title": "sample"}},
+                ),
+                AgentTool(
+                    name="retrieval",
+                    description="retrieval",
+                    handler=lambda payload: {"matches": [{"text": "sample"}]},
+                ),
+            ],
+        )
+
+        result = agent.run_structured(
+            task_name="module_analyze",
+            task_goal="analyze one video",
+            user_payload={"url": "https://www.bilibili.com/video/BV1demo"},
+            response_contract="return JSON with reply",
+            allowed_tools=["video_briefing", "retrieval"],
+            required_tools=["video_briefing", "retrieval"],
+            required_final_keys=["reply"],
+            load_history=False,
+            save_memory=False,
+            enable_reflection=False,
+            strict_required_tool_order=True,
+        )
+
+        self.assertEqual(result["agent_trace"], ["video_briefing", "retrieval"])
+        errors = [
+            item.get("observation", {}).get("error", "")
+            for item in result["tool_observations"]
+            if item.get("action") == "validation_error"
+        ]
+        self.assertTrue(any("当前必须先调用工具 video_briefing" in error for error in errors))
+
+    def test_run_structured_uses_action_validator(self) -> None:
+        llm = FakeLLM(
+            [
+                {"action": "web_search", "action_input": {"query": "latest", "limit": 3}, "final": None},
+                {"action": "final", "action_input": {}, "final": {"reply": "done"}},
+            ]
+        )
+        agent = LLMWorkspaceAgent(
+            llm_client=llm,
+            memory_store=None,
+            tools=[
+                AgentTool(
+                    name="web_search",
+                    description="search",
+                    handler=lambda payload: {"results": [{"title": "hit"}]},
+                )
+            ],
+        )
+
+        result = agent.run_structured(
+            task_name="workspace_chat",
+            task_goal="answer the user",
+            user_payload={"message": "search something"},
+            response_contract="return JSON with reply",
+            allowed_tools=["web_search"],
+            required_final_keys=["reply"],
+            load_history=False,
+            save_memory=False,
+            enable_reflection=False,
+            action_validator=lambda action, *_: "blocked by validator" if action == "web_search" else "",
+        )
+
+        self.assertEqual(result["agent_trace"], [])
+        errors = [
+            item.get("observation", {}).get("error", "")
+            for item in result["tool_observations"]
+            if item.get("action") == "validation_error"
+        ]
+        self.assertTrue(any("blocked by validator" in error for error in errors))
+
     def test_run_structured_blocks_tool_when_budget_is_exceeded(self) -> None:
         llm = FakeLLM(
             [
-                {"action": "web_search", "action_input": {"query": "第一次", "limit": 3}, "final": None},
-                {"action": "web_search", "action_input": {"query": "第一次", "limit": 3}, "final": None},
+                {"action": "web_search", "action_input": {"query": "same", "limit": 3}, "final": None},
+                {"action": "web_search", "action_input": {"query": "same", "limit": 3}, "final": None},
                 {"action": "final", "action_input": {}, "final": {"reply": "done"}},
             ]
         )
@@ -96,9 +231,9 @@ class LLMWorkspaceAgentTests(unittest.TestCase):
         ):
             result = agent.run_structured(
                 task_name="workspace_chat",
-                task_goal="回答用户问题",
-                user_payload={"message": "最近 B 站有什么热点"},
-                response_contract="返回一个 JSON 对象，字段必须包含：reply",
+                task_goal="answer the user",
+                user_payload={"message": "search something"},
+                response_contract="return JSON with reply",
                 allowed_tools=["web_search"],
                 required_final_keys=["reply"],
                 load_history=False,
@@ -122,13 +257,13 @@ class SearchToolTests(unittest.TestCase):
         response.raise_for_status.return_value = None
         response.json.return_value = {
             "results": [
-                {"title": "结果一", "url": "https://example.com/1", "content": "摘要一"},
-                {"title": "结果二", "url": "https://example.com/2", "content": "摘要二"},
+                {"title": "result one", "url": "https://example.com/1", "content": "summary one"},
+                {"title": "result two", "url": "https://example.com/2", "content": "summary two"},
             ]
         }
 
         with patch("tools.search_tool.requests.post", return_value=response) as mocked_post:
-            result = tool.search("B站 热点", limit=2)
+            result = tool.search("bilibili hot", limit=2)
 
         self.assertEqual(result["provider"], "tavily")
         self.assertEqual(len(result["results"]), 2)

@@ -4,13 +4,15 @@ from __future__ import annotations
 import json
 import threading
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Sequence
 
 from config import CONFIG
 from knowledge_base import retrieve as kb_retrieve
 from llm_client import LLMClient
-from memory.long_term_memory import LongTermMemory
 from observability import end_trace, trace_block, traceable
+
+if TYPE_CHECKING:
+    from memory.long_term_memory import LongTermMemory
 
 
 @dataclass
@@ -24,8 +26,7 @@ class RetrievalTool(AgentTool):
     def __init__(self, description: str | None = None) -> None:
         super().__init__(
             name="retrieval",
-            description=description
-            or "从本地知识库检索历史案例、沉淀经验、业务知识与结构化资料。输入: {query, limit, metadata_filter}",
+            description=description or "从本地知识库检索案例、经验和结构化资料。输入: {query, limit, metadata_filter}",
             handler=lambda payload: kb_retrieve(
                 str(payload.get("query") or ""),
                 limit=max(1, min(int(payload.get("limit") or 4), 8)),
@@ -42,12 +43,17 @@ class LLMWorkspaceAgent:
         tools: Sequence[AgentTool],
         max_steps: int = 4,
         llm_client: LLMClient | None = None,
-        memory_store: LongTermMemory | None = None,
+        memory_store: "LongTermMemory | None" = None,
+        enable_memory: bool = True,
     ) -> None:
         self.llm = llm_client or LLMClient()
         self.tools = {tool.name: tool for tool in tools}
         self.max_steps = max_steps
-        self.memory_store = memory_store or LongTermMemory()
+        self.memory_store = memory_store
+        if enable_memory and self.memory_store is None:
+            from memory.long_term_memory import LongTermMemory
+
+            self.memory_store = LongTermMemory()
 
     def _tool_block(self, allowed_tools: Sequence[str]) -> str:
         lines = []
@@ -66,7 +72,7 @@ class LLMWorkspaceAgent:
             if len(observation) > 3500:
                 observation = observation[:3500] + "...(truncated)"
             blocks.append(
-                f"第 {index} 步\n"
+                f"第{index}步\n"
                 f"action: {item.get('action')}\n"
                 f"action_input: {json.dumps(item.get('action_input', {}), ensure_ascii=False)}\n"
                 f"observation: {observation}"
@@ -74,11 +80,7 @@ class LLMWorkspaceAgent:
         return "\n\n".join(blocks)
 
     def _validate_final(self, final: Dict[str, Any], required_final_keys: Sequence[str]) -> List[str]:
-        missing = []
-        for key in required_final_keys:
-            if key not in final:
-                missing.append(key)
-        return missing
+        return [key for key in required_final_keys if key not in final]
 
     def _payload_text(self, payload: Any) -> str:
         try:
@@ -104,7 +106,7 @@ class LLMWorkspaceAgent:
 
     def _build_query_text(self, task_name: str, task_goal: str, user_payload: Dict[str, Any]) -> str:
         parts = [task_name, task_goal]
-        for key, value in user_payload.items():
+        for _, value in user_payload.items():
             if isinstance(value, dict):
                 parts.append(self._payload_text(value))
             elif isinstance(value, list):
@@ -159,7 +161,7 @@ class LLMWorkspaceAgent:
         tool_limits = ", ".join(
             f"{name}<={limit}"
             for name, limit in dict(budget.get("tool_limits") or {}).items()
-        ) or "无"
+        ) or "none"
         return (
             f"- max_steps: {budget.get('max_steps')}\n"
             f"- max_tool_calls: {budget.get('max_tool_calls')}\n"
@@ -186,7 +188,7 @@ class LLMWorkspaceAgent:
     ) -> str:
         max_tool_calls = int(budget.get("max_tool_calls") or 1)
         if total_tool_calls >= max_tool_calls:
-            return f"工具调用总次数已达上限 {max_tool_calls}，请基于已有 observation 完成判断。"
+            return f"工具调用总次数已达到上限 {max_tool_calls}，请基于现有 observation 完成判断。"
 
         tool_limit = int(dict(budget.get("tool_limits") or {}).get(action, max_tool_calls))
         if tool_usage_counts.get(action, 0) >= tool_limit:
@@ -202,6 +204,24 @@ class LLMWorkspaceAgent:
             for previous_action in recent_tool_actions[-repeat_limit:]
         ):
             return f"工具 {action} 连续重复调用已达上限 {repeat_limit}，请整合已有 observation 后再决策。"
+        return ""
+
+    def _required_tool_order_error(
+        self,
+        *,
+        action: str,
+        required_tools: Sequence[str],
+        used_tools: Sequence[str],
+        strict_required_tool_order: bool,
+    ) -> str:
+        if not strict_required_tool_order or not required_tools or action == "final":
+            return ""
+        remaining_required_tools = [name for name in required_tools if name not in used_tools]
+        if not remaining_required_tools:
+            return ""
+        expected_tool = remaining_required_tools[0]
+        if action != expected_tool:
+            return f"当前必须先调用工具 {expected_tool}，然后才能继续调用 {action}。"
         return ""
 
     def _score_candidate(self, candidate: Dict[str, Any], required_final_keys: Sequence[str]) -> float:
@@ -358,6 +378,9 @@ class LLMWorkspaceAgent:
         load_history: bool = True,
         save_memory: bool = True,
         enable_reflection: bool = True,
+        system_prompt_override: str | None = None,
+        strict_required_tool_order: bool = False,
+        action_validator: Callable[[str, Dict[str, Any], List[Dict[str, Any]], List[str]], str] | None = None,
     ) -> Dict[str, Any]:
         self.llm.require_available()
 
@@ -374,26 +397,42 @@ class LLMWorkspaceAgent:
         recent_tool_actions: List[str] = []
         user_id = self._build_history_key(task_name, user_payload)
         query_text = self._build_query_text(task_name, task_goal, user_payload)
-        history_block = self._history_block(user_id, query_text) if load_history else "当前任务已跳过历史上下文检索。"
+        history_block = self._history_block(user_id, query_text) if load_history else ""
         budget = self._budget_for_task(task_name=task_name, allowed_tools=allowed_tools, max_steps=max_steps)
 
-        system_prompt = (
+        required_tools_guidance = ""
+        if required_tools:
+            required_tools_guidance = (
+                "你必须先调用工具获取信息，严禁直接输出 final 结果。"
+                f"本任务至少要调用这些工具：{json.dumps(required_tools, ensure_ascii=False)}。"
+            )
+            if strict_required_tool_order:
+                required_tools_guidance += f"必须严格按顺序调用：{json.dumps(required_tools, ensure_ascii=False)}。"
+            elif "retrieval" in required_tools and "video_briefing" in required_tools:
+                required_tools_guidance += "优先调用 retrieval 查询本地知识库，再调用 video_briefing 解析视频详情。"
+
+        default_system_prompt = (
             "你是 B 站创作工作台的 LLM Agent 中枢。\n"
-            "你必须采用 ReAct 范式：先基于用户输入和已有 observation 思考，再决定是否调用工具，最终输出结构化 JSON。\n"
+            "你必须采用 ReAct 范式：先基于用户输入和已有 observation 思考，再决定是否调用工具，最后输出结构化 JSON。\n"
             "所有判断都由你自主完成，不使用硬编码阈值，不依赖固定规则链。\n"
-            "检索优先但不强制：当本地知识库可能包含历史经验、沉淀资料、案例或已知结构化信息时，优先考虑 retrieval；"
+            "检索优先但不强制：当本地知识库可能包含历史经验、沉淀资料、案例或已知结构化信息时，优先考虑 retrieval。\n"
             "如果问题明显依赖最新公开信息，或 retrieval 返回的信息不足、不匹配、已过期，再调用 web_search。\n"
             "如果要使用 web_search，你需要自己生成最优搜索关键词再发起调用。\n"
-            "如果系统已经给了你预加载上下文，先利用这些信息，只有在还不够时再继续调工具。\n"
-            "严格遵守工具预算，不要为了凑步骤而无意义调用工具。"
+        )
+        system_prompt = (
+            (system_prompt_override.strip() if isinstance(system_prompt_override, str) and system_prompt_override.strip() else default_system_prompt)
+            + "\n"
+            + required_tools_guidance
+            + "\n严格遵守工具预算，不要为了凑步骤而无意义调用工具。"
         )
 
         for _ in range(int(budget.get("max_steps") or 1)):
+            history_section = f"长期记忆:\n{history_block}\n\n" if load_history else ""
             user_prompt = (
                 f"任务名称：{task_name}\n"
                 f"任务目标：{task_goal}\n"
                 f"用户输入：{json.dumps(user_payload, ensure_ascii=False)}\n\n"
-                f"长期记忆：\n{history_block}\n\n"
+                f"{history_section}"
                 f"可用工具：\n{self._tool_block(allowed_tools)}\n\n"
                 f"工具预算：\n{self._tool_budget_block(budget)}\n\n"
                 f"必须至少使用的工具：{json.dumps(required_tools, ensure_ascii=False)}\n"
@@ -406,10 +445,11 @@ class LLMWorkspaceAgent:
                 '  "final": null 或 最终结果对象\n'
                 "}\n\n"
                 "规则：\n"
-                "1. 如果信息仍不足，action 必须是某个工具名，final 必须为 null。\n"
+                "1. 如果信息仍然不足，action 必须是某个工具名，final 必须为 null。\n"
                 "2. 如果 action=final，final 必须完整满足下面的响应契约。\n"
                 "3. 不要输出 markdown，不要输出解释，不要输出多余字段。\n"
-                "4. 如果 retrieval 和 web_search 都已经返回了有效信息，final 中应整合两者，不要只引用其中一边。\n\n"
+                "4. 如果 retrieval 和 web_search 都已经返回了有效信息，final 中应整合两者，不要只引用其中一边。\n"
+                "5. 如果 required_tools 非空，在这些工具都真正调用完成之前，禁止直接输出 final。\n\n"
                 f"最终响应契约：\n{response_contract}"
             )
             decision = self.llm.invoke_json_required(system_prompt, user_prompt)
@@ -477,6 +517,22 @@ class LLMWorkspaceAgent:
                 )
                 continue
 
+            order_error = self._required_tool_order_error(
+                action=action,
+                required_tools=required_tools,
+                used_tools=used_tools,
+                strict_required_tool_order=strict_required_tool_order,
+            )
+            if order_error:
+                scratchpad.append(
+                    {
+                        "action": "validation_error",
+                        "action_input": {"blocked_action": action, "blocked_input": action_input},
+                        "observation": {"error": order_error},
+                    }
+                )
+                continue
+
             budget_error = self._tool_budget_error(
                 action=action,
                 action_input=action_input,
@@ -495,6 +551,18 @@ class LLMWorkspaceAgent:
                     }
                 )
                 continue
+
+            if action_validator is not None:
+                validator_error = str(action_validator(action, action_input, scratchpad, used_tools) or "").strip()
+                if validator_error:
+                    scratchpad.append(
+                        {
+                            "action": "validation_error",
+                            "action_input": {"blocked_action": action, "blocked_input": action_input},
+                            "observation": {"error": validator_error},
+                        }
+                    )
+                    continue
 
             tool = self.tools[action]
             with trace_block(

@@ -344,15 +344,33 @@ def _ingest_hot_items(
         text = _structured_video_text(board_type, item, detail, tags, hotwords, board_url=board_url)
         try:
             document_id = f"{board_type}:{bvid}"
-            existed = document_exists(metadata_filter={"source": "bilibili_hot_sync", "board_type": board_type, "bvid": bvid})
+            existed = document_exists(
+                metadata_filter={
+                    "source": "knowledge_base",
+                    "data_type": "static_hot_case",
+                    "original_source": "bilibili_hot_sync",
+                    "board_type": board_type,
+                    "bvid": bvid,
+                }
+            )
             if existed:
-                delete_documents(metadata_filter={"source": "bilibili_hot_sync", "board_type": board_type, "bvid": bvid})
+                delete_documents(
+                    metadata_filter={
+                        "source": "knowledge_base",
+                        "data_type": "static_hot_case",
+                        "original_source": "bilibili_hot_sync",
+                        "board_type": board_type,
+                        "bvid": bvid,
+                    }
+                )
             result = add_document(
                 Document(
                     id=document_id,
                     text=text,
                     metadata={
-                        "source": "bilibili_hot_sync",
+                        "source": "knowledge_base",
+                        "data_type": "static_hot_case",
+                        "original_source": "bilibili_hot_sync",
                         "board_type": board_type,
                         "bvid": bvid,
                         "title": title,
@@ -425,7 +443,14 @@ def crawl_and_store_bilibili_hot_videos(
 
     for legacy_partition in LEGACY_PRIMARY_PARTITIONS:
         try:
-            delete_documents(metadata_filter={"source": "bilibili_hot_sync", "board_type": f"分区热门榜:{legacy_partition}"})
+            delete_documents(
+                metadata_filter={
+                    "source": "knowledge_base",
+                    "data_type": "static_hot_case",
+                    "original_source": "bilibili_hot_sync",
+                    "board_type": f"分区热门榜:{legacy_partition}",
+                }
+            )
         except Exception:
             pass
 

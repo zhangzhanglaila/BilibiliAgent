@@ -49,6 +49,12 @@ class Document:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+DIRTY_RUNTIME_SOURCES = {"creator_briefing", "video_briefing", "hot_board_snapshot"}
+STATIC_SAMPLE_SOURCE = "knowledge_base"
+STATIC_SAMPLE_DATA_TYPE = "static_hot_case"
+STATIC_SAMPLE_ORIGINAL_SOURCE = "bilibili_hot_sync"
+
+
 class DeterministicEmbeddings(Embeddings):
     """Offline-safe embeddings so the vector layer can work without external APIs."""
 
@@ -223,10 +229,14 @@ class KnowledgeBase:
                 detail_parts.append(f"缺少依赖：{', '.join(missing_packages)}")
             if self.init_error:
                 detail_parts.append(self.init_error)
-            self._enable_json_fallback("；".join(detail_parts))
-        if self.available() and self.backend != "json_fallback":
+            self.backend = "disabled"
+            self.backend_detail = "；".join(part for part in detail_parts if part).strip()
+        if self.available():
             try:
                 self._ensure_embedding_dimension()
+                if self.collection_name == "bilibili_knowledge":
+                    self._sanitize_vector_records()
+                    self._migrate_fallback_store_to_vector()
             except Exception as exc:
                 self.init_error = str(exc)
                 raise
@@ -259,6 +269,101 @@ class KnowledgeBase:
                 return []
         items = payload.get("items") if isinstance(payload, dict) else payload
         return [dict(item or {}) for item in (items or []) if isinstance(item, dict)]
+
+    def _normalize_vector_metadata(self, metadata: Dict[str, Any] | None) -> Dict[str, Any] | None:
+        normalized = dict(metadata or {})
+        source = str(normalized.get("source") or "").strip()
+        original_source = str(normalized.get("original_source") or "").strip()
+        if source in DIRTY_RUNTIME_SOURCES or original_source in DIRTY_RUNTIME_SOURCES:
+            return None
+
+        is_static_sample = (
+            source == STATIC_SAMPLE_ORIGINAL_SOURCE
+            or original_source == STATIC_SAMPLE_ORIGINAL_SOURCE
+            or (
+                source == STATIC_SAMPLE_SOURCE
+                and str(normalized.get("data_type") or "").strip() == STATIC_SAMPLE_DATA_TYPE
+            )
+            or (
+                source == STATIC_SAMPLE_SOURCE
+                and not original_source
+                and (normalized.get("board_type") or normalized.get("bvid"))
+            )
+        )
+        if is_static_sample:
+            normalized["source"] = STATIC_SAMPLE_SOURCE
+            normalized["data_type"] = STATIC_SAMPLE_DATA_TYPE
+            normalized["original_source"] = STATIC_SAMPLE_ORIGINAL_SOURCE
+        return normalized
+
+    def _sanitize_vector_records(self) -> None:
+        collection = self._active_collection()
+        payload = collection.get(include=["documents", "metadatas"])
+        ids = [str(item) for item in payload.get("ids") or []]
+        if not ids:
+            return
+        documents = [str(item or "") for item in payload.get("documents") or []]
+        metadatas = [dict(item or {}) for item in payload.get("metadatas") or []]
+
+        next_ids: List[str] = []
+        next_documents: List[str] = []
+        next_metadatas: List[Dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        changed = False
+
+        for item_id, document, metadata in zip(ids, documents, metadatas):
+            normalized = self._normalize_vector_metadata(metadata)
+            if normalized is None:
+                changed = True
+                continue
+            if normalized != metadata:
+                changed = True
+            if item_id in seen_ids:
+                changed = True
+                continue
+            seen_ids.add(item_id)
+            next_ids.append(item_id)
+            next_documents.append(document)
+            next_metadatas.append(normalized)
+
+        if changed:
+            self._recreate_collection(next_ids, next_documents, next_metadatas)
+
+    def _migrate_fallback_store_to_vector(self) -> None:
+        if not self.fallback_store_path.exists():
+            return
+        records = self._load_fallback_records()
+        if not records:
+            return
+
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for record in records:
+            metadata = self._normalize_vector_metadata(dict(record.get("metadata") or {}))
+            if metadata is None:
+                continue
+            document_id = str(record.get("document_id") or metadata.get("document_id") or "").strip()
+            if not document_id:
+                continue
+            metadata["document_id"] = document_id
+            entry = grouped.setdefault(document_id, {"metadata": metadata, "chunks": []})
+            chunk_index = int(metadata.get("chunk_index") or len(entry["chunks"]))
+            entry["chunks"].append((chunk_index, str(record.get("text") or "").strip()))
+
+        for document_id, entry in grouped.items():
+            if self.exists(document_id=document_id):
+                continue
+            ordered_chunks = [text for _, text in sorted(entry["chunks"], key=lambda item: item[0]) if text]
+            if not ordered_chunks:
+                continue
+            metadata = dict(entry["metadata"])
+            metadata.pop("chunk_index", None)
+            self.add_document(
+                Document(
+                    id=document_id,
+                    text="\n".join(ordered_chunks),
+                    metadata=metadata,
+                )
+            )
 
     def _record_matches_metadata(self, record: Dict[str, Any], metadata_filter: Dict[str, Any] | None = None) -> bool:
         filters = dict(metadata_filter or {})
@@ -317,13 +422,13 @@ class KnowledgeBase:
         return [chunk for chunk in chunks if chunk]
 
     def _require_vector_backend(self) -> None:
-        if self.vectorstore is not None or self.collection is not None or self.backend == "json_fallback":
+        if self.vectorstore is not None or self.collection is not None:
             return
         detail = self.init_error or "Chroma backend not initialized"
         raise RuntimeError(f"知识库当前不可用：未检测到可用的 Chroma 向量库。{detail}")
 
     def available(self) -> bool:
-        return self.vectorstore is not None or self.collection is not None or self.backend == "json_fallback"
+        return self.vectorstore is not None or self.collection is not None
 
     def count(self) -> int:
         self._require_vector_backend()
@@ -354,6 +459,11 @@ class KnowledgeBase:
                 last_updated_at = datetime.fromtimestamp(max(mtimes)).strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             last_updated_at = ""
+        legacy_fallback_count = 0
+        try:
+            legacy_fallback_count = len(self._load_fallback_records()) if self.fallback_store_path.exists() else 0
+        except Exception:
+            legacy_fallback_count = 0
         return {
             "available": self.available(),
             "backend": self.backend,
@@ -366,6 +476,8 @@ class KnowledgeBase:
             "embedding_model": getattr(self.embeddings, "model_name", "deterministic"),
             "embedding_fallback": bool(getattr(self.embeddings, "using_fallback", False)),
             "embedding_error": getattr(self.embeddings, "load_error", ""),
+            "legacy_fallback_exists": self.fallback_store_path.exists(),
+            "legacy_fallback_record_count": legacy_fallback_count,
             "last_updated_at": last_updated_at,
         }
 
@@ -596,7 +708,7 @@ class KnowledgeBase:
         metadata_filter: Dict[str, Any] | None = None,
     ) -> List[Dict[str, Any]]:
         results: List[Dict[str, Any]] = []
-        docs = self.vectorstore.similarity_search_with_score(query, k=limit, filter=metadata_filter)
+        docs = self.vectorstore.similarity_search_with_score(query, k=limit, filter=self._where_clause(metadata_filter))
         for doc, score in docs:
             metadata = dict(getattr(doc, "metadata", {}) or {})
             results.append(

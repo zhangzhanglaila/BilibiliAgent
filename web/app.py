@@ -32,7 +32,6 @@ from knowledge_sync import ingest_uploaded_file, update_chroma_knowledge_base
 from config import CONFIG
 from llm_client import LLMClient, format_llm_error, llm_error_http_status, should_skip_same_provider_fallback
 from main import run_copy, run_operate, run_optimize, run_pipeline, run_topic
-from memory.long_term_memory import LongTermMemory
 from models import to_plain_data
 from observability import configure_langsmith, traceable
 from tools.search_tool import SearchTool
@@ -252,10 +251,16 @@ RUNTIME_MODE_LABELS = {
 RAW_TOPIC_AGENT = TopicAgent()
 RAW_COPY_AGENT = CopywritingAgent()
 KNOWLEDGE_BASE = KnowledgeBase(persist_directory=CONFIG.vector_db_path)
-LONG_TERM_MEMORY = LongTermMemory(persist_directory=CONFIG.vector_db_path)
+RUNTIME_TOOL_KNOWLEDGE_BASE = KnowledgeBase(
+    persist_directory=CONFIG.vector_db_path,
+    collection_name="workspace_runtime_knowledge",
+)
+LONG_TERM_MEMORY = None
 WEB_SEARCH = SearchTool()
 LLM_WORKSPACE_AGENT: LLMWorkspaceAgent | None = None
 LLM_WORKSPACE_SIGNATURE: tuple[str, ...] | None = None
+LLM_VIDEO_ANALYZE_AGENT: LLMWorkspaceAgent | None = None
+LLM_VIDEO_ANALYZE_SIGNATURE: tuple[str, ...] | None = None
 RUNTIME_LLM_ENABLED = CONFIG.llm_enabled()
 RUNTIME_LLM_CONFIG: dict[str, str] | None = (
     {
@@ -282,13 +287,73 @@ KNOWLEDGE_UPDATE_ACTIVE_JOB_ID: str | None = None
 KNOWLEDGE_UPDATE_JOB_TTL_SECONDS = 60 * 60
 LLM_SCENE_ALLOWED_TOOLS = {
     "module_create": ["retrieval", "web_search"],
-    "module_analyze": ["retrieval", "web_search", "video_briefing", "hot_board_snapshot"],
+    "module_analyze": ["retrieval", "web_search"],
     "workspace_chat": ["retrieval", "web_search", "video_briefing", "hot_board_snapshot"],
 }
 CREATOR_BRIEFING_TRIGGER_KEYWORDS = ("选题", "赛道", "分区", "热点", "竞品", "爆款")
 
 
 # 判断当前是否已经保存了可用于启用 LLM Agent 的运行时配置。
+def get_long_term_memory():
+    global LONG_TERM_MEMORY
+    if LONG_TERM_MEMORY is None:
+        from memory.long_term_memory import LongTermMemory
+
+        LONG_TERM_MEMORY = LongTermMemory(persist_directory=CONFIG.vector_db_path)
+    return LONG_TERM_MEMORY
+
+
+VIDEO_ANALYZE_RETRIEVAL_FILTER = {"data_type": "static_hot_case", "source": "knowledge_base"}
+VIDEO_ANALYZE_DIRTY_SOURCES = {"creator_briefing", "video_briefing", "hot_board_snapshot"}
+VIDEO_ANALYZE_REQUIRED_TOOLS = ("retrieval",)
+VIDEO_ANALYZE_REQUIRED_FINAL_KEYS = ("resolved", "performance", "topic_result", "optimize_result", "analysis", "copy_result")
+VIDEO_ANALYZE_HOT_PEER_RECENT_DAYS = 30
+VIDEO_ANALYZE_HOT_PEER_MIN_VIEW = 50000
+VIDEO_ANALYZE_HOT_PEER_MIN_LIKE = 1000
+VIDEO_ANALYZE_HOT_PEER_LIMIT = 6
+VIDEO_ANALYZE_TASK_GOAL = (
+    "针对当前单个视频完成独立分析；当前视频结构化信息和同方向爆款对标样本已由后端预加载；"
+    "你必须先检索同赛道静态爆款样本；"
+    "仅当样本不足时才联网补充，并输出爆款/低表现判断、评分、优化文案、脚本、题材方向和直接对标样本。"
+)
+VIDEO_ANALYZE_RESPONSE_CONTRACT = (
+    "返回一个 JSON 对象，字段必须包含：\n"
+    "- resolved: 对象，包含 bv_id, title, up_name, tname, partition, partition_label, stats\n"
+    "- performance: 对象，包含 label, is_hot, score, reasons, summary\n"
+    "- topic_result: 对象，至少包含 ideas(长度 3 的数组，每项包含 topic, reason, video_type, keywords)\n"
+    "- optimize_result: 对象，包含 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions\n"
+    "- copy_result: 对象或 null；低表现视频必须给出可直接使用的新标题、脚本、简介、标签、置顶评论\n"
+    "- analysis: 对象，必须包含 analysis_points, benchmark_analysis, remake_script_structure, advanced_title_sets, "
+    "cover_plan, tag_strategy, publish_strategy, reusable_hit_points，并根据判断补充 followup_topics 或 next_topics、"
+    "title_suggestions、cover_suggestion、content_suggestions\n"
+)
+VIDEO_ANALYZE_SYSTEM_PROMPT = (
+    "【最高优先级强制规则】\n"
+    "1. 本模块为单次独立视频分析任务，与内容创作、智能问答模块完全隔离。\n"
+    "2. 全程绝对禁用任何长期记忆：严禁读取、调用、复用 user_long_term_memory 中的任何数据，严禁读取历史任务记录、"
+    "历史分析记录、agent_trace。\n"
+    "3. 所有判断与输出只基于本次请求传入的单条视频信息，以及本次工具调用实时检索到的同赛道静态爆款样本。\n"
+    "4. 任务结束后严禁将本次分析结果写入任何向量库或记忆库。\n"
+    "5. 绝对禁止调用 hot_board_snapshot。\n\n"
+    "【任务目标】\n"
+    "你要对当前单个 B 站视频完成闭环分析：判断它是爆款还是低表现，给出评分，并输出可直接落地的优化结果。\n"
+    "如果是爆款：拆解核心优点、可复用流量亮点、可延伸选题方向。\n"
+    "如果是低表现：对标同赛道样本，给出标题、封面、内容结构、标签、发布策略等全维度改进建议，并生成可直接使用的新文案与脚本。\n\n"
+    "【工具调用链路】\n"
+    "1. 当前输入里的 parsed_video 与 preloaded_context.video 已经是后端预加载的当前视频真实信息，不允许再重新解析当前视频，不允许调用 video_briefing。\n"
+    "2. 第一步必须调用 retrieval，检索同垂类、同赛道的静态爆款样本。query 必须围绕视频所属分区、垂类、关键词生成，"
+    "不得包含历史任务词汇。\n"
+    "3. preloaded_context.market_snapshot.peer_samples 是代码预抓的同方向爆款对标视频，不是同 UP 样本，也不是 LLM 生成内容。\n"
+    "4. 只有当 retrieval 返回样本不足时，才允许调用 web_search 搜索最新赛道规则或补充案例。\n"
+    "5. 所有工具调用完成后直接输出 final 结构化结果，禁止无意义循环。\n\n"
+    "【判定要求】\n"
+    "1. 必须明确输出 performance.score，并给出爆款/低表现结论。\n"
+    "2. analysis.benchmark_analysis.benchmark_videos 必须尽量给出同赛道直接对标参考视频。\n"
+    "3. 必须生成符合当前视频内容的新标题、优化文案脚本、下一批优先题材、具体封面建议和内容建议。\n"
+    "4. 仅输出 JSON 对象，不要输出 markdown 和解释。"
+)
+
+
 def has_saved_runtime_llm_config() -> bool:
     return bool((RUNTIME_LLM_CONFIG or {}).get("api_key", "").strip())
 
@@ -2070,6 +2135,74 @@ def build_market_snapshot(partition_name: str, up_ids: list[int] | None = None) 
     }
 
 
+def build_empty_market_snapshot(partition_name: str) -> dict:
+    normalized_partition = CONFIG.normalize_partition(partition_name)
+    partition_label = PARTITION_LABELS.get(normalized_partition, normalized_partition)
+    return {
+        "partition": normalized_partition,
+        "partition_label": partition_label,
+        "source_count": 0,
+        "hot_board": [],
+        "partition_samples": [],
+        "peer_samples": [],
+    }
+
+
+# 为视频分析模块构造“同方向爆款”检索词，避免退化成同 UP 样本。
+def build_video_benchmark_queries(resolved: dict) -> list[str]:
+    partition_label = str(resolved.get("partition_label") or "").strip()
+    tname = str(resolved.get("tname") or "").strip()
+    keywords = extract_video_keywords(resolved.get("keywords"))
+    title_terms = extract_reference_terms(" ".join([resolved.get("title", ""), resolved.get("topic", "")]))
+
+    candidate_queries = [
+        [partition_label, tname, *keywords[:2], "爆款"],
+        [partition_label, tname, *title_terms[:2], "热门"],
+        [partition_label, *keywords[:3], "高播放"],
+        [tname, *keywords[:2], *title_terms[:1], "高点赞"],
+    ]
+
+    queries: list[str] = []
+    for parts in candidate_queries:
+        signal_parts = [str(part or "").strip() for part in parts if str(part or "").strip() not in {"爆款", "热门", "高播放", "高点赞"}]
+        if not signal_parts:
+            continue
+        query = " ".join(str(part or "").strip() for part in parts if str(part or "").strip())
+        if len(query) < 2 or query in queries:
+            continue
+        queries.append(query)
+    return queries[:4]
+
+
+# 仅为视频分析模块预抓同方向爆款对标样本，不混入同 UP 数据。
+def build_hot_peer_market_snapshot(resolved: dict) -> dict:
+    snapshot = build_empty_market_snapshot(resolved.get("partition"))
+    queries = build_video_benchmark_queries(resolved)
+    if not queries:
+        return snapshot
+    try:
+        peer_samples = [
+            {
+                **serialize_video_metric(item),
+                "partition": snapshot["partition"],
+                "partition_label": snapshot["partition_label"],
+            }
+            for item in RAW_TOPIC_AGENT.fetch_hot_peer_videos(
+                queries,
+                exclude_bvid=resolved.get("bv_id", ""),
+                limit=VIDEO_ANALYZE_HOT_PEER_LIMIT,
+                recent_days=VIDEO_ANALYZE_HOT_PEER_RECENT_DAYS,
+                min_view=VIDEO_ANALYZE_HOT_PEER_MIN_VIEW,
+                min_like=VIDEO_ANALYZE_HOT_PEER_MIN_LIKE,
+            )[:VIDEO_ANALYZE_HOT_PEER_LIMIT]
+        ]
+    except Exception:
+        peer_samples = []
+    snapshot["peer_samples"] = peer_samples
+    snapshot["source_count"] = len(peer_samples)
+    return snapshot
+
+
 # 把单条市场样本压缩成更适合放进提示词的轻量结构。
 def compact_market_item_for_llm(item: dict) -> dict:
     return {
@@ -2917,6 +3050,47 @@ def merge_text_lists(*values: object, limit: int = 0) -> list[str]:
     return result
 
 
+def normalize_object_payload(value: object) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        candidates = [text]
+        if "{" in text and "}" in text:
+            start = text.find("{")
+            end = text.rfind("}")
+            if 0 <= start < end:
+                candidates.append(text[start:end + 1])
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(payload, dict):
+                return dict(payload)
+        return {}
+    if isinstance(value, (list, tuple)):
+        try:
+            payload = dict(value)
+        except Exception:
+            return {}
+        if isinstance(payload, dict):
+            return dict(payload)
+    return {}
+
+
+def normalize_named_list_payload(value: object, target_key: str, limit: int = 0) -> dict:
+    payload = normalize_object_payload(value)
+    if payload:
+        return payload
+    texts = normalize_text_list(value, limit=limit)
+    if not texts:
+        return {}
+    return {target_key: texts}
+
+
 def normalize_bool_flag(value: object, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -3354,6 +3528,34 @@ def build_default_analysis_payload(
     return analysis_payload
 
 
+def normalize_module_performance_payload(performance: object, resolved: dict) -> dict:
+    baseline = classify_video_performance(resolved)
+    if not isinstance(performance, dict):
+        return baseline
+
+    normalized = normalize_performance_payload(performance)
+    normalized_reasons = merge_text_lists(normalized.get("reasons"), baseline.get("reasons"), limit=8)
+    normalized_summary = normalize_text_value(normalized.get("summary")) or normalize_text_value(baseline.get("summary"))
+    normalized_label = normalize_text_value(normalized.get("label")) or normalize_text_value(baseline.get("label"))
+
+    is_default_pending = (
+        safe_int(normalized.get("score")) <= 50
+        and not normalize_text_list(normalized.get("reasons"))
+        and not normalize_text_value(normalized.get("summary"))
+    )
+    if is_default_pending or bool(normalized.get("is_hot")) != bool(baseline.get("is_hot")):
+        trusted = dict(baseline)
+        trusted["reasons"] = normalized_reasons
+        trusted["summary"] = normalized_summary or baseline.get("summary", "")
+        trusted["label"] = normalized_label or baseline.get("label", "")
+        return trusted
+
+    normalized["reasons"] = normalized_reasons
+    normalized["summary"] = normalized_summary
+    normalized["label"] = normalized_label
+    return normalized
+
+
 def normalize_module_analysis_payload(
     result: dict,
     *,
@@ -3363,7 +3565,8 @@ def normalize_module_analysis_payload(
     optimize_result: dict,
     reference_videos: list[dict],
 ) -> dict:
-    analysis = dict(result.get("analysis") or {})
+    analysis_raw = result.get("analysis")
+    analysis = normalize_object_payload(analysis_raw)
     defaults = build_default_analysis_payload(resolved, performance, topic_result, optimize_result, reference_videos)
     benchmark_defaults = defaults.get("benchmark_analysis") or {}
     script_defaults = defaults.get("remake_script_structure") or {}
@@ -3372,7 +3575,7 @@ def normalize_module_analysis_payload(
     tag_defaults = defaults.get("tag_strategy") or {}
     publish_defaults = defaults.get("publish_strategy") or {}
 
-    benchmark_analysis = dict(analysis.get("benchmark_analysis") or {})
+    benchmark_analysis = normalize_named_list_payload(analysis.get("benchmark_analysis"), "common_structure_formulas", limit=3)
     benchmark_analysis["benchmark_videos"] = reference_videos[:3]
     benchmark_analysis["common_title_formulas"] = merge_text_lists(
         benchmark_analysis.get("common_title_formulas"),
@@ -3390,7 +3593,7 @@ def normalize_module_analysis_payload(
         limit=3,
     )
 
-    remake_script_structure = dict(analysis.get("remake_script_structure") or {})
+    remake_script_structure = normalize_named_list_payload(analysis.get("remake_script_structure"), "middle_rhythm", limit=3)
     remake_script_structure["opening_hooks"] = merge_text_lists(
         remake_script_structure.get("opening_hooks"),
         script_defaults.get("opening_hooks"),
@@ -3407,7 +3610,7 @@ def normalize_module_analysis_payload(
         limit=3,
     )
 
-    advanced_title_sets = dict(analysis.get("advanced_title_sets") or {})
+    advanced_title_sets = normalize_named_list_payload(analysis.get("advanced_title_sets"), "short_titles", limit=3)
     advanced_title_sets["short_titles"] = merge_text_lists(
         advanced_title_sets.get("short_titles"),
         title_defaults.get("short_titles"),
@@ -3424,7 +3627,7 @@ def normalize_module_analysis_payload(
         limit=3,
     )
 
-    cover_plan = dict(analysis.get("cover_plan") or {})
+    cover_plan = normalize_named_list_payload(analysis.get("cover_plan"), "copy_lines", limit=3)
     cover_plan["copy_lines"] = merge_text_lists(cover_plan.get("copy_lines"), cover_defaults.get("copy_lines"), limit=3)
     cover_plan["layout_advice"] = merge_text_lists(
         cover_plan.get("layout_advice"),
@@ -3440,7 +3643,7 @@ def normalize_module_analysis_payload(
         limit=4,
     )
 
-    tag_strategy = dict(analysis.get("tag_strategy") or {})
+    tag_strategy = normalize_named_list_payload(analysis.get("tag_strategy"), "recommended_tags", limit=8)
     tag_strategy["core_traffic_tags"] = merge_text_lists(
         tag_strategy.get("core_traffic_tags"),
         tag_defaults.get("core_traffic_tags"),
@@ -3460,7 +3663,7 @@ def normalize_module_analysis_payload(
         limit=8,
     )
 
-    publish_strategy = dict(analysis.get("publish_strategy") or {})
+    publish_strategy = normalize_named_list_payload(analysis.get("publish_strategy"), "suggested_comment_guides", limit=3)
     publish_strategy["best_publish_windows"] = merge_text_lists(
         publish_strategy.get("best_publish_windows"),
         publish_defaults.get("best_publish_windows"),
@@ -3493,7 +3696,12 @@ def normalize_module_analysis_payload(
         defaults.get("content_suggestions"),
         limit=5,
     )
-    analysis_points = merge_text_lists(analysis.get("analysis_points"), defaults.get("analysis_points"), limit=8)
+    analysis_points = merge_text_lists(
+        analysis.get("analysis_points"),
+        normalize_text_list(analysis_raw, limit=3) if not analysis else [],
+        defaults.get("analysis_points"),
+        limit=8,
+    )
 
     normalized_analysis = {
         "analysis_points": analysis_points,
@@ -3564,33 +3772,34 @@ def extract_reference_links_from_tool_observations(
 
 # 把视频详情整理成更适合 LLM 分析的视频输入结构。
 def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
-    owner = info.get("owner", {})
-    mid = safe_int(owner.get("mid"))
-    up_name = owner.get("name") or owner.get("uname") or ""
-    title = info.get("title", "")
-    tid = safe_int(info.get("tid"))
-    keywords = extract_video_keywords(info.get("keywords"))
-    tname = normalize_video_tname(info.get("tname", ""), tid, keywords, title)
-    retrieval_partition = map_partition(tname, tid, context_text=" ".join([title, tname, *keywords]))
-    topic = build_topic(title, keywords=keywords, tname=tname, tid=tid)
-    style = guess_style(title, retrieval_partition, tname, context_text=" ".join(keywords))
+    resolved = build_resolved_payload(info, bvid)
+    return build_llm_video_payload_from_resolved(resolved, url)
+
+
+# 直接把 resolved 重排成更适合放进 LLM 提示词的视频结构。
+def build_llm_video_payload_from_resolved(resolved: dict, url: str) -> dict:
+    retrieval_partition = str(resolved.get("partition") or "").strip()
+    retrieval_partition_label = (
+        str(resolved.get("partition_label") or "").strip()
+        or PARTITION_LABELS.get(retrieval_partition, retrieval_partition)
+    )
 
     return {
-        "bv_id": bvid,
+        "bv_id": resolved.get("bv_id", ""),
         "url": url.strip(),
-        "title": title,
-        "keywords": keywords,
-        "topic": topic,
-        "style": style,
-        "up_name": up_name,
-        "mid": mid,
-        "up_ids": [mid] if mid else [],
-        "tid": tid,
-        "tname": tname,
-        "duration": safe_int(info.get("duration")),
-        "stats": extract_video_stats(info),
+        "title": resolved.get("title", ""),
+        "keywords": extract_video_keywords(resolved.get("keywords")),
+        "topic": resolved.get("topic", ""),
+        "style": resolved.get("style", ""),
+        "up_name": resolved.get("up_name", ""),
+        "mid": safe_int(resolved.get("mid")),
+        "up_ids": list(resolved.get("up_ids") or []),
+        "tid": safe_int(resolved.get("tid")),
+        "tname": resolved.get("tname", ""),
+        "duration": safe_int(resolved.get("duration")),
+        "stats": dict(resolved.get("stats") or {}),
         "retrieval_partition": retrieval_partition,
-        "retrieval_partition_label": PARTITION_LABELS.get(retrieval_partition, retrieval_partition),
+        "retrieval_partition_label": retrieval_partition_label,
     }
 
 
@@ -3621,11 +3830,20 @@ def compact_creator_briefing_for_llm(briefing: dict) -> dict:
 def build_video_briefing(url: str) -> dict:
     bvid = extract_bvid(url)
     info = fetch_video_info(url, bvid)
-    video_payload = build_llm_video_payload(info, bvid, url)
-    market_snapshot = build_market_snapshot(video_payload.get("retrieval_partition", "knowledge"), video_payload.get("up_ids"))
+    resolved = build_resolved_payload(info, bvid)
+    video_payload = build_llm_video_payload_from_resolved(resolved, url)
+    market_snapshot = build_hot_peer_market_snapshot(resolved)
     return {
         "video": video_payload,
         "market_snapshot": market_snapshot,
+    }
+
+
+# 在进入视频分析 Agent 前，把当前视频与同方向爆款样本一次性压成稳定上下文。
+def build_video_analyze_preloaded_context(resolved: dict, url: str, market_snapshot: dict) -> dict:
+    return {
+        "video": build_llm_video_payload_from_resolved(resolved, url),
+        "market_snapshot": compact_market_snapshot_for_llm(market_snapshot),
     }
 
 
@@ -3653,7 +3871,7 @@ def save_tool_result_to_knowledge_base(source_id: str, text: str, metadata: dict
     if not clean_text:
         return
     try:
-        KNOWLEDGE_BASE.add_document(
+        RUNTIME_TOOL_KNOWLEDGE_BASE.add_document(
             Document(
                 id=re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+", "_", clean_id)[:80] or "workspace",
                 text=clean_text,
@@ -3668,8 +3886,9 @@ def build_knowledge_base_status() -> dict:
     status = KNOWLEDGE_BASE.backend_status()
     status["vector_db_path"] = CONFIG.vector_db_path
     status["supported_upload_types"] = sorted(SUPPORTED_KNOWLEDGE_UPLOAD_SUFFIXES)
-    status["memory_backend"] = getattr(LONG_TERM_MEMORY, "backend", "disabled")
-    status["memory_collection"] = getattr(LONG_TERM_MEMORY, "collection_name", "user_long_term_memory")
+    memory_store = get_long_term_memory()
+    status["memory_backend"] = getattr(memory_store, "backend", "disabled")
+    status["memory_collection"] = getattr(memory_store, "collection_name", "user_long_term_memory")
     status["active_update_job"] = get_active_knowledge_update_job()
     return status
 
@@ -3697,11 +3916,11 @@ def creator_briefing_tool_handler(payload: dict) -> dict:
 def video_briefing_tool_handler(payload: dict) -> dict:
     result = build_video_briefing(payload.get("url", ""))
     save_tool_result_to_knowledge_base(
-        f"video_{((result.get('resolved') or {}).get('bv_id') or payload.get('url', ''))}",
+        f"video_{((result.get('video') or {}).get('bv_id') or payload.get('url', ''))}",
         json.dumps(result, ensure_ascii=False),
         {
             "source": "video_briefing",
-            "partition": (result.get("resolved") or {}).get("partition", ""),
+            "partition": (result.get("video") or {}).get("retrieval_partition", ""),
         },
     )
     return result
@@ -3769,11 +3988,11 @@ def get_llm_workspace_agent() -> LLMWorkspaceAgent:
     if LLM_WORKSPACE_AGENT is None or LLM_WORKSPACE_SIGNATURE != signature:
         LLM_WORKSPACE_AGENT = LLMWorkspaceAgent(
             llm_client=build_runtime_llm_client(),
-            memory_store=LONG_TERM_MEMORY,
+            memory_store=get_long_term_memory(),
             tools=[
                 AgentTool(
                     name="video_briefing",
-                    description="解析 B 站视频链接，返回视频公开数据，并抓取相同分区与同类 UP 的原始样本。输入: {url}",
+                    description="解析 B 站视频链接，返回视频公开数据，并补同方向爆款对标样本。输入: {url}",
                     handler=video_briefing_tool_handler,
                 ),
                 AgentTool(
@@ -3792,11 +4011,95 @@ def get_llm_workspace_agent() -> LLMWorkspaceAgent:
         LLM_WORKSPACE_SIGNATURE = signature
     return LLM_WORKSPACE_AGENT
 
+def video_analyze_retrieval_tool_handler(payload: dict) -> dict:
+    query = str(payload.get("query") or "").strip()
+    limit = max(1, min(safe_int(payload.get("limit") or 4), 8))
+    result = KNOWLEDGE_BASE.retrieve(
+        query,
+        limit=limit,
+        metadata_filter=dict(VIDEO_ANALYZE_RETRIEVAL_FILTER),
+    )
+    matches = []
+    for item in result.get("matches", []):
+        metadata = dict((item or {}).get("metadata") or {})
+        source = str(metadata.get("source") or "")
+        original_source = str(metadata.get("original_source") or "")
+        if source in VIDEO_ANALYZE_DIRTY_SOURCES or original_source in VIDEO_ANALYZE_DIRTY_SOURCES:
+            continue
+        matches.append(item)
+    return {
+        "query": result.get("query", query),
+        "matches": matches,
+        "match_count": len(matches),
+        "metadata_filter": dict(VIDEO_ANALYZE_RETRIEVAL_FILTER),
+    }
+
+
+def video_analyze_action_validator(
+    action: str,
+    action_input: dict,
+    scratchpad: list[dict],
+    used_tools: list[str],
+) -> str:
+    if action == "hot_board_snapshot":
+        return "视频分析模块已禁用 hot_board_snapshot。"
+    if action == "video_briefing":
+        return "当前视频分析链路已在进入 Agent 前完成视频预解析和对标样本预加载，不允许再调用 video_briefing。"
+    if action == "web_search":
+        latest_retrieval = next(
+            (
+                item
+                for item in reversed(scratchpad)
+                if isinstance(item, dict) and item.get("action") == "retrieval"
+            ),
+            None,
+        )
+        if latest_retrieval is None:
+            return "必须先完成 retrieval，再决定是否联网搜索。"
+        observation = latest_retrieval.get("observation") if isinstance(latest_retrieval, dict) else {}
+        match_count = safe_int((observation or {}).get("match_count"))
+        if match_count >= 3:
+            return "retrieval 已返回足够同赛道样本，当前不允许再调用 web_search。"
+    return ""
+
+
+def get_video_analyze_agent() -> LLMWorkspaceAgent:
+    global LLM_VIDEO_ANALYZE_AGENT, LLM_VIDEO_ANALYZE_SIGNATURE
+    active_config = get_active_runtime_llm_config()
+    if not active_config:
+        raise RuntimeError("当前未开启 LLM Agent 模式，或还没有可用的 LLM 配置。")
+
+    signature = (
+        active_config.get("provider", ""),
+        active_config.get("base_url", ""),
+        active_config.get("api_key", ""),
+        active_config.get("model", ""),
+    )
+    if LLM_VIDEO_ANALYZE_AGENT is None or LLM_VIDEO_ANALYZE_SIGNATURE != signature:
+        LLM_VIDEO_ANALYZE_AGENT = LLMWorkspaceAgent(
+            llm_client=build_runtime_llm_client(),
+            enable_memory=False,
+            tools=[
+                AgentTool(
+                    name="retrieval",
+                    description="从 bilibili_knowledge 中检索同垂类静态爆款样本，自动过滤历史工具回流数据。输入: {query, limit}",
+                    handler=video_analyze_retrieval_tool_handler,
+                ),
+                AgentTool(
+                    name="web_search",
+                    description="当 retrieval 样本不足时联网搜索最新赛道爆款规则与案例。输入: {query, limit}",
+                    handler=lambda payload: WEB_SEARCH.search(payload.get("query", ""), int(payload.get("limit") or 5)),
+                ),
+            ],
+        )
+        LLM_VIDEO_ANALYZE_SIGNATURE = signature
+    return LLM_VIDEO_ANALYZE_AGENT
+
 
 def finalize_module_analyze_result(result: dict, resolved: dict, market_snapshot: dict) -> dict:
     payload = dict(result or {})
     payload["resolved"] = resolved
-    performance = normalize_performance_payload(payload.get("performance"))
+    performance = normalize_module_performance_payload(payload.get("performance"), resolved)
     payload["performance"] = performance
     topic_result = payload.get("topic_result") if isinstance(payload.get("topic_result"), dict) else {"ideas": []}
     payload["topic_result"] = topic_result
@@ -3808,7 +4111,15 @@ def finalize_module_analyze_result(result: dict, resolved: dict, market_snapshot
         query_text=reference_query,
         resolved=resolved,
     )
-    optimize_result = dict(payload.get("optimize_result") or {})
+    optimize_result_raw = payload.get("optimize_result")
+    optimize_result = normalize_object_payload(optimize_result_raw)
+    if not optimize_result:
+        optimize_texts = normalize_text_list(optimize_result_raw, limit=5)
+        if optimize_texts:
+            optimize_result = {
+                "diagnosis": optimize_texts[0],
+                "content_suggestions": optimize_texts[1:],
+            }
     analysis = normalize_module_analysis_payload(
         payload,
         resolved=resolved,
@@ -3835,8 +4146,9 @@ def finalize_module_analyze_result(result: dict, resolved: dict, market_snapshot
     )
     payload["optimize_result"] = optimize_result
     payload["analysis"] = analysis
+    copy_result_payload = payload.get("copy_result") if isinstance(payload.get("copy_result"), dict) else {}
     copy_topic = (
-        clean_copy_text((payload.get("copy_result") or {}).get("topic", ""))
+        clean_copy_text(copy_result_payload.get("topic", ""))
         or clean_copy_text(((topic_result.get("ideas") or [{}])[0]).get("topic", ""))
         or resolved.get("topic")
         or resolved.get("title")
@@ -3964,62 +4276,28 @@ def run_llm_module_create_fallback(data: dict) -> dict:
 
 
 # 在 LLM Agent 模式下执行视频分析模块的完整分析流程。
-@traceable(run_type="chain", name="web.run_llm_module_analyze", tags=["web", "llm", "rag", "module_analyze"])
-def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) -> dict:
-    agent = get_llm_workspace_agent()
-    response_contract = (
-        "返回一个 JSON 对象，字段必须包含：\n"
-        "- resolved: 对象，包含 bv_id, title, up_name, tname, partition, partition_label, stats\n"
-        "- performance: 对象，包含 label, is_hot, score, reasons, summary\n"
-        "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords；topic 必须是具体的新方向，不要提问句，不要把原视频标题后面机械接模板尾巴\n"
-        "- optimize_result: 对象，包含 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions\n"
-        "- copy_result: 对象或 null；如果你判断视频表现偏低，则必须返回一套新的标题/脚本/简介/标签/置顶评论，其中 titles 要用陈述型、叙事型、生活化表达，不要提问句和教学口吻；如果当前标题属于异地恋 / 情侣约会 / 520 日常 vlog，script 必须是短视频口播，严格按开头钩子、核心画面1、核心画面2、结尾互动写，内容要贴合酒店、早午餐、逛街拍照、小清吧、见面日常这些场景，不要出现切口、测反馈、完播、方向跑偏、实战拆解等运营词\n"
-        "- analysis: 对象，包含 analysis_points，并根据判断补充 followup_topics 或 next_topics、title_suggestions、cover_suggestion、content_suggestions；followup_topics / next_topics 也必须是新的具体方向，不要提问句\n"
-        "- analysis.benchmark_analysis: 对象，包含 benchmark_videos(最多3条同赛道高表现样本), common_title_formulas, common_rhythm_formulas, common_structure_formulas\n"
-        "- analysis.remake_script_structure: 对象，包含 opening_hooks, middle_rhythm, ending_interactions\n"
-        "- analysis.advanced_title_sets: 对象，包含 short_titles, long_titles, conflict_titles，每组各 3 个可直接使用标题\n"
-        "- analysis.cover_plan: 对象，包含 copy_lines, layout_advice, color_scheme, highlight_elements\n"
-        "- analysis.tag_strategy: 对象，包含 core_traffic_tags, vertical_tags, hot_tags, recommended_tags\n"
-        "- analysis.publish_strategy: 对象，包含 best_publish_windows, should_ask_for_coin, coin_call_to_action, suggested_comment_guides\n"
-        "- analysis.reusable_hit_points: 字符串数组，总结这条视频可复制到下一条的爆款点\n"
-    )
-    result = agent.run_structured(
-        task_name="module_analyze",
-        task_goal="基于后端已经解析出的当前视频真实信息和完整市场样本，结合知识库检索、热点榜单、视频简报、联网搜索与长期记忆按需补充信息，判断它更接近爆款还是低表现，并输出完整结构化分析。优先复用当前 payload，只有在需要补充案例、最新趋势或外部公开信息时再继续调工具。",
-        user_payload={
-            "url": (data.get("url") or "").strip(),
-            "parsed_video": resolved,
-            "market_snapshot": market_snapshot,
-            "memory_user_id": "web_module_analyze",
-        },
-        response_contract=response_contract,
-        allowed_tools=allowed_tools_for_scene("module_analyze"),
-        required_final_keys=["resolved", "performance", "topic_result", "optimize_result", "analysis", "copy_result"],
-        load_history=True,
-        save_memory=True,
-        enable_reflection=True,
-    )
-    return finalize_module_analyze_result(result, resolved, market_snapshot)
-
-
 # 当分析 Agent 中枢不可用时，直接用单次 LLM 调用回退生成分析结果。
 @traceable(run_type="chain", name="web.run_llm_module_analyze_fallback", tags=["web", "llm", "fallback", "module_analyze"])
 def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot: dict) -> dict:
     llm = build_runtime_llm_client()
     llm.require_available()
+    baseline_performance = classify_video_performance(resolved)
     system_prompt = (
         "你是 B 站视频分析助手。"
-        "当前已经拿到后端解析出的真实视频信息和同类样本，请直接完成爆款/低表现判断、原因拆解、优化建议和后续选题。"
+        "当前已经拿到后端解析出的真实视频信息，以及代码预加载的同方向爆款对标样本。"
+        "请直接完成爆款/低表现判断、原因拆解、优化建议和后续选题。"
         "不要输出解释性废话，只返回 JSON。"
     )
     user_prompt = (
         "请根据下面的数据直接输出 JSON，对象字段必须包含："
         "resolved, performance, topic_result, optimize_result, copy_result, analysis。\n\n"
         f"当前视频真实信息：{json.dumps(resolved, ensure_ascii=False)}\n\n"
+        f"规则基线判断：{json.dumps(baseline_performance, ensure_ascii=False)}\n\n"
         f"市场样本：{json.dumps(market_snapshot, ensure_ascii=False)}\n\n"
         "要求：\n"
         "1. resolved 直接复用当前视频真实信息，不要改 BV、标题、播放等字段。\n"
         "2. performance 必须包含 label, is_hot, score, reasons, summary。\n"
+        "2.1 如果规则基线已经明确判定为爆款，除非你能给出更强的同赛道反证，否则不要改判成低表现。\n"
         "3. topic_result.ideas 输出 3 个后续选题，每项包含 topic, reason, video_type, keywords；topic 必须是新的具体方向，不要提问句。\n"
         "4. optimize_result 输出 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions。\n"
         "5. 如果你判断 is_hot=true，则 copy_result 返回 null，analysis 重点输出 analysis_points 和 followup_topics。\n"
@@ -4040,7 +4318,40 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
     return finalize_module_analyze_result(result, resolved, market_snapshot)
 
 
-# 运行聊天助手，让 LLM Agent 按需调工具后返回自然语言答复。
+# 运行视频分析模块，让 LLM Agent 按既定工具链完成单次独立分析。
+@traceable(run_type="chain", name="web.run_llm_module_analyze", tags=["web", "llm", "rag", "module_analyze"])
+def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) -> dict:
+    agent = get_video_analyze_agent()
+    url = (data.get("url") or "").strip()
+    preloaded_context = build_video_analyze_preloaded_context(resolved, url, market_snapshot)
+    try:
+        result = agent.run_structured(
+            task_name="module_analyze",
+            task_goal=VIDEO_ANALYZE_TASK_GOAL,
+            user_payload={
+                "url": url,
+                "parsed_video": resolved,
+                "preloaded_context": preloaded_context,
+                "market_snapshot": market_snapshot,
+            },
+            response_contract=VIDEO_ANALYZE_RESPONSE_CONTRACT,
+            allowed_tools=allowed_tools_for_scene("module_analyze"),
+            required_tools=VIDEO_ANALYZE_REQUIRED_TOOLS,
+            required_final_keys=VIDEO_ANALYZE_REQUIRED_FINAL_KEYS,
+            load_history=False,
+            save_memory=False,
+            enable_reflection=True,
+            system_prompt_override=VIDEO_ANALYZE_SYSTEM_PROMPT,
+            strict_required_tool_order=True,
+            action_validator=video_analyze_action_validator,
+        )
+        return finalize_module_analyze_result(result, resolved, market_snapshot)
+    except Exception as exc:
+        if should_skip_same_provider_fallback(exc):
+            raise
+        raise RuntimeError(f"视频分析 Agent 执行或结果归一化失败：{format_llm_error(exc)}") from exc
+
+
 @traceable(run_type="chain", name="web.run_llm_chat", tags=["web", "llm", "rag", "workspace_chat"])
 def run_llm_chat(data: dict) -> dict:
     agent = get_llm_workspace_agent()
@@ -4366,7 +4677,7 @@ def api_module_analyze():
         return jsonify({"success": False, "error": f"链接解析失败：{exc}"}), 400
 
     if runtime_llm_enabled():
-        market_snapshot = build_market_snapshot(resolved.get("partition"), resolved.get("up_ids"))
+        market_snapshot = build_hot_peer_market_snapshot(resolved)
         try:
             return jsonify({"success": True, "data": run_llm_module_analyze(data, resolved, market_snapshot)})
         except Exception as exc:

@@ -8,11 +8,22 @@ from collections import defaultdict
 from copy import deepcopy
 from statistics import mean
 from typing import Any, Dict, Iterable, List
+from urllib.parse import urlencode
 
 from bilibili_api import hot, sync, user, video_zone
+import requests
 
 from config import CONFIG
 from models import TopicIdea, VideoMetrics
+
+PUBLIC_BILIBILI_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0 Safari/537.36"
+    ),
+    "Referer": "https://www.bilibili.com/",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+}
 
 LIFE_SEED_TOKENS = (
     "异地恋",
@@ -245,6 +256,97 @@ class TopicAgent:
                 return style
         return "干货"
 
+    # 把搜索接口里可能出现的“10万”“1.2亿”之类文本转成整数。
+    def _safe_metric_int(self, value: Any) -> int:
+        if value in (None, ""):
+            return 0
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+
+        text = str(value).strip().lower().replace(",", "")
+        if not text:
+            return 0
+
+        multiplier = 1
+        if text.endswith("万"):
+            multiplier = 10000
+            text = text[:-1]
+        elif text.endswith("亿"):
+            multiplier = 100000000
+            text = text[:-1]
+
+        match = re.search(r"\d+(?:\.\d+)?", text)
+        if not match:
+            return 0
+        try:
+            return int(float(match.group(0)) * multiplier)
+        except Exception:
+            return 0
+
+    # 调公开 Web API 拉取 JSON，便于补同方向爆款对标样本。
+    def _fetch_public_json(self, url: str) -> Dict[str, Any]:
+        response = requests.get(url, headers=PUBLIC_BILIBILI_HEADERS, timeout=12)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("B站公开接口返回格式无效")
+        return payload
+
+    # 从搜索结果里抽取一批候选视频。
+    def _fetch_hot_peer_candidates(self, query: str, page_size: int) -> List[Dict[str, Any]]:
+        params = {
+            "search_type": "video",
+            "keyword": query,
+            "order": "click",
+            "page": 1,
+            "page_size": max(1, min(page_size, 20)),
+        }
+        payload = self._fetch_public_json(f"https://api.bilibili.com/x/web-interface/search/type?{urlencode(params)}")
+        if int(payload.get("code") or -1) != 0:
+            raise ValueError(payload.get("message") or "B站搜索接口失败")
+
+        data = payload.get("data") or {}
+        items = data.get("result") or []
+        results: List[Dict[str, Any]] = []
+        for item in items[:page_size]:
+            if not isinstance(item, dict):
+                continue
+            bvid = str(item.get("bvid") or "").strip()
+            if not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE):
+                continue
+            results.append(
+                {
+                    "bvid": bvid,
+                    "title": re.sub(r"<[^>]+>", "", str(item.get("title") or "")).strip(),
+                    "author": re.sub(r"<[^>]+>", "", str(item.get("author") or "")).strip(),
+                    "cover": item.get("pic") or item.get("cover") or "",
+                    "mid": int(item.get("mid") or 0),
+                    "view": self._safe_metric_int(item.get("play")),
+                    "like": self._safe_metric_int(item.get("like")),
+                    "favorite": self._safe_metric_int(item.get("favorites")),
+                    "reply": self._safe_metric_int(item.get("review")),
+                    "duration": self._parse_duration(str(item.get("duration") or "")),
+                    "pubdate": int(item.get("pubdate") or 0),
+                    "query": query,
+                }
+            )
+        return results
+
+    # 用公开视频详情接口补齐真实指标，避免只依赖搜索结果里的粗略数据。
+    def _fetch_hot_peer_detail(self, bvid: str) -> Dict[str, Any] | None:
+        clean_bvid = str(bvid or "").strip()
+        if not re.fullmatch(r"BV[0-9A-Za-z]{10}", clean_bvid, flags=re.IGNORECASE):
+            return None
+        payload = self._fetch_public_json(
+            f"https://api.bilibili.com/x/web-interface/view?{urlencode({'bvid': clean_bvid})}"
+        )
+        if int(payload.get("code") or -1) != 0:
+            return None
+        data = payload.get("data")
+        return data if isinstance(data, dict) else None
+
     # 综合流量、互动和竞争度给视频打一个排序分数。
     def _score_video(self, video: VideoMetrics) -> float:
         traffic = math.log10(max(video.view, 1))
@@ -344,6 +446,134 @@ class TopicAgent:
                 self._sleep()
         self._set_cached_videos(cache_key, videos)
         return deepcopy(videos)
+
+    # 按“同方向爆款”而不是“同UP近期视频”拉取对标样本。
+    def fetch_hot_peer_videos(
+        self,
+        queries: Iterable[str] | None = None,
+        exclude_bvid: str = "",
+        limit: int = 6,
+        recent_days: int = 30,
+        min_view: int = 50000,
+        min_like: int = 1000,
+    ) -> List[VideoMetrics]:
+        normalized_queries = [str(query or "").strip() for query in (queries or []) if str(query or "").strip()]
+        if not normalized_queries:
+            return []
+
+        clean_exclude_bvid = str(exclude_bvid or "").strip().lower()
+        normalized_limit = max(1, min(limit, 10))
+        normalized_recent_days = max(int(recent_days or 0), 0)
+        normalized_min_view = max(int(min_view or 0), 0)
+        normalized_min_like = max(int(min_like or 0), 0)
+        cache_key = (
+            "hot_peer",
+            tuple(normalized_queries[:4]),
+            clean_exclude_bvid,
+            normalized_limit,
+            normalized_recent_days,
+            normalized_min_view,
+            normalized_min_like,
+        )
+        cached = self._get_cached_videos(cache_key)
+        if cached is not None:
+            return cached[:normalized_limit]
+
+        cutoff_ts = int(time.time()) - normalized_recent_days * 86400 if normalized_recent_days else 0
+        candidate_map: Dict[str, Dict[str, Any]] = {}
+
+        for query in normalized_queries[:4]:
+            try:
+                candidates = self._fetch_hot_peer_candidates(query, page_size=max(normalized_limit * 3, 10))
+            except Exception:
+                candidates = []
+            finally:
+                self._sleep()
+
+            for candidate in candidates:
+                bvid = str(candidate.get("bvid") or "").strip()
+                if not bvid or (clean_exclude_bvid and bvid.lower() == clean_exclude_bvid):
+                    continue
+                pubdate = int(candidate.get("pubdate") or 0)
+                if cutoff_ts and pubdate and pubdate < cutoff_ts:
+                    continue
+                candidate_score = (
+                    int(candidate.get("view") or 0),
+                    int(candidate.get("like") or 0),
+                    int(candidate.get("favorite") or 0),
+                    pubdate,
+                )
+                current = candidate_map.get(bvid)
+                if current is None or candidate_score > current.get("_score", (0, 0, 0, 0)):
+                    candidate_copy = dict(candidate)
+                    candidate_copy["_score"] = candidate_score
+                    candidate_map[bvid] = candidate_copy
+
+        ordered_candidates = sorted(
+            candidate_map.values(),
+            key=lambda item: item.get("_score", (0, 0, 0, 0)),
+            reverse=True,
+        )
+
+        videos: List[VideoMetrics] = []
+        for candidate in ordered_candidates[: max(normalized_limit * 3, 12)]:
+            detail: Dict[str, Any] | None = None
+            try:
+                detail = self._fetch_hot_peer_detail(str(candidate.get("bvid") or ""))
+            except Exception:
+                detail = None
+            finally:
+                self._sleep()
+
+            if isinstance(detail, dict) and detail:
+                pubdate = int(detail.get("pubdate") or candidate.get("pubdate") or 0)
+                if cutoff_ts and pubdate and pubdate < cutoff_ts:
+                    continue
+                metric = self._build_metrics(detail, f"同方向爆款:{candidate.get('query', '')}")
+                metric.pubdate = pubdate
+                metric.url = f"https://www.bilibili.com/video/{metric.bvid}" if metric.bvid else ""
+                metric.extra["estimated"] = False
+            else:
+                pubdate = int(candidate.get("pubdate") or 0)
+                if cutoff_ts and pubdate and pubdate < cutoff_ts:
+                    continue
+                fallback_payload = {
+                    "bvid": candidate.get("bvid", ""),
+                    "title": candidate.get("title", ""),
+                    "owner": {
+                        "name": candidate.get("author", ""),
+                        "mid": int(candidate.get("mid") or 0),
+                    },
+                    "stat": {
+                        "view": int(candidate.get("view") or 0),
+                        "like": int(candidate.get("like") or 0),
+                        "favorite": int(candidate.get("favorite") or 0),
+                        "reply": int(candidate.get("reply") or 0),
+                        "coin": 0,
+                        "share": 0,
+                    },
+                    "duration": int(candidate.get("duration") or 0),
+                    "pubdate": pubdate,
+                    "pic": candidate.get("cover", ""),
+                }
+                metric = self._build_metrics(fallback_payload, f"同方向爆款搜索:{candidate.get('query', '')}")
+                metric.pubdate = pubdate
+
+            if metric.view < normalized_min_view or metric.like < normalized_min_like:
+                continue
+            videos.append(metric)
+            if len(videos) >= max(normalized_limit, 8):
+                break
+
+        self._competition_scores(videos)
+        ranked = sorted(
+            videos,
+            key=lambda item: (item.view, item.like, item.favorite, item.like_rate, item.pubdate),
+            reverse=True,
+        )
+        trimmed = ranked[:normalized_limit]
+        self._set_cached_videos(cache_key, trimmed)
+        return deepcopy(trimmed)
 
     # 把视频时长文本解析成秒数。
     def _parse_duration(self, raw: str) -> int:
