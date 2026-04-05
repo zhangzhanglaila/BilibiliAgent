@@ -669,28 +669,70 @@
 
 **调用链**
 
-1. `/api/module-analyze` 收到视频链接
-2. 后端先完成视频解析 `resolved`
-3. 后端先构造完整 `market_snapshot`
-4. `run_llm_module_analyze()` 把 `resolved + market_snapshot` 直接交给 Agent
-5. `run_structured()` 自动先跑 `retrieval`
-6. 模型按需决定是否继续调用：
-   - `hot_board_snapshot`
-   - `web_search`
-   - `code_interpreter`
-7. 输出完整结构化分析 JSON
-8. Reflection 二次审查
-9. 异步写入长期记忆
-10. `finalize_module_analyze_result()` 基于 `tool_observations` 补齐参考视频等信息
+1. 用户把 B 站视频链接粘进页面输入框
+2. 前端先请求 `/api/resolve-bili-link`
+3. 后端执行“预览快速解析链路”：
+   - 先抽 `BV`
+   - 优先 HTML 快速解析
+   - HTML 失败才退到公开视频接口
+   - 再失败才退到 `bilibili_api`
+4. 解析成功后，前端拿到 `resolved`
+   - `title`
+   - `cover`
+   - `duration`
+   - `up_name`
+   - `stats`
+   - `partition / topic / style`
+5. 用户点击视频分析，前端把：
+   - `url`
+   - 已解析好的 `resolved`
+   一起发给 `/api/module-analyze`
+6. `/api/module-analyze` 先判断前端带来的 `resolved` 是否可复用
+   - 如果可复用，直接沿用，不重新完整解析
+   - 如果不可复用，再走完整解析链路 `resolve_video_payload()`
+7. 后端执行 `build_hot_peer_market_snapshot(resolved)`
+   - 纯代码预抓“同方向爆款” `peer_samples`
+   - 这一步直接走 B 站公开 HTTP 接口，不走 Chroma
+8. 进入 `run_llm_module_analyze()`
+9. `run_structured()` 在严格约束下先调用 `retrieval`
+10. `retrieval` 走本地知识库检索
+    - `KNOWLEDGE_BASE.retrieve(...)`
+    - 过滤条件是 `static_hot_case + knowledge_base`
+11. 如果 retrieval 样本明显不足，模型才允许继续调 `web_search`
+12. 工具调用完成后，模型直接输出 `final`
+13. `finalize_module_analyze_result()` 做统一后处理：
+    - 统一 `performance / optimize_result / analysis`
+    - 合并 `peer_samples + retrieval` 为 `reference_videos`
+    - 如果真实 `reference_videos` 为空，就回退使用 LLM 已给出的 `benchmark_videos` 作为轻量参考卡片
+14. 前端渲染：
+    - 当前视频基础信息
+    - 表现判断
+    - 下一批题材建议
+    - 标题 / 封面 / 内容优化建议
+    - 可直接使用的新文案
+    - “建议直接对标的参考视频”
 
 **工具规则**
 
-- `allowed_tools=["retrieval", "hot_board_snapshot", "web_search", "code_interpreter"]`
-- 无 `required_tools`
-- `max_steps=4`
-- `load_history=True`
-- `save_memory=True`
-- `enable_reflection=True`
+- `allowed_tools=["retrieval", "web_search"]`
+- `required_tools=["retrieval"]`
+- `strict_required_tool_order=True`
+- `load_history=False`
+- `save_memory=False`
+- `enable_reflection=False`
+
+**补充说明**
+
+- `/api/resolve-bili-link` 是“快速预览链路”，目标是尽快拿到基础视频信息
+- `/api/module-analyze` 是“完整分析链路”，重点是：
+  - 使用已解析视频信息
+  - 预抓同方向爆款样本
+  - 检索本地静态热门案例
+  - 由 LLM 生成完整分析结果
+- 当前“同类爆款视频”不是单一路径，而是三层来源：
+  1. `peer_samples`
+  2. retrieval 命中的静态热门案例
+  3. LLM 原始 benchmark 兜底
 
 ---
 

@@ -322,6 +322,48 @@ class WebContextPolicyTests(unittest.TestCase):
         self.assertTrue(final["analysis"]["remake_script_structure"]["middle_rhythm"])
         self.assertIn("benchmark_videos", final["analysis"]["benchmark_analysis"])
 
+    def test_finalize_module_analyze_result_uses_llm_benchmark_videos_as_reference_fallback(self) -> None:
+        resolved = {
+            "bv_id": "BV1Qg411r7a7",
+            "url": "https://www.bilibili.com/video/BV1Qg411r7a7",
+            "title": "巴哥：什么？！！人类还有这么好吃点东西！！！",
+            "topic": "巴哥：什么？！！人类还有这么好吃点东西！！！",
+            "partition": "life",
+            "partition_label": "生活",
+            "style": "干货",
+            "up_name": "Xuannn_er",
+            "keywords": ["生活", "狗狗", "宠物"],
+            "stats": {"view": 859, "like": 18, "coin": 4, "favorite": 3, "reply": 2, "share": 1},
+        }
+        result = {
+            "performance": {"label": "低表现", "is_hot": False, "score": 23, "reasons": [], "summary": "当前数据远低于同赛道爆款"},
+            "topic_result": {"ideas": []},
+            "optimize_result": {"diagnosis": "测试"},
+            "copy_result": {"topic": "测试文案"},
+            "analysis": {
+                "benchmark_analysis": {
+                    "benchmark_videos": [
+                        {
+                            "bvid": "BV1X5ZtYJExQ",
+                            "title": "小羊把可乐赶跑了。可能是流浪过的原因，小羊居然会护食",
+                            "source": "分区热门榜:动物圈",
+                        },
+                        {
+                            "bvid": "BV1qjZpYCEGk",
+                            "title": "连猫带孩子都满脸苦相",
+                            "source": "分区热门榜:动物圈",
+                        },
+                    ]
+                }
+            },
+        }
+
+        final = finalize_module_analyze_result(result, resolved, build_empty_market_snapshot("life"))
+
+        self.assertEqual(len(final["reference_videos"]), 2)
+        self.assertEqual(final["reference_videos"][0]["url"], "https://www.bilibili.com/video/BV1X5ZtYJExQ")
+        self.assertEqual(final["analysis"]["benchmark_analysis"]["benchmark_videos"][0]["title"], "小羊把可乐赶跑了。可能是流浪过的原因，小羊居然会护食")
+
 
 if __name__ == "__main__":
     unittest.main()

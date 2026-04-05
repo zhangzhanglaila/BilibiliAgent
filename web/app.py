@@ -3773,6 +3773,42 @@ def normalize_module_performance_payload(performance: object, resolved: dict) ->
     return normalized
 
 
+def normalize_benchmark_reference_videos(value: object, limit: int = 3) -> list[dict]:
+    payload = normalize_object_payload(value)
+    items = payload.get("benchmark_videos") if isinstance(payload.get("benchmark_videos"), list) else []
+    result: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        bvid = normalize_text_value(item.get("bvid"))
+        url = normalize_text_value(item.get("url"))
+        if not url and re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE):
+            url = f"https://www.bilibili.com/video/{bvid}"
+        title = normalize_text_value(item.get("title"))
+        if not url or not title:
+            continue
+        identity = f"{bvid.lower()}|{url}" if bvid else url
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(
+            {
+                "title": title,
+                "url": url,
+                "author": normalize_text_value(item.get("author")),
+                "cover": normalize_text_value(item.get("cover")),
+                "view": safe_optional_int(item.get("view")),
+                "like": safe_optional_int(item.get("like")),
+                "like_rate": float(item.get("like_rate") or 0.0),
+                "source": normalize_text_value(item.get("source")),
+            }
+        )
+        if limit > 0 and len(result) >= limit:
+            break
+    return result
+
+
 def normalize_module_analysis_payload(
     result: dict,
     *,
@@ -3793,7 +3829,9 @@ def normalize_module_analysis_payload(
     publish_defaults = defaults.get("publish_strategy") or {}
 
     benchmark_analysis = normalize_named_list_payload(analysis.get("benchmark_analysis"), "common_structure_formulas", limit=3)
-    benchmark_analysis["benchmark_videos"] = reference_videos[:3]
+    benchmark_analysis["benchmark_videos"] = (
+        reference_videos[:3] if reference_videos else normalize_benchmark_reference_videos(analysis.get("benchmark_analysis"))
+    )
     benchmark_analysis["common_title_formulas"] = merge_text_lists(
         benchmark_analysis.get("common_title_formulas"),
         benchmark_defaults.get("common_title_formulas"),
@@ -4348,6 +4386,8 @@ def finalize_module_analyze_result(result: dict, resolved: dict, market_snapshot
         optimize_result=optimize_result,
         reference_videos=reference_videos,
     )
+    if not reference_videos:
+        reference_videos = list(((analysis.get("benchmark_analysis") or {}).get("benchmark_videos") or [])[:3])
     optimize_result["diagnosis"] = normalize_text_value(optimize_result.get("diagnosis")) or normalize_text_value(
         performance.get("summary")
     )
