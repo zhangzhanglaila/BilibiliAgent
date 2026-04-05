@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+import gzip
 import json
 import re
 import sys
 import threading
 import time
+import zlib
 from base64 import b64decode
 from html import unescape
 from pathlib import Path
@@ -951,11 +953,37 @@ def normalize_copy_result_payload(copy_result: object, topic: str, style: str) -
     }
 
 
+# 解码 HTTP 响应体，兼容 B 站当前会返回的 gzip 压缩页面。
+def decode_http_response_body(raw_body: bytes, content_encoding: str = "", charset: str = "utf-8") -> str:
+    body = raw_body or b""
+    encoding = str(content_encoding or "").lower().strip()
+    try:
+        if "gzip" in encoding or body[:2] == b"\x1f\x8b":
+            body = gzip.decompress(body)
+        elif "deflate" in encoding:
+            try:
+                body = zlib.decompress(body)
+            except zlib.error:
+                body = zlib.decompress(body, -zlib.MAX_WBITS)
+    except Exception:
+        pass
+    return body.decode(charset or "utf-8", errors="ignore")
+
+
 # 发起 HTTP 请求并返回文本响应内容。
 def fetch_text(url: str, timeout: int = 10) -> str:
     request_obj = Request(url, headers=DEFAULT_HEADERS)
     with urlopen(request_obj, timeout=timeout) as response:
-        return response.read().decode("utf-8", errors="ignore")
+        charset = ""
+        try:
+            charset = response.headers.get_content_charset() or ""
+        except Exception:
+            charset = ""
+        return decode_http_response_body(
+            response.read(),
+            content_encoding=response.headers.get("Content-Encoding", ""),
+            charset=charset or "utf-8",
+        )
 
 
 # 请求 JSON 接口并校验返回体是字典结构。
@@ -1707,7 +1735,10 @@ def fetch_video_tags(bvid: str) -> list[str]:
 def enrich_video_info_with_html_hints(info: dict, url: str, bvid: str) -> dict:
     enriched = dict(info or {})
     existing_keywords = extract_video_keywords(enriched.get("keywords"))
-    tag_keywords = fetch_video_tags(bvid)
+    try:
+        tag_keywords = fetch_video_tags(bvid)
+    except Exception:
+        tag_keywords = []
     merged_keywords: list[str] = []
     for keyword in existing_keywords + tag_keywords:
         if keyword not in merged_keywords:
@@ -1730,6 +1761,15 @@ def enrich_video_info_with_html_hints(info: dict, url: str, bvid: str) -> dict:
     if not enriched.get("tname") and html_info.get("tname"):
         enriched["tname"] = html_info.get("tname")
     return enriched
+
+
+# 公开视频主信息已拿到时，补充字段失败不能反过来拖垮整个解析。
+def enrich_video_info_best_effort(info: dict, url: str, bvid: str) -> dict:
+    base_info = dict(info or {})
+    try:
+        return enrich_video_info_with_html_hints(base_info, url, bvid)
+    except Exception:
+        return base_info
 
 
 # 通过 B 站公开视频接口拉取视频详情。
@@ -1770,13 +1810,13 @@ def fetch_video_info(url: str, bvid: str) -> dict:
     # 先走结构化程度最高的来源，失败后再逐级回退到库调用和 HTML 解析。
     try:
         info = fetch_video_info_via_public_api(bvid)
-        return enrich_video_info_with_html_hints(info, url, bvid)
+        return enrich_video_info_best_effort(info, url, bvid)
     except Exception as exc:
         errors.append(f"public api: {exc}")
 
     try:
         info = sync(video.Video(bvid=bvid).get_info())
-        return enrich_video_info_with_html_hints(info, url, bvid)
+        return enrich_video_info_best_effort(info, url, bvid)
     except Exception as exc:
         errors.append(f"bilibili_api: {exc}")
 
@@ -1784,6 +1824,28 @@ def fetch_video_info(url: str, bvid: str) -> dict:
         return fetch_video_info_via_html(url, bvid)
     except Exception as exc:
         errors.append(f"html: {exc}")
+
+    raise ValueError("；".join(errors))
+
+
+# 仅用于前端预览的快速解析链路；优先返回足够展示基础信息的结果，避免被慢接口超时拖住。
+def fetch_video_preview_info(url: str, bvid: str) -> dict:
+    errors: list[str] = []
+
+    try:
+        return fetch_video_info_via_html(url, bvid)
+    except Exception as exc:
+        errors.append(f"html fast path: {exc}")
+
+    try:
+        return fetch_video_info_via_public_api(bvid)
+    except Exception as exc:
+        errors.append(f"public api: {exc}")
+
+    try:
+        return sync(video.Video(bvid=bvid).get_info())
+    except Exception as exc:
+        errors.append(f"bilibili_api: {exc}")
 
     raise ValueError("；".join(errors))
 
@@ -4739,7 +4801,7 @@ def api_resolve_bili_link():
     bvid = ""
     try:
         bvid = extract_bvid(url)
-        info = fetch_video_info(url, bvid)
+        info = fetch_video_preview_info(url, bvid)
         return jsonify({"success": True, "data": build_resolved_payload(info, bvid)})
     except Exception as exc:
         suffix = f"（BV={bvid}）" if bvid else ""

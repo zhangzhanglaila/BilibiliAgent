@@ -205,3 +205,112 @@ CLI 和兼容接口要单独看。
 - 改一个知识库标签文案
 
 这三类改动开始。
+
+## 10. `/api/resolve-bili-link` 当前逻辑与最近修复
+
+这个接口现在不是“只把链接里的 BV 号正则提出来”这么简单，而是分成两条链路：
+
+1. 预览快速链路：给 `/api/resolve-bili-link` 用
+2. 完整解析链路：给 `/api/module-analyze` 和 `resolve_video_payload()` 用
+
+两条链路都会先统一抽取标准 `BV`：
+   - 支持标准视频链接
+   - 支持 `b23.tv`
+   - 支持 `cm.bilibili.com` 这类追踪链接
+   - 支持旧版 `av` 链接转 `BV`
+
+### 10.1 当前两条链路分别怎么走
+
+#### A. `/api/resolve-bili-link` 预览快速链路
+
+只为了让前端先看到标题、封面、时长、UP、统计这些基础信息。
+
+顺序是：
+
+1. 先走 HTML 快速解析
+2. HTML 失败才退到 B 站公开视频接口
+3. 再失败才退到 `bilibili_api`
+4. 成功后直接整理成 `resolved`
+
+这条链路的目标是“尽快出基础预览”，不会主动为了补更多标签信息去等待慢接口。
+
+#### B. `resolve_video_payload()` 完整解析链路
+
+这条链路是给后续分析模块用的，仍然会优先追求结构化和补充信息完整度。
+
+顺序是：
+
+1. 先走 B 站公开视频接口
+2. 再走 `bilibili_api`
+3. 最后才走 HTML 兜底
+4. 主信息拿到后，再做 best-effort 补充：
+   - 补 `tags / keywords`
+   - 必要时用 HTML hints 补 `tname`
+5. 最后统一整理成 `resolved`
+
+### 10.2 为什么看起来像“明明不复杂却会失败”
+
+最近一次典型现象是：
+
+- 输入 `BV1dcX5BYESE`
+- 前端报错里同时出现：
+  - `public api: <urlopen error _ssl.c:989: The handshake operation timed out>`
+  - `html: 网页源码中未找到视频标题`
+
+根因其实有两个：
+
+1. HTML 兜底解析以前没有处理 B 站当前返回的压缩页面。
+   - B 站视频页会返回 `gzip`
+   - 旧逻辑直接把压缩字节流按 UTF-8 解码
+   - 所以即使页面真实有 `<title>`、`og:title`、`__INITIAL_STATE__`，代码也读不到
+2. “公开接口”这层以前把“主信息获取”和“附加补充”绑在了同一个 `try` 里。
+   - 主信息其实可能已经拿到了
+   - 但后续补 `tags` 或 HTML hints 时一旦超时，整次解析仍然会被记成 `public api` 失败
+
+### 10.3 为什么后来又出现“只解析基础信息却要 30 多秒”
+
+这次性能问题的根因不是 HTML 解析慢，而是预览接口曾经直接复用了完整解析链路。
+
+在当前网络环境里，实测出现过：
+
+- 公开视频接口等待约 `11s` 后超时
+- `fetch_video_tags()` 再等待约 `10s` 超时
+- `bilibili_api` 再等待约 `20s` 左右失败
+- 真正能拿到基础信息的 HTML 解析本身只要不到 `1s`
+
+所以“30 多秒”本质上是在等几个已经失败的慢接口超时，不是解析基础信息本身复杂。
+
+### 10.4 当前修复后的行为
+
+- `fetch_text()` 已兼容 `gzip / deflate` 响应体，HTML 兜底能真正读到页面源码。
+- 补 `tags / HTML hints` 改成 best-effort。
+- `/api/resolve-bili-link` 已切到“HTML 优先”的预览快速链路。
+- 也就是说：
+  - 预览阶段优先秒出基础字段
+  - 完整分析阶段仍然允许走更完整但更慢的补充逻辑
+
+### 10.5 现在还会不会调用那些复杂接口
+
+会，但分场景：
+
+- `/api/resolve-bili-link`
+  - 正常情况下优先走 HTML 快速解析
+  - 只有 HTML 失败时，才会退到公开视频接口和 `bilibili_api`
+- `/api/module-analyze`
+  - 如果前端传来的 `resolved` 可复用，就不需要重新完整解析
+  - 如果没有可用 `resolved`，仍会走完整解析链路
+
+这些较复杂的接口主要能额外带来：
+
+- 更稳定的结构化字段来源
+- 额外的 `tags / keywords`
+- 更有机会补齐 `tname`
+- 在 HTML 结构变化时，提供另一条备用来源
+
+排查这条链路时，优先看：
+
+- `extract_bvid()`
+- `fetch_video_preview_info()`
+- `fetch_video_info()`
+- `build_resolved_payload()`
+- `/api/resolve-bili-link`
