@@ -3146,6 +3146,7 @@ def build_reference_videos_from_market_snapshot(
     resolved = resolved or {}
     entries: list[tuple[tuple, float, dict]] = []
     seen: set[str] = set()
+    strict_related_only = has_strict_reference_signal(resolved, query_text)
     target_partition = str(resolved.get("partition") or market_snapshot.get("partition") or "").strip()
     target_partition_label = (
         str(resolved.get("partition_label") or "")
@@ -3182,7 +3183,9 @@ def build_reference_videos_from_market_snapshot(
                 "topic": build_topic(title_or_url, keywords=extract_video_keywords([title_or_url]), tname=target_partition_label),
                 "keywords": extract_video_keywords([title_or_url]),
             }
-            rank_key, _ = build_reference_rank_entry(candidate, query_text=query_text, resolved=resolved)
+            rank_key, meta = build_reference_rank_entry(candidate, query_text=query_text, resolved=resolved)
+            if strict_related_only and not meta.get("is_related"):
+                continue
             source_bonus = 1.0 if group_name == "peer_samples" else 0.5 if group_name == "hot_board" else 0.0
             entries.append((rank_key, source_bonus, candidate))
             if candidate["url"]:
@@ -3375,6 +3378,7 @@ def build_reference_videos_from_retrieval_matches(
     resolved = resolved or {}
     entries: list[tuple[tuple, float, dict]] = []
     seen: set[str] = set()
+    strict_related_only = has_strict_reference_signal(resolved, query_text)
     for match in matches or []:
         item = build_reference_video_from_knowledge_match(match)
         if not item:
@@ -3386,7 +3390,9 @@ def build_reference_videos_from_retrieval_matches(
         if not identity or identity in seen:
             continue
         seen.add(identity)
-        rank_key, _ = build_reference_rank_entry(item, query_text=query_text, resolved=resolved)
+        rank_key, meta = build_reference_rank_entry(item, query_text=query_text, resolved=resolved)
+        if strict_related_only and not meta.get("is_related"):
+            continue
         retrieval_bonus = -float(item.get("_retrieval_score") or 0.0)
         entries.append((rank_key, retrieval_bonus, item))
 
@@ -3450,28 +3456,35 @@ def build_module_analyze_reference_videos(
             seen.add(key)
         merged.append(item)
 
-    enriched_result: list[dict] = []
+    ranked_entries: list[tuple[tuple, dict]] = []
+    strict_related_only = has_strict_reference_signal(resolved, query_text)
     for item in merged:
-        enriched = enrich_reference_video_for_display(item)
-        if not normalize_text_value(enriched.get("cover")):
+        rank_key, meta = build_reference_rank_entry(item, query_text=query_text, resolved=resolved)
+        if strict_related_only and not meta.get("is_related"):
             continue
-        if not has_complete_reference_display_metrics(enriched):
+        ranked_entries.append((rank_key, item))
+
+    result: list[dict] = []
+    for _, item in sorted(ranked_entries, key=lambda entry: entry[0], reverse=True):
+        if not normalize_text_value(item.get("cover")):
             continue
-        enriched_result.append(
+        if not has_complete_reference_display_metrics(item):
+            continue
+        result.append(
             {
-                "title": enriched.get("title", ""),
-                "url": enriched.get("url", ""),
-                "author": enriched.get("author", ""),
-                "cover": enriched.get("cover", ""),
-                "view": safe_int(enriched.get("view")),
-                "like": safe_optional_int(enriched.get("like")),
-                "like_rate": float(enriched.get("like_rate") or 0.0),
-                "source": enriched.get("source", ""),
+                "title": item.get("title", ""),
+                "url": item.get("url", ""),
+                "author": item.get("author", ""),
+                "cover": item.get("cover", ""),
+                "view": safe_int(item.get("view")),
+                "like": safe_optional_int(item.get("like")),
+                "like_rate": float(item.get("like_rate") or 0.0),
+                "source": item.get("source", ""),
             }
         )
-        if len(enriched_result) >= 6:
+        if len(result) >= 6:
             break
-    return enriched_result
+    return result
 
 
 def infer_title_formula(title: str) -> str:
@@ -4547,7 +4560,7 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
             required_final_keys=VIDEO_ANALYZE_REQUIRED_FINAL_KEYS,
             load_history=False,
             save_memory=False,
-            enable_reflection=True,
+            enable_reflection=False,
             system_prompt_override=VIDEO_ANALYZE_SYSTEM_PROMPT,
             strict_required_tool_order=True,
             action_validator=video_analyze_action_validator,

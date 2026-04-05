@@ -16,6 +16,8 @@ from web.app import (
     VIDEO_ANALYZE_REQUIRED_TOOLS,
     build_empty_market_snapshot,
     build_hot_peer_market_snapshot,
+    build_module_analyze_reference_videos,
+    build_reference_query_text,
     build_video_analyze_preloaded_context,
     finalize_module_analyze_result,
     run_llm_module_analyze,
@@ -138,12 +140,100 @@ class WebContextPolicyTests(unittest.TestCase):
         self.assertEqual(tuple(kwargs["required_final_keys"]), VIDEO_ANALYZE_REQUIRED_FINAL_KEYS)
         self.assertFalse(kwargs["load_history"])
         self.assertFalse(kwargs["save_memory"])
+        self.assertFalse(kwargs["enable_reflection"])
         self.assertTrue(kwargs["strict_required_tool_order"])
         self.assertIs(kwargs["action_validator"], video_analyze_action_validator)
         self.assertNotIn("video_briefing", kwargs["allowed_tools"])
         self.assertEqual(kwargs["user_payload"]["market_snapshot"], market_snapshot)
         self.assertIn("preloaded_context", kwargs["user_payload"])
         self.assertEqual(kwargs["user_payload"]["preloaded_context"]["video"]["bv_id"], resolved["bv_id"])
+
+    def test_build_module_analyze_reference_videos_drops_unrelated_retrieval_hits(self) -> None:
+        resolved = {
+            "bv_id": "BV1travel123",
+            "title": "【新疆旅行记录】一路向北",
+            "topic": "新疆旅行记录",
+            "partition": "life",
+            "partition_label": "生活",
+            "keywords": ["新疆", "旅行", "风景", "生活记录"],
+            "up_name": "Xuannn_er",
+        }
+        tool_observations = [
+            {
+                "action": "retrieval",
+                "observation": {
+                    "matches": [
+                        {
+                            "metadata": {
+                                "title": "收集了100个人的梦，我们发现了奇怪的关联",
+                                "url": "https://www.bilibili.com/video/BV1PyQzB7ER5",
+                                "bvid": "BV1PyQzB7ER5",
+                                "author": "影视飓风",
+                                "cover": "https://example.com/unrelated.jpg",
+                                "partition": "知识",
+                                "board_type": "每周必看",
+                                "view": 7338698,
+                                "like": 372614,
+                            },
+                            "text": "",
+                            "score": 1.07,
+                        }
+                    ]
+                },
+            }
+        ]
+
+        result = build_module_analyze_reference_videos(
+            build_empty_market_snapshot("life"),
+            tool_observations=tool_observations,
+            exclude_bvid=resolved["bv_id"],
+            query_text=build_reference_query_text(resolved),
+            resolved=resolved,
+        )
+
+        self.assertEqual(result, [])
+
+    def test_build_module_analyze_reference_videos_uses_local_ready_samples_without_detail_fetch(self) -> None:
+        resolved = {
+            "bv_id": "BV1travel123",
+            "title": "【新疆旅行记录】一路向北",
+            "topic": "新疆旅行记录",
+            "partition": "life",
+            "partition_label": "生活",
+            "keywords": ["新疆", "旅行", "风景", "生活记录"],
+            "up_name": "Xuannn_er",
+        }
+        market_snapshot = build_empty_market_snapshot("life")
+        market_snapshot["peer_samples"] = [
+            {
+                "bvid": "BV1peer12345",
+                "title": "新疆自驾旅行记录，草原和雪山都在路上",
+                "author": "旅行阿泽",
+                "url": "https://www.bilibili.com/video/BV1peer12345",
+                "cover": "https://example.com/peer.jpg",
+                "view": 268000,
+                "like": 16200,
+                "like_rate": 0.0604,
+                "source": "同方向爆款:新疆旅行",
+                "partition": "life",
+                "partition_label": "生活",
+                "topic": "新疆旅行记录",
+                "keywords": ["新疆", "旅行", "自驾", "风景"],
+            }
+        ]
+
+        with patch("web.app.fetch_reference_video_detail", side_effect=AssertionError("should not fetch detail")):
+            result = build_module_analyze_reference_videos(
+                market_snapshot,
+                tool_observations=[],
+                exclude_bvid=resolved["bv_id"],
+                query_text=build_reference_query_text(resolved),
+                resolved=resolved,
+            )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["title"], "新疆自驾旅行记录，草原和雪山都在路上")
+        self.assertEqual(result[0]["source"], "同方向爆款:新疆旅行")
 
     def test_build_video_analyze_preloaded_context_reuses_resolved_without_refetch(self) -> None:
         resolved = {
