@@ -1425,9 +1425,9 @@ button {
   position: sticky;
   top: 92px;
   align-self: start;
-  height: calc(100vh - 110px);
-  min-height: calc(100vh - 110px);
-  max-height: calc(100vh - 110px);
+  height: calc(100vh - 92px);
+  min-height: calc(100vh - 92px);
+  max-height: calc(100vh - 92px);
   overflow: hidden;
 }
 
@@ -1476,14 +1476,14 @@ button {
 .assistant-layout {
   flex: 1;
   min-height: 0;
-  padding: 0 18px 18px;
+  padding: 0 18px 10px;
 }
 
 .assistant-thread-wrap {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 8px 8px 160px;
+  padding: 8px 8px 28px;
   border-radius: calc(var(--radius-xl) - 6px);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(254, 248, 249, 0.74)),
@@ -2051,7 +2051,7 @@ button {
   }
 
   .assistant-thread-wrap {
-    padding: 8px 8px 172px;
+    padding: 8px 8px 24px;
   }
 
   .chat-bubble {

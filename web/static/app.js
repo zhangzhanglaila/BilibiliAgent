@@ -2416,7 +2416,7 @@ function waitForAnalyzeTaskResult(job = {}, onProgress) {
 function assistantPendingBubble() {
   const percent = currentProgressPercent('assistant');
   return `
-    <article class="chat-row chat-row--assistant">
+    <article class="chat-row chat-row--assistant" data-assistant-pending="1">
       <div class="chat-bubble chat-bubble--assistant chat-bubble--pending">
         <div class="chat-bubble__head"><strong class="chat-bubble__name">智能助手</strong><span class="meta-line">正在思考</span></div>
         ${loadingCard('Agent 正在思考', '正在结合当前页面输入、工具结果和上下文组织回答。', ['理解问题', '调用工具', '组织回答'], percent)}
@@ -2425,24 +2425,66 @@ function assistantPendingBubble() {
   `;
 }
 
+function updateAssistantPendingBubble() {
+  const box = $('#assistantResult');
+  if (!box) return;
+  const pending = box.querySelector('[data-assistant-pending="1"]');
+  if (!pending) return;
+  const preservedScrollTop = box.scrollTop;
+  pending.outerHTML = assistantPendingBubble();
+  box.scrollTop = Math.min(preservedScrollTop, Math.max(box.scrollHeight - box.clientHeight, 0));
+}
+
+function updateAssistantMessageContent(messageItem) {
+  if (!messageItem) return;
+  const box = $('#assistantResult');
+  if (!box) return;
+  const index = state.chatHistory.findIndex(item => item === messageItem);
+  if (index < 0) return;
+  const preservedScrollTop = box.scrollTop;
+  const contentNode = box.querySelector(`[data-chat-content="${index}"]`);
+  if (contentNode) {
+    contentNode.innerHTML = `${rich(messageItem.content || '')}${messageItem.typing ? '<span class="typing-caret"></span>' : ''}`;
+  }
+  const copyButton = box.querySelector(`[data-chat-copy="${index}"]`);
+  if (copyButton) {
+    copyButton.dataset.copy = messageItem.content || messageItem.fullContent || '';
+  }
+  box.scrollTop = Math.min(preservedScrollTop, Math.max(box.scrollHeight - box.clientHeight, 0));
+}
+
+function positionAssistantMessageAtTop(messageItem) {
+  if (!messageItem) return;
+  const box = $('#assistantResult');
+  if (!box) return;
+  const index = state.chatHistory.findIndex(item => item === messageItem);
+  if (index < 0) return;
+  const row = box.querySelector(`[data-chat-item="${index}"]`);
+  if (!row) return;
+  const targetTop = Math.max(row.offsetTop - 8, 0);
+  box.scrollTop = Math.min(targetTop, Math.max(box.scrollHeight - box.clientHeight, 0));
+}
+
 // 用当前聊天状态重新渲染助手区域，并绑定动态按钮。
 function renderAssistant() {
   const box = $('#assistantResult');
   if (!box) return;
+  const preservedScrollTop = box.scrollTop;
   if (!state.chatHistory.length && !state.chatPending) {
     box.innerHTML = assistantEmptyState();
+    box.scrollTop = 0;
     return;
   }
   box.innerHTML = `
     <div class="assistant-thread">
-      ${state.chatHistory.map(item => `
-        <article class="chat-row chat-row--${escapeHtml(item.role)}">
+      ${state.chatHistory.map((item, index) => `
+        <article class="chat-row chat-row--${escapeHtml(item.role)}" data-chat-item="${index}">
           <div class="chat-bubble chat-bubble--${escapeHtml(item.role)} ${item.error ? 'chat-bubble--error' : ''}">
             <div class="chat-bubble__head">
               <strong class="chat-bubble__name">${item.role === 'assistant' ? '智能助手' : '你'}</strong>
-              ${item.role === 'assistant' ? `<button class="copy-btn" data-copy="${escapeHtml(item.content || item.fullContent || '')}" data-copy-label="回答">复制</button>` : ''}
+              ${item.role === 'assistant' ? `<button class="copy-btn" data-copy="${escapeHtml(item.content || item.fullContent || '')}" data-copy-label="回答" data-chat-copy="${index}">复制</button>` : ''}
             </div>
-            <div class="rich-text">${rich(item.content || '')}${item.typing ? '<span class="typing-caret"></span>' : ''}</div>
+            <div class="rich-text" data-chat-content="${index}">${rich(item.content || '')}${item.typing ? '<span class="typing-caret"></span>' : ''}</div>
             ${item.actions?.length ? `<div class="assistant-actions">${assistantActionButtons(item.actions)}</div>` : ''}
             ${item.references?.length ? `<div class="chat-links"><div class="meta-line">可直接打开的参考视频</div>${referenceGrid(item.references, true)}</div>` : ''}
           </div>
@@ -2461,9 +2503,7 @@ function renderAssistant() {
       sendAssistantMessage(prompt);
     });
   });
-  requestAnimationFrame(() => {
-    box.scrollTop = box.scrollHeight;
-  });
+  box.scrollTop = Math.min(preservedScrollTop, Math.max(box.scrollHeight - box.clientHeight, 0));
 }
 
 // 根据聊天可用性、请求状态和输入内容刷新发送按钮。
@@ -2515,19 +2555,19 @@ async function typeAssistantReply(messageItem) {
   messageItem.content = '';
   messageItem.typing = true;
   state.chatTyping = true;
-  renderAssistant();
+  updateAssistantMessageContent(messageItem);
   updateAssistantButton();
 
   for (let index = 0; index < fullText.length; index += 1) {
     messageItem.content += fullText[index];
-    renderAssistant();
+    updateAssistantMessageContent(messageItem);
     await sleep(fullText[index] === '\n' ? 0 : 12);
   }
 
   messageItem.typing = false;
   delete messageItem.fullContent;
   state.chatTyping = false;
-  renderAssistant();
+  updateAssistantMessageContent(messageItem);
   updateAssistantButton();
 }
 
@@ -2681,14 +2721,16 @@ async function sendAssistantMessage(forced = '') {
     return;
   }
 
-  state.chatHistory.push({ role: 'user', content: message });
+  const userItem = { role: 'user', content: message };
+  state.chatHistory.push(userItem);
   state.chatPending = true;
   input.value = '';
   autosize(input);
   updateAssistantButton();
   renderAssistant();
+  positionAssistantMessageAtTop(userItem);
   setStatus('智能助手正在思考', 'loading');
-  startProgressJob('assistant', () => renderAssistant(), {
+  startProgressJob('assistant', () => updateAssistantPendingBubble(), {
     start: 5,
     max: 91,
     minStep: 0.45,
