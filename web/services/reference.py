@@ -220,6 +220,7 @@ def build_video_benchmark_profile(resolved: dict) -> dict:
         for term in extract_reference_terms(" ".join([title, topic]))
         if term not in VIDEO_BENCHMARK_QUERY_STOPWORDS and term not in VIDEO_BENCHMARK_WEAK_TERMS
     ]
+    series_terms = extract_series_reference_terms(" ".join([title, topic]))
     latin_phrases = extract_latin_reference_phrases(" ".join([title, topic]))
     combined_text = " ".join([title, topic, tname, partition_label, *raw_keywords])
     effective_partition = str(resolved.get("partition") or "").strip()
@@ -243,7 +244,7 @@ def build_video_benchmark_profile(resolved: dict) -> dict:
     else:
         for term in narrative_terms:
             append_benchmark_term(terms, term)
-    for term in short_keywords + latin_phrases + title_terms + keywords:
+    for term in series_terms + short_keywords + latin_phrases + title_terms + keywords:
         append_benchmark_term(terms, term)
         if len(terms) >= 8:
             break
@@ -279,6 +280,15 @@ def build_video_benchmark_profile(resolved: dict) -> dict:
             append_benchmark_query(queries, seen_queries, ["网络喷子", "人性"])
             append_benchmark_query(queries, seen_queries, ["网络喷子", "线下见面"])
         append_benchmark_query(queries, seen_queries, narrative_terms[:3])
+    if latin_phrases:
+        append_benchmark_query(queries, seen_queries, [query_lane_label, latin_phrases[0]])
+        if short_keywords:
+            append_benchmark_query(queries, seen_queries, [short_keywords[0], latin_phrases[0]])
+        if series_terms:
+            append_benchmark_query(queries, seen_queries, [series_terms[0], latin_phrases[0]])
+    if series_terms:
+        append_benchmark_query(queries, seen_queries, [series_terms[0], query_lane_label or terms[0] if terms else ""])
+        append_benchmark_query(queries, seen_queries, [series_terms[0]])
     append_benchmark_query(queries, seen_queries, [query_lane_label, *terms[1:3]])
     append_benchmark_query(queries, seen_queries, terms[:3])
     append_benchmark_query(queries, seen_queries, terms[:2])
@@ -453,7 +463,8 @@ def is_real_reference_video(item: dict) -> bool:
 # 归一化参考视频检索文本，方便后续做关键词拆分。
 def normalize_reference_text(text: str) -> str:
     value = re.sub(r"[【】\[\]（）()<>《》\"'`~!@#$%^&*_+=|\\/:;,.?？！，。、“”·-]+", " ", text or "")
-    return re.sub(r"\s+", " ", value).strip().lower()
+    collapsed = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", value)
+    return re.sub(r"\s+", " ", collapsed).strip().lower()
 
 
 # 把一个候选检索词按规则追加到去重后的词表里。
@@ -481,6 +492,30 @@ def extract_reference_terms(text: str) -> list[str]:
             for index in range(0, len(chunk) - size + 1):
                 append_reference_term(terms, chunk[index : index + size])
     return terms[:32]
+
+
+def extract_series_reference_terms(text: str) -> list[str]:
+    source_text = str(text or "")
+    compact_text = re.sub(r"\s+", "", source_text)
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def append_series_term(value: str) -> None:
+        clean = normalize_benchmark_term(value)
+        marker = clean.lower()
+        if not clean or marker in seen:
+            return
+        seen.add(marker)
+        terms.append(clean)
+
+    for match in re.findall(r"《([^》]{2,24})》", compact_text):
+        cleaned = re.sub(r"(?:第)?\d+(?:\.\d+)?(?:季|集|期|弹|部|篇)?$", "", match).strip()
+        append_series_term(cleaned)
+
+    for match in re.findall(r"([\u4e00-\u9fff]{3,16})(?:第?\d+(?:\.\d+)?(?:季|集|期|弹|部|篇)?)", compact_text):
+        append_series_term(match)
+
+    return terms[:4]
 
 
 # 判断原标题是否真的带有内容语义，而不是抽象情绪句或短梗。
@@ -715,6 +750,40 @@ def fetch_direct_related_reference_videos(bvid: str, limit: int = 10) -> list[di
     return results
 
 
+def fetch_same_up_reference_videos(resolved: dict | None = None, limit: int = 8) -> list[dict]:
+    resolved = resolved or {}
+    exports = app_exports()
+    up_ids = [safe_int(item) for item in (resolved.get("up_ids") or []) if safe_int(item) > 0]
+    if not up_ids and safe_int(resolved.get("mid")) > 0:
+        up_ids = [safe_int(resolved.get("mid"))]
+    if not up_ids:
+        return []
+
+    try:
+        items = exports.RAW_TOPIC_AGENT.fetch_peer_up_videos(up_ids)[: max(limit * 2, 8)]
+    except Exception:
+        return []
+
+    results: list[dict] = []
+    current_mid = safe_int(resolved.get("mid"))
+    for item in items:
+        try:
+            payload = exports.serialize_video_metric(item)
+        except Exception:
+            continue
+        payload["source"] = (
+            "当前UP主近期视频"
+            if current_mid and safe_int(payload.get("mid")) == current_mid
+            else payload.get("source") or "同类UP近期视频"
+        )
+        payload["partition"] = payload.get("partition") or resolved.get("partition", "")
+        payload["partition_label"] = payload.get("partition_label") or resolved.get("partition_label", "")
+        results.append(payload)
+        if len(results) >= limit:
+            break
+    return results
+
+
 # 通过搜索接口按关键词拉取参考视频候选集。
 def fetch_search_reference_videos(query: str, limit: int = 8) -> list[dict]:
     if not query:
@@ -786,6 +855,11 @@ def enrich_reference_sources_with_search(
             combined.extend(exports.fetch_direct_related_reference_videos(resolved.get("bv_id", "")))
         except Exception:
             pass
+        if len(combined) < 6:
+            try:
+                combined.extend(exports.fetch_same_up_reference_videos(resolved, limit=8))
+            except Exception:
+                pass
     combined.extend(list(sources or []))
     for query in build_reference_search_queries(query_text=query_text, resolved=resolved):
         try:
@@ -1030,13 +1104,13 @@ def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict 
     is_related = (semantic_aligned and partition_aligned) or bool(same_up) or bool(same_author)
     rank_key = (
         1 if is_related else 0,
+        same_up,
+        same_author,
+        source_priority,
         len(matched_keywords),
         strong_match_count,
         overlap_score,
         same_partition,
-        same_up,
-        same_author,
-        source_priority,
         float(item.get("like_rate") or 0.0),
         safe_int(item.get("view")),
         -(float(item.get("competition_score") or 0.0)),

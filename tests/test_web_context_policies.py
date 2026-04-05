@@ -585,6 +585,67 @@ class WebContextPolicyTests(unittest.TestCase):
         self.assertEqual(len(result), 6)
         self.assertTrue(all(item["source"] == "当前视频相关推荐" for item in result))
 
+    def test_build_module_analyze_reference_videos_uses_same_up_fallback_when_related_and_search_empty(self) -> None:
+        resolved = {
+            "bv_id": "BV1dcX5BYESE",
+            "title": "《离 家 的 诱 惑》7.0",
+            "topic": "《离 家 的 诱 惑》7.0",
+            "partition": "life",
+            "partition_label": "生活",
+            "keywords": ["搞笑", "高能", "蝙蝠侠", "DC联名"],
+            "up_name": "托马斯家的",
+            "mid": 12816241,
+            "up_ids": [12816241],
+        }
+
+        same_up_metrics = []
+        metrics_by_id = {}
+        for index in range(1, 7):
+            bvid = f"BV1same{index:05d}"
+            item = {
+                "bvid": bvid,
+                "title": f"离家的诱惑系列第{index}条",
+                "author": "托马斯家的",
+                "cover": f"https://example.com/same-up-{index}.jpg",
+                "mid": 12816241,
+                "view": 500000 + index,
+                "like": 30000 + index,
+                "coin": 0,
+                "favorite": 1000 + index,
+                "reply": 100 + index,
+                "share": 10 + index,
+                "duration": 180 + index,
+                "avg_view_duration": 0.0,
+                "like_rate": 0.06,
+                "completion_rate": 0.0,
+                "competition_score": 0.0,
+                "source": "同类UP:12816241",
+                "url": f"https://www.bilibili.com/video/{bvid}",
+                "estimated": False,
+            }
+            same_up_metrics.append({"bvid": bvid})
+            metrics_by_id[bvid] = item
+
+        def fake_serialize(item: dict) -> dict:
+            return dict(metrics_by_id[item["bvid"]])
+
+        with patch("web.app.fetch_direct_related_reference_videos", return_value=[]):
+            with patch("web.app.fetch_search_reference_videos", return_value=[]):
+                with patch("web.app.serialize_video_metric", side_effect=fake_serialize):
+                    with patch("web.app.fetch_reference_video_detail", return_value=None):
+                        with patch("web.app.RAW_TOPIC_AGENT.fetch_peer_up_videos", return_value=same_up_metrics):
+                            result = build_module_analyze_reference_videos(
+                                build_empty_market_snapshot("life"),
+                                tool_observations=[],
+                                exclude_bvid=resolved["bv_id"],
+                                query_text=build_reference_query_text(resolved),
+                                resolved=resolved,
+                            )
+
+        self.assertEqual(len(result), 6)
+        self.assertTrue(all(item["author"] == "托马斯家的" for item in result))
+        self.assertTrue(all(item["source"] == "当前UP主近期视频" for item in result))
+
     def test_api_module_analyze_start_returns_job_snapshot(self) -> None:
         with app.test_client() as client:
             with patch("web.app.start_module_analyze_job", return_value={"id": "job123", "status": "queued"}):

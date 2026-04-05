@@ -47,6 +47,7 @@ const state = {
   analyzeTask: {
     id: '',
     eventSource: null,
+    snapshot: null,
   },
   activeModule: 'analyze',
   knowledgeActiveSubtab: 'upload',
@@ -546,6 +547,20 @@ function stopProgressJob(key, finalPercent = null) {
     job.onUpdate(job.percent);
   }
   delete state.progressJobs[key];
+}
+
+// 把真实进度同步给本地平滑进度条，避免条回退，同时允许最终状态直接拉满。
+function syncProgressJob(key, nextPercent, options = {}) {
+  const job = state.progressJobs[key];
+  if (!job) return;
+  const target = clampProgressValue(nextPercent);
+  const exact = Boolean(options.exact);
+  const resolved = exact ? target : Math.max(job.percent, target);
+  if (resolved === job.percent) return;
+  job.percent = resolved;
+  if (typeof job.onUpdate === 'function') {
+    job.onUpdate(job.percent);
+  }
 }
 
 // 启动一个模拟进度条任务，给异步请求提供平滑的视觉反馈。
@@ -2298,7 +2313,7 @@ function renderProgressInto(containerId, title, desc, steps, percent) {
 function closeAnalyzeTaskStream() {
   const source = state.analyzeTask?.eventSource;
   if (source) source.close();
-  state.analyzeTask = { id: '', eventSource: null };
+  state.analyzeTask = { id: '', eventSource: null, snapshot: null };
 }
 
 function syncAnalyzePreview(job = {}) {
@@ -2308,13 +2323,19 @@ function syncAnalyzePreview(job = {}) {
   $('#videoPreview').innerHTML = videoPreview(job.resolved);
 }
 
-function renderAnalyzeTaskProgress(job = {}) {
+function renderAnalyzeTaskProgress(job = {}, options = {}) {
+  const snapshot = job && typeof job === 'object' ? job : {};
   const title = '正在分析视频';
-  const desc = job.message || '系统正在分阶段完成视频解析、对标样本加载和优化建议生成。';
+  const desc = snapshot.message || '系统正在分阶段完成视频解析、对标样本加载和优化建议生成。';
   const steps = ['解析视频信息', '加载对标样本', '检索知识库', '生成建议'];
-  syncAnalyzePreview(job);
-  renderProgressInto('videoResult', title, desc, steps, Number(job.percent || 0));
-  renderWorkspaceOutline();
+  const displayPercent = Math.max(Number(snapshot.percent || 0), currentProgressPercent('analyze'));
+  if (options.syncPreview !== false) {
+    syncAnalyzePreview(snapshot);
+  }
+  renderProgressInto('videoResult', title, desc, steps, displayPercent);
+  if (options.renderOutline !== false) {
+    renderWorkspaceOutline();
+  }
 }
 
 function buildAnalyzeTaskError(job = {}) {
@@ -2577,20 +2598,49 @@ async function runAnalyzeModule() {
   setStatus(title, 'loading');
   stopProgressJob('analyze');
   closeAnalyzeTaskStream();
-  renderProgressInto('videoResult', title, desc, steps, 4);
-  renderWorkspaceOutline();
+  state.analyzeTask = {
+    id: '',
+    eventSource: null,
+    snapshot: { status: 'queued', message: desc, percent: 4 },
+  };
+  startProgressJob('analyze', () => {
+    renderAnalyzeTaskProgress(
+      state.analyzeTask?.snapshot || { message: desc, percent: currentProgressPercent('analyze') },
+      { syncPreview: false, renderOutline: false },
+    );
+  }, {
+    start: 4,
+    max: 90,
+    cap: 98.5,
+    slowStart: 68,
+    tailStart: 94,
+    minStep: 0.42,
+    midMinStep: 0.05,
+    midFactor: 0.009,
+    tailMinStep: 0.025,
+    tailFactor: 0.01,
+    durationMs: 28000,
+    interval: 180,
+  });
+  renderAnalyzeTaskProgress(state.analyzeTask.snapshot);
 
   try {
     if (!isResolvedForUrl(url)) await resolveVideoLink(url, ++state.videoResolveSeq, { silent: true });
     const startData = await requestJson('/api/module-analyze/start', { url, resolved: state.videoResolved });
     const job = startData.job || {};
+    state.analyzeTask.snapshot = job;
+    syncProgressJob('analyze', Number(job.percent || 4));
     renderAnalyzeTaskProgress(job);
     const data = await waitForAnalyzeTaskResult(job, snapshot => {
+      state.analyzeTask.snapshot = snapshot;
+      syncProgressJob('analyze', Number(snapshot?.percent || 0));
       renderAnalyzeTaskProgress(snapshot);
       if (snapshot?.message) {
         setStatus(snapshot.message, snapshot.status === 'failed' ? 'error' : 'loading');
       }
     });
+    syncProgressJob('analyze', 100, { exact: true });
+    stopProgressJob('analyze', 100);
     if (data.resolved) {
       state.videoResolved = data.resolved;
       state.videoResolvedUrl = url;
@@ -2602,6 +2652,7 @@ async function runAnalyzeModule() {
     if (data.llm_warning) showToast('LLM 已回退', 'Agent 中枢失败，已自动回退到直接 LLM 分析。', 'error');
     setStatus('视频分析已完成', 'success');
   } catch (error) {
+    stopProgressJob('analyze');
     closeAnalyzeTaskStream();
     $('#videoResult').innerHTML = infoCard('分析失败', error.message, 'danger');
     renderWorkspaceOutline();
@@ -2611,6 +2662,7 @@ async function runAnalyzeModule() {
       promptRuntimeConfigFromError(error, () => runAnalyzeModule());
     }
   } finally {
+    stopProgressJob('analyze');
     closeAnalyzeTaskStream();
     setButtonLoading('videoAnalyzeBtn', false);
   }

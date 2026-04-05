@@ -1754,10 +1754,14 @@ button {
 }
 
 .bili-progress__bar {
+  position: relative;
   width: 48%;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #ff9f63, var(--brand));
+  overflow: hidden;
+  background: linear-gradient(90deg, #ff9f63 0%, #ffb36f 26%, var(--brand) 55%, #ff8ab0 100%);
+  background-size: 220% 100%;
+  animation: progress-shimmer 2.1s linear infinite;
   transition: width 180ms ease;
 }
 
@@ -1847,6 +1851,11 @@ button {
   0% { transform: translateX(-110%); }
   60% { transform: translateX(150%); }
   100% { transform: translateX(150%); }
+}
+
+@keyframes progress-shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
 }
 
 @keyframes pulse {

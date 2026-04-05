@@ -163,6 +163,21 @@ class VideoAnalysisRuleTests(unittest.TestCase):
         self.assertTrue(any("Una Mattina" in query for query in queries))
         self.assertFalse(any("爆款" in query or "高播放" in query or "高点赞" in query for query in queries))
 
+    def test_build_video_benchmark_profile_preserves_series_title_without_spaced_chinese_breakage(self) -> None:
+        resolved = {
+            "title": "《离 家 的 诱 惑》7.0",
+            "topic": "《离 家 的 诱 惑》7.0",
+            "partition": "life",
+            "partition_label": "生活",
+            "tname": "",
+            "keywords": ["搞笑", "高能", "蝙蝠侠", "DC联名"],
+        }
+
+        profile = build_video_benchmark_profile(resolved)
+
+        self.assertIn("离家的诱惑", profile["terms"])
+        self.assertTrue(any("离家的诱惑" in query for query in profile["queries"]))
+
     def test_build_video_benchmark_profile_expands_sea_harvest_lane_terms(self) -> None:
         resolved = {
             "title": "法国赶海遇蜘蛛蟹繁殖，徒手能抓十几只，浸油膏蟹鲜美",

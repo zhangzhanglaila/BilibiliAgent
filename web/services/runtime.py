@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from web.core.shared import *
+from web.services.llm import build_knowledge_base_status
+
 
 def has_saved_runtime_llm_config() -> bool:
     return bool((RUNTIME_LLM_CONFIG or {}).get("api_key", "").strip())
