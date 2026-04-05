@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from web.core.shared import *
-from web.services.llm import build_knowledge_base_status
 
 
 def has_saved_runtime_llm_config() -> bool:
@@ -108,6 +107,8 @@ def run_knowledge_update_job(job_id: str, limit: int) -> None:
             update_knowledge_update_job(job_id, progress)
 
         result = update_chroma_knowledge_base(per_board_limit=limit, progress_callback=progress_callback)
+        from web.services.llm import build_knowledge_base_status
+
         clear_active_knowledge_update_job(job_id)
         update_knowledge_update_job(
             job_id,

@@ -411,7 +411,7 @@ def finalize_module_analyze_result(result: dict, resolved: dict, market_snapshot
 # 在 LLM Agent 模式下执行内容创作模块的完整生成流程。
 @traceable(run_type="chain", name="web.run_llm_module_create", tags=["web", "llm", "rag", "module_create"])
 def run_llm_module_create(data: dict) -> dict:
-    agent = get_llm_workspace_agent()
+    agent = app_exports().get_llm_workspace_agent()
     default_style = (data.get("style") or "干货").strip() or "干货"
     preloaded_context = load_creator_preprocessed_context(data)
     response_contract = (
@@ -435,11 +435,12 @@ def run_llm_module_create(data: dict) -> dict:
             "partition": (data.get("partition") or "knowledge").strip() or "knowledge",
             "style": (data.get("style") or "干货").strip() or "干货",
             "preloaded_context": preloaded_context,
-            "memory_user_id": "web_module_create",
         },
         response_contract=response_contract,
         allowed_tools=allowed_tools_for_scene("module_create"),
         required_final_keys=["normalized_profile", "seed_topic", "partition", "style", "chosen_topic", "topic_result", "copy_result"],
+        load_history=False,
+        save_memory=False,
         )
         copy_topic = (
             clean_copy_text(result.get("chosen_topic", ""))
@@ -646,7 +647,7 @@ def run_llm_module_analyze(
 
 @traceable(run_type="chain", name="web.run_llm_chat", tags=["web", "llm", "rag", "workspace_chat"])
 def run_llm_chat(data: dict) -> dict:
-    agent = get_llm_workspace_agent()
+    agent = app_exports().get_llm_workspace_agent()
     message = (data.get("message") or "").strip()
     history = data.get("history") if isinstance(data.get("history"), list) else []
     context = data.get("context") if isinstance(data.get("context"), dict) else {}

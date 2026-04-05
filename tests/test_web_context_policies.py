@@ -22,6 +22,7 @@ from web.app import (
     build_video_analyze_preloaded_context,
     execute_module_analyze_request,
     finalize_module_analyze_result,
+    run_llm_module_create,
     run_llm_module_analyze,
     video_analyze_action_validator,
     video_analyze_retrieval_tool_handler,
@@ -255,6 +256,36 @@ class WebContextPolicyTests(unittest.TestCase):
         self.assertNotIn("market_snapshot", kwargs["user_payload"])
         self.assertIn("preloaded_context", kwargs["user_payload"])
         self.assertEqual(kwargs["user_payload"]["preloaded_context"]["video"]["bv_id"], resolved["bv_id"])
+
+    def test_run_llm_module_create_disables_memory(self) -> None:
+        fake_agent = Mock()
+        fake_agent.run_structured.return_value = {
+            "normalized_profile": "AI效率",
+            "seed_topic": "AI剪辑提效",
+            "partition": "knowledge",
+            "style": "干货",
+            "chosen_topic": "AI自动剪辑怎么真正省时间",
+            "topic_result": {"ideas": []},
+            "copy_result": {"topic": "AI自动剪辑怎么真正省时间", "style": "干货"},
+        }
+
+        with patch("web.app.get_llm_workspace_agent", return_value=fake_agent):
+            result = run_llm_module_create(
+                {
+                    "field": "AI效率",
+                    "direction": "教程",
+                    "idea": "自动剪辑",
+                    "partition": "knowledge",
+                    "style": "干货",
+                }
+            )
+
+        self.assertEqual(result["partition"], "knowledge")
+        kwargs = fake_agent.run_structured.call_args.kwargs
+        self.assertFalse(kwargs["load_history"])
+        self.assertFalse(kwargs["save_memory"])
+        self.assertNotIn("memory_user_id", kwargs["user_payload"])
+        self.assertIn("preloaded_context", kwargs["user_payload"])
 
     def test_build_module_analyze_reference_videos_drops_unrelated_retrieval_hits(self) -> None:
         resolved = {
