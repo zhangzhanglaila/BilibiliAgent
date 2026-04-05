@@ -1,7 +1,7 @@
 """Flask web entry for the Bilibili content ideation and analysis workspace."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from copy import deepcopy
 import gzip
 import json
@@ -17,7 +17,7 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -147,7 +147,32 @@ SEA_HARVEST_TARGET_KEYWORDS = (
     "八爪鱼",
     "章鱼",
     "海兔",
+    "蜘蛛蟹",
     "海货",
+)
+OVERSEAS_REFERENCE_LOCATION_TERMS = (
+    "海外",
+    "国外",
+    "法国",
+    "英国",
+    "德国",
+    "意大利",
+    "西班牙",
+    "葡萄牙",
+    "日本",
+    "韩国",
+    "泰国",
+    "越南",
+    "马来西亚",
+    "新加坡",
+    "印尼",
+    "美国",
+    "加拿大",
+    "澳大利亚",
+    "新西兰",
+    "挪威",
+    "冰岛",
+    "俄罗斯",
 )
 ANALYSIS_TOPIC_BAD_TAILS = (
     "换成",
@@ -160,6 +185,21 @@ ANALYSIS_TOPIC_BAD_TAILS = (
     "切口测试",
     "起步版",
     "更清楚",
+)
+NARRATIVE_REFERENCE_KEYWORDS = (
+    "网络喷子",
+    "网暴",
+    "蹲守",
+    "跟踪",
+    "喷子",
+    "人性",
+    "潜伏",
+    "线下见面",
+    "线下",
+    "见面",
+    "曝光",
+    "反转",
+    "真实故事",
 )
 VIDEO_KEYWORD_STOPWORDS = {
     "哔哩哔哩",
@@ -331,6 +371,84 @@ def append_benchmark_query(queries: list[str], seen: set[str], parts: list[str])
     seen.add(marker)
     queries.append(value)
 
+
+def normalize_benchmark_term(value: object) -> str:
+    clean = re.sub(r"\s+", " ", str(value or "").strip()).strip(" ，,。.;；:-_|")
+    marker = clean.lower()
+    if len(clean) < 2 or marker in VIDEO_BENCHMARK_QUERY_STOPWORDS or clean in VIDEO_BENCHMARK_WEAK_TERMS:
+        return ""
+    return clean
+
+
+def append_benchmark_term(terms: list[str], value: object, limit: int = 8) -> None:
+    clean = normalize_benchmark_term(value)
+    marker = clean.lower()
+    if not clean or marker in {item.lower() for item in terms}:
+        return
+    if any(marker != existing.lower() and marker in existing.lower() for existing in terms):
+        return
+    terms.append(clean)
+    if limit > 0 and len(terms) > limit:
+        del terms[limit:]
+
+
+def extract_geo_reference_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    source_text = str(text or "")
+    for token in OVERSEAS_REFERENCE_LOCATION_TERMS:
+        if token in source_text:
+            append_benchmark_term(terms, token, limit=4)
+    for match in re.findall(r"([\u4e00-\u9fff]{2,4})(?:赶海|海边|海鲜|低潮|退潮)", source_text):
+        if match in {"田园美食", "海鲜收获", "赶海收获", "生活记录"}:
+            continue
+        append_benchmark_term(terms, match, limit=4)
+    return terms[:4]
+
+
+def extract_sea_harvest_reference_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    source_text = str(text or "")
+    for token in ("赶海", "海鲜", "海鲜收获"):
+        append_benchmark_term(terms, token)
+    geo_terms = extract_geo_reference_terms(source_text)
+    for token in geo_terms:
+        append_benchmark_term(terms, token)
+        if token in OVERSEAS_REFERENCE_LOCATION_TERMS:
+            append_benchmark_term(terms, "海外赶海")
+    for token in SEA_HARVEST_TARGET_KEYWORDS:
+        if token in source_text:
+            append_benchmark_term(terms, token)
+    for match in re.findall(r"(?:海参|章鱼|八爪鱼|[\u4e00-\u9fff]{1,4}[蟹虾鱼贝蛤螺蚝鲍])", source_text):
+        append_benchmark_term(terms, match)
+    if "繁殖" in source_text:
+        append_benchmark_term(terms, "繁殖潮")
+    return terms[:8]
+
+
+def extract_narrative_reference_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    source_text = str(text or "")
+    if "网络" in source_text and "喷子" in source_text:
+        append_benchmark_term(terms, "网络喷子")
+    if "线下" in source_text and "见面" in source_text:
+        append_benchmark_term(terms, "线下见面")
+    for token in NARRATIVE_REFERENCE_KEYWORDS:
+        if token in source_text:
+            append_benchmark_term(terms, token)
+    return terms[:8]
+
+
+def build_reference_match_terms(query_text: str = "", resolved: dict | None = None) -> list[str]:
+    terms: list[str] = []
+    if isinstance(resolved, dict):
+        profile = build_video_benchmark_profile(resolved)
+        append_benchmark_term(terms, profile.get("lane_label"), limit=24)
+        for term in profile.get("terms") or []:
+            append_benchmark_term(terms, term, limit=24)
+    for term in extract_reference_terms(query_text):
+        append_benchmark_term(terms, term, limit=24)
+    return terms[:24]
+
 RAW_TOPIC_AGENT = TopicAgent()
 RAW_COPY_AGENT = CopywritingAgent()
 KNOWLEDGE_BASE = KnowledgeBase(persist_directory=CONFIG.vector_db_path)
@@ -368,6 +486,9 @@ KNOWLEDGE_UPDATE_EXECUTION_LOCK = threading.Lock()
 KNOWLEDGE_UPDATE_JOBS: dict[str, dict] = {}
 KNOWLEDGE_UPDATE_ACTIVE_JOB_ID: str | None = None
 KNOWLEDGE_UPDATE_JOB_TTL_SECONDS = 60 * 60
+MODULE_ANALYZE_JOB_LOCK = threading.Lock()
+MODULE_ANALYZE_JOBS: dict[str, dict] = {}
+MODULE_ANALYZE_JOB_TTL_SECONDS = 60 * 60
 LLM_SCENE_ALLOWED_TOOLS = {
     "module_create": ["retrieval", "web_search"],
     "module_analyze": ["retrieval", "web_search"],
@@ -394,8 +515,12 @@ VIDEO_ANALYZE_HOT_PEER_RECENT_DAYS = 30
 VIDEO_ANALYZE_HOT_PEER_MIN_VIEW = 50000
 VIDEO_ANALYZE_HOT_PEER_MIN_LIKE = 1000
 VIDEO_ANALYZE_HOT_PEER_LIMIT = 6
+VIDEO_ANALYZE_HOT_PEER_RELAXED_RECENT_DAYS = 90
+VIDEO_ANALYZE_HOT_PEER_RELAXED_MIN_VIEW = 10000
+VIDEO_ANALYZE_HOT_PEER_RELAXED_MIN_LIKE = 300
+VIDEO_ANALYZE_MARKET_SNAPSHOT_PREFETCH_WAIT_SECONDS = 0.8
 VIDEO_ANALYZE_TASK_GOAL = (
-    "针对当前单个视频完成独立分析；当前视频结构化信息和同方向爆款对标样本已由后端预加载；"
+    "针对当前单个视频完成独立分析；当前视频结构化信息已由后端预加载，同方向爆款对标样本可能已预抓完成，也可能仍在异步加载；"
     "你必须先检索同赛道静态爆款样本；"
     "仅当样本不足时才联网补充，并输出爆款/低表现判断、评分、优化文案、脚本、题材方向和直接对标样本。"
 )
@@ -424,16 +549,16 @@ VIDEO_ANALYZE_SYSTEM_PROMPT = (
     "如果是低表现：对标同赛道样本，给出标题、封面、内容结构、标签、发布策略等全维度改进建议，并生成可直接使用的新文案与脚本。\n\n"
     "【工具调用链路】\n"
     "1. 当前输入里的 parsed_video 与 preloaded_context.video 已经是后端预加载的当前视频真实信息，不允许再重新解析当前视频，不允许调用 video_briefing。\n"
-    "2. 第一步必须调用 retrieval，检索同垂类、同赛道的静态爆款样本。query 必须优先参考 "
-    "preloaded_context.video.benchmark_queries 和 benchmark_terms，优先使用具体方向词，不要退化成“生活 / 记录 / 短视频”这类泛词。\n"
+    "2. 第一步必须调用 retrieval，检索同垂类、同赛道的静态爆款样本。query 必须优先直接复用 "
+    "preloaded_context.video.benchmark_queries 里的短查询，并参考 benchmark_terms；不要把原标题拆成十几个碎词，也不要退化成“生活 / 记录 / 短视频”这类泛词。\n"
     "3. preloaded_context.market_snapshot.peer_samples 是代码预抓的同方向爆款对标视频，不是同 UP 样本，也不是 LLM 生成内容；"
-    "如果这里非空，analysis.benchmark_analysis.benchmark_videos 必须优先引用这些样本。\n"
+    "如果这里非空，analysis.benchmark_analysis.benchmark_videos 必须优先引用这些样本；如果这里为空，允许先基于 retrieval 完成分析，但绝对禁止编造不存在的视频、BV 号或 UP 主。\n"
     "4. 禁止输出任何“先重新解析当前视频 / 调 video_briefing / 再看一次当前视频详情”之类的计划，因为当前视频已解析完成。\n"
     "5. 只有当 retrieval 返回样本不足时，才允许调用 web_search 搜索最新赛道规则或补充案例。\n"
     "6. 所有工具调用完成后直接输出 final 结构化结果，禁止无意义循环。\n\n"
     "【判定要求】\n"
     "1. 必须明确输出 performance.score，并给出爆款/低表现结论。\n"
-    "2. analysis.benchmark_analysis.benchmark_videos 必须尽量给出同赛道直接对标参考视频。\n"
+    "2. analysis.benchmark_analysis.benchmark_videos 只能填写真实、可打开、可核验的同赛道参考视频；拿不到就返回空数组。\n"
     "3. 必须生成符合当前视频内容的新标题、优化文案脚本、下一批优先题材、具体封面建议和内容建议。\n"
     "4. 仅输出 JSON 对象，不要输出 markdown 和解释。"
 )
@@ -616,6 +741,171 @@ def start_knowledge_update_job(limit: int) -> tuple[dict | None, bool, str]:
         name=f"knowledge-update-{job_id[:8]}",
     ).start()
     return snapshot, False, ""
+
+
+def snapshot_module_analyze_job(job: dict | None) -> dict | None:
+    if not job:
+        return None
+    payload = deepcopy(job)
+    payload.pop("updated_at_ts", None)
+    return payload
+
+
+def cleanup_module_analyze_jobs_locked() -> None:
+    expires_before = time.time() - MODULE_ANALYZE_JOB_TTL_SECONDS
+    expired_job_ids = [
+        job_id
+        for job_id, job in MODULE_ANALYZE_JOBS.items()
+        if str(job.get("status") or "") not in {"queued", "running"}
+        and float(job.get("updated_at_ts") or 0) < expires_before
+    ]
+    for job_id in expired_job_ids:
+        MODULE_ANALYZE_JOBS.pop(job_id, None)
+
+
+def get_module_analyze_job(job_id: str) -> dict | None:
+    with MODULE_ANALYZE_JOB_LOCK:
+        cleanup_module_analyze_jobs_locked()
+        return snapshot_module_analyze_job(MODULE_ANALYZE_JOBS.get(job_id))
+
+
+def update_module_analyze_job(job_id: str, payload: dict) -> dict | None:
+    with MODULE_ANALYZE_JOB_LOCK:
+        job = MODULE_ANALYZE_JOBS.get(job_id)
+        if job is None:
+            return None
+        job.update(payload)
+        job["id"] = job_id
+        job["version"] = safe_int(job.get("version")) + 1
+        job["updated_at"] = now_text()
+        job["updated_at_ts"] = time.time()
+        if str(job.get("status") or "") in {"completed", "failed"} and not job.get("completed_at"):
+            job["completed_at"] = job["updated_at"]
+        return snapshot_module_analyze_job(job)
+
+
+def emit_module_analyze_progress(
+    progress_callback,
+    *,
+    stage: str,
+    percent: float,
+    message: str,
+    **extra,
+) -> None:
+    if not callable(progress_callback):
+        return
+    payload = {
+        "stage": stage,
+        "percent": float(percent),
+        "message": message,
+    }
+    payload.update(extra)
+    progress_callback(payload)
+
+
+def build_sse_event(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def run_module_analyze_job(job_id: str, data: dict) -> None:
+    try:
+        update_module_analyze_job(
+            job_id,
+            {
+                "status": "running",
+                "stage": "prepare",
+                "percent": 0.0,
+                "message": "正在准备视频分析任务",
+                "started_at": now_text(),
+            },
+        )
+
+        def progress_callback(progress: dict) -> None:
+            update_module_analyze_job(job_id, progress)
+
+        result = execute_module_analyze_request(data, progress_callback=progress_callback)
+        update_module_analyze_job(
+            job_id,
+            {
+                "status": "completed",
+                "stage": "completed",
+                "percent": 100.0,
+                "message": "视频分析已完成",
+                "resolved": result.get("resolved"),
+                "result": result,
+                "error": "",
+                "payload": {},
+                "http_status": 200,
+                "reference_sample_count": len(result.get("reference_videos") or []),
+                "runtime_mode": result.get("runtime_mode") or runtime_mode(),
+            },
+        )
+    except ModuleAnalyzeRequestError as exc:
+        job = get_module_analyze_job(job_id) or {}
+        update_module_analyze_job(
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "percent": float(job.get("percent") or 0.0),
+                "message": exc.message,
+                "error": exc.message,
+                "payload": exc.payload,
+                "http_status": exc.status_code,
+            },
+        )
+    except Exception as exc:
+        job = get_module_analyze_job(job_id) or {}
+        message = f"视频分析失败：{exc}"
+        update_module_analyze_job(
+            job_id,
+            {
+                "status": "failed",
+                "stage": "failed",
+                "percent": float(job.get("percent") or 0.0),
+                "message": message,
+                "error": message,
+                "payload": {},
+                "http_status": 500,
+            },
+        )
+
+
+def start_module_analyze_job(data: dict) -> dict:
+    with MODULE_ANALYZE_JOB_LOCK:
+        cleanup_module_analyze_jobs_locked()
+        job_id = uuid4().hex
+        created_at = now_text()
+        MODULE_ANALYZE_JOBS[job_id] = {
+            "id": job_id,
+            "status": "queued",
+            "stage": "queued",
+            "percent": 0.0,
+            "message": "视频分析任务已创建，等待执行",
+            "url": str((data or {}).get("url") or "").strip(),
+            "created_at": created_at,
+            "started_at": "",
+            "updated_at": created_at,
+            "updated_at_ts": time.time(),
+            "completed_at": "",
+            "version": 0,
+            "resolved": None,
+            "result": None,
+            "error": "",
+            "payload": {},
+            "http_status": 200,
+            "reference_sample_count": 0,
+            "runtime_mode": runtime_mode(),
+        }
+        snapshot = snapshot_module_analyze_job(MODULE_ANALYZE_JOBS[job_id]) or {}
+
+    threading.Thread(
+        target=run_module_analyze_job,
+        args=(job_id, dict(data or {})),
+        daemon=True,
+        name=f"module-analyze-{job_id[:8]}",
+    ).start()
+    return snapshot
 
 
 # 判断当前开关状态下是否真正启用了 LLM Agent 模式。
@@ -2203,6 +2493,14 @@ def build_llm_runtime_reconfigure_data(reason: str) -> dict:
     }
 
 
+class ModuleAnalyzeRequestError(Exception):
+    def __init__(self, message: str, status_code: int = 400, payload: dict | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.payload = dict(payload or {})
+
+
 # 把 VideoMetrics 或同结构对象展开成普通字典。
 def serialize_video_metric(video_metric: object) -> dict:
     payload = video_metric.to_dict() if hasattr(video_metric, "to_dict") else dict(video_metric)
@@ -2314,34 +2612,64 @@ def build_video_benchmark_profile(resolved: dict) -> dict:
     combined_text = " ".join([title, topic, tname, partition_label, *raw_keywords])
     effective_partition = str(resolved.get("partition") or "").strip()
     lane_label = tname or partition_label
+    query_lane_label = normalize_benchmark_term(lane_label)
     if looks_like_music_reference(combined_text):
         effective_partition = "ent"
         lane_label = "音乐"
+        query_lane_label = "音乐"
         if "钢琴" in combined_text and "钢琴" not in keywords:
             keywords.insert(0, "钢琴")
 
     terms: list[str] = []
-    for term in keywords + latin_phrases + title_terms:
-        clean = re.sub(r"\s+", " ", str(term or "").strip()).strip(" ，,。.;；:-_|")
-        marker = clean.lower()
-        if (
-            len(clean) < 2
-            or marker in VIDEO_BENCHMARK_QUERY_STOPWORDS
-            or clean in VIDEO_BENCHMARK_WEAK_TERMS
-            or clean in terms
-        ):
-            continue
-        if any(marker != existing.lower() and marker in existing.lower() for existing in terms):
-            continue
-        terms.append(clean)
-        if len(terms) >= 6:
+    append_benchmark_term(terms, query_lane_label)
+    short_keywords = [keyword for keyword in keywords if 2 <= len(keyword) <= 10]
+    sea_harvest_terms = any(token in combined_text for token in SEA_HARVEST_KEYWORDS)
+    narrative_terms = extract_narrative_reference_terms(combined_text)
+    if sea_harvest_terms:
+        for term in extract_sea_harvest_reference_terms(combined_text):
+            append_benchmark_term(terms, term)
+    else:
+        for term in narrative_terms:
+            append_benchmark_term(terms, term)
+    for term in short_keywords + latin_phrases + title_terms + keywords:
+        append_benchmark_term(terms, term)
+        if len(terms) >= 8:
             break
 
     queries: list[str] = []
     seen_queries: set[str] = set()
-    append_benchmark_query(queries, seen_queries, [lane_label, *terms[:2]])
+    geo_terms = extract_geo_reference_terms(combined_text)
+    sea_terms = [term for term in terms if term in extract_sea_harvest_reference_terms(combined_text)]
+    if sea_harvest_terms:
+        append_benchmark_query(queries, seen_queries, [query_lane_label, "赶海", "海鲜收获"])
+        if any(term in OVERSEAS_REFERENCE_LOCATION_TERMS for term in geo_terms):
+            append_benchmark_query(queries, seen_queries, ["海外赶海", "海鲜收获"])
+        if geo_terms:
+            append_benchmark_query(
+                queries,
+                seen_queries,
+                [
+                    geo_terms[0],
+                    "赶海",
+                    next(
+                        (
+                            term
+                            for term in sea_terms
+                            if term not in {"赶海", "海鲜", "海鲜收获", "海外赶海", *geo_terms}
+                        ),
+                        "海鲜",
+                    ),
+                ],
+            )
+        append_benchmark_query(queries, seen_queries, ["赶海", "海鲜", next((term for term in sea_terms if term not in {"赶海", "海鲜", "海鲜收获", "海外赶海"}), "收获")])
+    elif narrative_terms:
+        if "网络喷子" in narrative_terms:
+            append_benchmark_query(queries, seen_queries, ["网络喷子", "人性"])
+            append_benchmark_query(queries, seen_queries, ["网络喷子", "线下见面"])
+        append_benchmark_query(queries, seen_queries, narrative_terms[:3])
+    append_benchmark_query(queries, seen_queries, [query_lane_label, *terms[1:3]])
     append_benchmark_query(queries, seen_queries, terms[:3])
-    append_benchmark_query(queries, seen_queries, [terms[0], terms[1], terms[2] if len(terms) > 2 else ""] if terms else [])
+    append_benchmark_query(queries, seen_queries, terms[:2])
     if title:
         append_benchmark_query(queries, seen_queries, [title[:32]])
     if not queries:
@@ -2351,7 +2679,7 @@ def build_video_benchmark_profile(resolved: dict) -> dict:
         "effective_partition": effective_partition or str(resolved.get("partition") or "").strip(),
         "effective_partition_label": PARTITION_LABELS.get(effective_partition, effective_partition) if effective_partition else partition_label,
         "lane_label": lane_label or partition_label,
-        "terms": terms[:6],
+        "terms": terms[:8],
         "queries": queries[:4],
     }
 
@@ -2359,6 +2687,69 @@ def build_video_benchmark_profile(resolved: dict) -> dict:
 # 为视频分析模块构造“同方向爆款”检索词，避免退化成同 UP 样本。
 def build_video_benchmark_queries(resolved: dict) -> list[str]:
     return list(build_video_benchmark_profile(resolved).get("queries") or [])
+
+
+def fetch_hot_peer_samples_with_relaxed_backfill(
+    queries: list[str],
+    *,
+    exclude_bvid: str,
+    limit: int,
+) -> list[dict]:
+    normalized_queries = [str(query or "").strip() for query in queries if str(query or "").strip()]
+    if not normalized_queries:
+        return []
+
+    candidates: list[dict] = []
+    seen: set[str] = set()
+
+    def extend(items: list[dict]) -> None:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            bvid = normalize_text_value(item.get("bvid"))
+            url = normalize_text_value(item.get("url"))
+            identity = bvid.lower() if bvid else url
+            if not identity or identity in seen:
+                continue
+            seen.add(identity)
+            candidates.append(item)
+            if len(candidates) >= limit:
+                return
+
+    try:
+        strict_samples = RAW_TOPIC_AGENT.fetch_hot_peer_videos(
+            normalized_queries,
+            exclude_bvid=exclude_bvid,
+            limit=limit,
+            recent_days=VIDEO_ANALYZE_HOT_PEER_RECENT_DAYS,
+            min_view=VIDEO_ANALYZE_HOT_PEER_MIN_VIEW,
+            min_like=VIDEO_ANALYZE_HOT_PEER_MIN_LIKE,
+        )
+    except Exception:
+        strict_samples = []
+    try:
+        extend([serialize_video_metric(item) for item in strict_samples])
+    except Exception:
+        pass
+    if len(candidates) >= limit:
+        return candidates[:limit]
+
+    try:
+        relaxed_samples = RAW_TOPIC_AGENT.fetch_hot_peer_videos(
+            normalized_queries,
+            exclude_bvid=exclude_bvid,
+            limit=max(limit * 2, 8),
+            recent_days=VIDEO_ANALYZE_HOT_PEER_RELAXED_RECENT_DAYS,
+            min_view=VIDEO_ANALYZE_HOT_PEER_RELAXED_MIN_VIEW,
+            min_like=VIDEO_ANALYZE_HOT_PEER_RELAXED_MIN_LIKE,
+        )
+    except Exception:
+        relaxed_samples = []
+    try:
+        extend([serialize_video_metric(item) for item in relaxed_samples])
+    except Exception:
+        pass
+    return candidates[:limit]
 
 
 # 仅为视频分析模块预抓同方向爆款对标样本，不混入同 UP 数据。
@@ -2379,18 +2770,15 @@ def build_hot_peer_market_snapshot(resolved: dict) -> dict:
         ranking_resolved["keywords"] = list(profile.get("terms") or [])
     query_text = " ".join([str(profile.get("lane_label") or "").strip(), *list(profile.get("terms") or [])]).strip()
     try:
-        raw_samples = RAW_TOPIC_AGENT.fetch_hot_peer_videos(
+        raw_samples = fetch_hot_peer_samples_with_relaxed_backfill(
             queries,
             exclude_bvid=resolved.get("bv_id", ""),
             limit=VIDEO_ANALYZE_HOT_PEER_LIMIT,
-            recent_days=VIDEO_ANALYZE_HOT_PEER_RECENT_DAYS,
-            min_view=VIDEO_ANALYZE_HOT_PEER_MIN_VIEW,
-            min_like=VIDEO_ANALYZE_HOT_PEER_MIN_LIKE,
         )
         peer_samples = []
-        for item in raw_samples[: VIDEO_ANALYZE_HOT_PEER_LIMIT * 2]:
+        for item in raw_samples[: VIDEO_ANALYZE_HOT_PEER_LIMIT * 3]:
             candidate = {
-                **serialize_video_metric(item),
+                **dict(item or {}),
                 "partition": snapshot["partition"],
                 "partition_label": snapshot["partition_label"],
             }
@@ -2534,19 +2922,28 @@ def has_strict_reference_signal(resolved: dict | None = None, query_text: str = 
 def build_reference_query_text(resolved: dict | None = None, extra_text: str = "") -> str:
     parts: list[str] = []
     if isinstance(resolved, dict):
-        keywords = extract_video_keywords(resolved.get("keywords"))
+        profile = build_video_benchmark_profile(resolved)
+        lane_label = normalize_benchmark_term(profile.get("lane_label"))
+        keywords = [normalize_benchmark_term(item) for item in (profile.get("terms") or [])]
+        keywords = [item for item in keywords if item]
+        if lane_label:
+            keywords = [item for item in keywords if item != lane_label]
         semantic_values: list[str] = []
 
-        for key in ("topic", "tname", "partition_label"):
-            value = (resolved.get(key) or "").strip()
+        for value in (lane_label, resolved.get("topic")):
+            value = str(value or "").strip()
             if value:
                 semantic_values.append(value)
 
         if keywords:
-            semantic_values.append(" ".join(keywords[:3]))
+            semantic_values.append(" ".join(keywords[:4]))
+        else:
+            fallback_keywords = extract_video_keywords(resolved.get("keywords"))
+            if fallback_keywords:
+                semantic_values.append(" ".join(fallback_keywords[:3]))
 
         title = (resolved.get("title") or "").strip()
-        if title and has_semantic_reference_title(title, keywords=keywords):
+        if title and has_semantic_reference_title(title, keywords=keywords) and not keywords:
             semantic_values.append(title)
 
         for value in semantic_values:
@@ -2613,9 +3010,15 @@ def build_reference_search_queries(query_text: str = "", resolved: dict | None =
     has_semantic_keywords = False
 
     if isinstance(resolved, dict):
+        profile = build_video_benchmark_profile(resolved)
         base_topic = (resolved.get("topic") or resolved.get("title") or "").strip()
-        partition_label = (resolved.get("partition_label") or resolved.get("tname") or "").strip()
-        keywords = extract_video_keywords(resolved.get("keywords"))
+        partition_label = normalize_benchmark_term(profile.get("lane_label")) or (
+            resolved.get("partition_label") or resolved.get("tname") or ""
+        ).strip()
+        keywords = [term for term in profile.get("terms") or [] if normalize_benchmark_term(term)]
+
+        for query in profile.get("queries") or []:
+            queries.append(query)
 
         if keywords:
             has_semantic_keywords = True
@@ -2961,7 +3364,7 @@ def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict 
     normalized_semantic_text = build_reference_semantic_text(item)
     title_terms = set(extract_reference_terms(item.get("title", "")))
     semantic_terms = set(extract_reference_terms(normalized_semantic_text))
-    query_terms = extract_reference_terms(query_text)
+    query_terms = build_reference_match_terms(query_text=query_text, resolved=resolved)
     matched_terms: list[str] = []
 
     for term in query_terms:
@@ -2969,15 +3372,18 @@ def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict 
             matched_terms.append(term)
 
     resolved = resolved or {}
+    benchmark_profile = build_video_benchmark_profile(resolved) if resolved else {}
+    lane_terms = set(extract_reference_terms(str(benchmark_profile.get("lane_label") or "")))
     target_keywords = extract_video_keywords(resolved.get("keywords"))
-    matched_keywords: list[str] = []
-    for keyword in target_keywords:
-        normalized_keyword = normalize_reference_text(keyword)
-        if normalized_keyword and normalized_keyword in normalized_semantic_text:
-            matched_keywords.append(keyword)
-
-    overlap_score = sum(len(term) * len(term) for term in matched_terms)
-    strong_match_count = sum(1 for term in matched_terms if len(term) >= 4)
+    target_keyword_terms = build_reference_match_terms(" ".join(target_keywords))
+    matched_keywords = [
+        term
+        for term in target_keyword_terms
+        if term in title_terms or term in semantic_terms or term in normalized_semantic_text
+    ]
+    core_matched_terms = [term for term in matched_terms if term not in lane_terms]
+    overlap_score = sum(len(term) * len(term) for term in core_matched_terms)
+    strong_match_count = sum(1 for term in core_matched_terms if len(term) >= 3)
     same_up = 1 if safe_int(item.get("mid")) and safe_int(item.get("mid")) == safe_int(resolved.get("mid")) else 0
     same_author = 1 if (item.get("author") or "").strip() == (resolved.get("up_name") or "").strip() else 0
     target_partition = str(resolved.get("partition") or "").strip()
@@ -2999,9 +3405,16 @@ def build_reference_rank_entry(item: dict, query_text: str = "", resolved: dict 
         source_priority = -1
 
     strict_signal = has_strict_reference_signal(resolved, query_text)
-    partition_aligned = not strict_signal or not target_partition or not item_partition or same_partition == 1
-    keyword_aligned = not strict_signal or not target_keywords or bool(matched_keywords)
-    is_related = (bool(matched_terms) and partition_aligned and keyword_aligned) or bool(same_up) or bool(same_author)
+    broad_life_story = target_partition == "life" and not normalize_benchmark_term(benchmark_profile.get("lane_label"))
+    partition_aligned = (
+        not strict_signal
+        or not target_partition
+        or not item_partition
+        or same_partition == 1
+        or (broad_life_story and (len(core_matched_terms) >= 2 or len(matched_keywords) >= 2))
+    )
+    semantic_aligned = bool(matched_keywords) or len(core_matched_terms) >= 2 or (strong_match_count >= 1 and len(core_matched_terms) >= 1)
+    is_related = (semantic_aligned and partition_aligned) or bool(same_up) or bool(same_author)
     rank_key = (
         1 if is_related else 0,
         len(matched_keywords),
@@ -3105,33 +3518,41 @@ def select_reference_videos(
         else (strong_related_pool, medium_related_pool, fallback_high_pool, related_pool, fallback_pool)
     )
 
+    def append_reference_card(item: dict) -> bool:
+        candidate = enrich_reference_video_for_display(item)
+        bvid = (candidate.get("bvid") or "").strip()
+        url = (candidate.get("url") or "").strip()
+        identity_keys = build_reference_identity_keys(candidate)
+        if not url or any(key in seen for key in identity_keys):
+            return False
+        if exclude_bvid and bvid.lower() == exclude_bvid.lower():
+            return False
+        if not has_complete_reference_display_metrics(candidate):
+            return False
+        for key in identity_keys:
+            seen.add(key)
+        result.append(
+            {
+                "title": candidate.get("title", ""),
+                "url": url,
+                "author": candidate.get("author", ""),
+                "cover": candidate.get("cover", ""),
+                "view": safe_int(candidate.get("view")),
+                "like": safe_optional_int(candidate.get("like")),
+                "like_rate": float(candidate.get("like_rate") or 0.0),
+                "source": candidate.get("source", ""),
+            }
+        )
+        return len(result) >= limit
+
     for pool in pools:
         for item in pool:
-            item = enrich_reference_video_for_display(item)
-            bvid = (item.get("bvid") or "").strip()
-            url = (item.get("url") or "").strip()
-            identity_keys = build_reference_identity_keys(item)
-            if not url or any(key in seen for key in identity_keys):
-                continue
-            if exclude_bvid and bvid.lower() == exclude_bvid.lower():
-                continue
-            if not has_complete_reference_display_metrics(item):
-                continue
-            for key in identity_keys:
-                seen.add(key)
-            result.append(
-                {
-                    "title": item.get("title", ""),
-                    "url": url,
-                    "author": item.get("author", ""),
-                    "cover": item.get("cover", ""),
-                    "view": safe_int(item.get("view")),
-                    "like": safe_optional_int(item.get("like")),
-                    "like_rate": float(item.get("like_rate") or 0.0),
-                    "source": item.get("source", ""),
-                }
-            )
-            if len(result) >= limit:
+            if append_reference_card(item):
+                return result
+    if strict_related_only and len(result) < limit:
+        related_fallback_pool = [item for _, _, item in ranked if "当前视频相关推荐" in str(item.get("source") or "")]
+        for item in related_fallback_pool:
+            if append_reference_card(item):
                 return result
     return result
 
@@ -3483,6 +3904,30 @@ def build_module_analyze_reference_videos(
             }
         )
         if len(result) >= 6:
+            return result
+    if len(result) >= 6:
+        return result[:6]
+
+    backfill_sources = retrieval_videos + market_videos
+    backfilled_videos = select_reference_videos(
+        backfill_sources,
+        exclude_bvid=exclude_bvid,
+        limit=6,
+        query_text=query_text,
+        resolved=resolved,
+    )
+    seen: set[str] = set()
+    for item in result:
+        for key in build_reference_identity_keys(item):
+            seen.add(key)
+    for item in backfilled_videos:
+        identity_keys = build_reference_identity_keys(item)
+        if identity_keys and any(key in seen for key in identity_keys):
+            continue
+        result.append(item)
+        for key in identity_keys:
+            seen.add(key)
+        if len(result) >= 6:
             break
     return result
 
@@ -3773,42 +4218,6 @@ def normalize_module_performance_payload(performance: object, resolved: dict) ->
     return normalized
 
 
-def normalize_benchmark_reference_videos(value: object, limit: int = 3) -> list[dict]:
-    payload = normalize_object_payload(value)
-    items = payload.get("benchmark_videos") if isinstance(payload.get("benchmark_videos"), list) else []
-    result: list[dict] = []
-    seen: set[str] = set()
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        bvid = normalize_text_value(item.get("bvid"))
-        url = normalize_text_value(item.get("url"))
-        if not url and re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE):
-            url = f"https://www.bilibili.com/video/{bvid}"
-        title = normalize_text_value(item.get("title"))
-        if not url or not title:
-            continue
-        identity = f"{bvid.lower()}|{url}" if bvid else url
-        if identity in seen:
-            continue
-        seen.add(identity)
-        result.append(
-            {
-                "title": title,
-                "url": url,
-                "author": normalize_text_value(item.get("author")),
-                "cover": normalize_text_value(item.get("cover")),
-                "view": safe_optional_int(item.get("view")),
-                "like": safe_optional_int(item.get("like")),
-                "like_rate": float(item.get("like_rate") or 0.0),
-                "source": normalize_text_value(item.get("source")),
-            }
-        )
-        if limit > 0 and len(result) >= limit:
-            break
-    return result
-
-
 def normalize_module_analysis_payload(
     result: dict,
     *,
@@ -3829,9 +4238,7 @@ def normalize_module_analysis_payload(
     publish_defaults = defaults.get("publish_strategy") or {}
 
     benchmark_analysis = normalize_named_list_payload(analysis.get("benchmark_analysis"), "common_structure_formulas", limit=3)
-    benchmark_analysis["benchmark_videos"] = (
-        reference_videos[:3] if reference_videos else normalize_benchmark_reference_videos(analysis.get("benchmark_analysis"))
-    )
+    benchmark_analysis["benchmark_videos"] = reference_videos[:3]
     benchmark_analysis["common_title_formulas"] = merge_text_lists(
         benchmark_analysis.get("common_title_formulas"),
         benchmark_defaults.get("common_title_formulas"),
@@ -3984,6 +4391,39 @@ def normalize_module_analysis_payload(
             limit=3,
         )
     return normalized_analysis
+
+
+def build_reference_videos_notice(reference_videos: list[dict], market_snapshot: dict) -> str:
+    if reference_videos:
+        return ""
+
+    peer_samples = market_snapshot.get("peer_samples") if isinstance(market_snapshot, dict) else []
+    source_count = safe_int((market_snapshot or {}).get("source_count")) if isinstance(market_snapshot, dict) else 0
+    if peer_samples or source_count:
+        return "当前题材公开可用的对标样本不足，暂未整理出可直接展示的参考视频。"
+    return "暂时无法获取对标样本，请稍后重试。"
+
+
+def get_prefetched_market_snapshot(
+    market_snapshot_future,
+    resolved: dict,
+    timeout_seconds: float | None,
+) -> tuple[dict, str]:
+    fallback_snapshot = build_empty_market_snapshot(resolved.get("partition", ""))
+    if not market_snapshot_future:
+        return fallback_snapshot, ""
+    try:
+        if timeout_seconds is None:
+            snapshot = market_snapshot_future.result()
+        else:
+            snapshot = market_snapshot_future.result(timeout=max(float(timeout_seconds or 0.0), 0.0))
+    except FutureTimeoutError:
+        return fallback_snapshot, "pending"
+    except Exception:
+        return fallback_snapshot, "error"
+    if isinstance(snapshot, dict):
+        return snapshot, ""
+    return fallback_snapshot, "error"
 
 
 # 从 Agent 工具调用记录里提取可直接展示的参考视频链接。
@@ -4386,8 +4826,6 @@ def finalize_module_analyze_result(result: dict, resolved: dict, market_snapshot
         optimize_result=optimize_result,
         reference_videos=reference_videos,
     )
-    if not reference_videos:
-        reference_videos = list(((analysis.get("benchmark_analysis") or {}).get("benchmark_videos") or [])[:3])
     optimize_result["diagnosis"] = normalize_text_value(optimize_result.get("diagnosis")) or normalize_text_value(
         performance.get("summary")
     )
@@ -4423,6 +4861,7 @@ def finalize_module_analyze_result(result: dict, resolved: dict, market_snapshot
             resolved.get("style", "干货"),
         )
     payload["reference_videos"] = reference_videos
+    payload["reference_videos_notice"] = build_reference_videos_notice(reference_videos, market_snapshot)
     payload.setdefault("runtime_mode", "llm_agent")
     return payload
 
@@ -4538,7 +4977,32 @@ def run_llm_module_create_fallback(data: dict) -> dict:
 # 在 LLM Agent 模式下执行视频分析模块的完整分析流程。
 # 当分析 Agent 中枢不可用时，直接用单次 LLM 调用回退生成分析结果。
 @traceable(run_type="chain", name="web.run_llm_module_analyze_fallback", tags=["web", "llm", "fallback", "module_analyze"])
-def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot: dict) -> dict:
+def run_llm_module_analyze_fallback(
+    data: dict,
+    resolved: dict,
+    market_snapshot: dict,
+    market_snapshot_future=None,
+    progress_callback=None,
+) -> dict:
+    if market_snapshot_future:
+        market_snapshot, prefetch_state = get_prefetched_market_snapshot(market_snapshot_future, resolved, None)
+        sample_count = safe_int(market_snapshot.get("source_count"))
+        if sample_count > 0:
+            emit_module_analyze_progress(
+                progress_callback,
+                stage="reference_videos_ready",
+                percent=82.0,
+                message=f"已获取 {sample_count} 个对标爆款视频",
+                reference_sample_count=sample_count,
+            )
+        elif prefetch_state == "error":
+            emit_module_analyze_progress(
+                progress_callback,
+                stage="reference_videos_failed",
+                percent=82.0,
+                message="对标样本加载失败，正在整理回退分析结果",
+                reference_sample_count=0,
+            )
     llm = build_runtime_llm_client()
     llm.require_available()
     baseline_performance = classify_video_performance(resolved)
@@ -4580,7 +5044,13 @@ def run_llm_module_analyze_fallback(data: dict, resolved: dict, market_snapshot:
 
 # 运行视频分析模块，让 LLM Agent 按既定工具链完成单次独立分析。
 @traceable(run_type="chain", name="web.run_llm_module_analyze", tags=["web", "llm", "rag", "module_analyze"])
-def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) -> dict:
+def run_llm_module_analyze(
+    data: dict,
+    resolved: dict,
+    market_snapshot: dict,
+    market_snapshot_future=None,
+    progress_callback=None,
+) -> dict:
     agent = get_video_analyze_agent()
     url = (data.get("url") or "").strip()
     preloaded_context = build_video_analyze_preloaded_context(resolved, url, market_snapshot)
@@ -4592,7 +5062,6 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
                 "url": url,
                 "parsed_video": resolved,
                 "preloaded_context": preloaded_context,
-                "market_snapshot": market_snapshot,
             },
             response_contract=VIDEO_ANALYZE_RESPONSE_CONTRACT,
             allowed_tools=allowed_tools_for_scene("module_analyze"),
@@ -4605,6 +5074,25 @@ def run_llm_module_analyze(data: dict, resolved: dict, market_snapshot: dict) ->
             strict_required_tool_order=True,
             action_validator=video_analyze_action_validator,
         )
+        if market_snapshot_future:
+            market_snapshot, prefetch_state = get_prefetched_market_snapshot(market_snapshot_future, resolved, None)
+            sample_count = safe_int(market_snapshot.get("source_count"))
+            if sample_count > 0:
+                emit_module_analyze_progress(
+                    progress_callback,
+                    stage="reference_videos_ready",
+                    percent=82.0,
+                    message=f"已获取 {sample_count} 个对标爆款视频",
+                    reference_sample_count=sample_count,
+                )
+            elif prefetch_state == "error":
+                emit_module_analyze_progress(
+                    progress_callback,
+                    stage="reference_videos_failed",
+                    percent=82.0,
+                    message="对标样本加载失败，正在整理分析结果",
+                    reference_sample_count=0,
+                )
         return finalize_module_analyze_result(result, resolved, market_snapshot)
     except Exception as exc:
         if should_skip_same_provider_fallback(exc):
@@ -4665,6 +5153,219 @@ def run_llm_chat(data: dict) -> dict:
         query_text=chat_query_text,
     )
     return result
+
+
+def execute_module_analyze_request(data: dict, progress_callback=None) -> dict:
+    payload = dict(data or {})
+    url = (payload.get("url") or "").strip()
+    if not url:
+        raise ModuleAnalyzeRequestError("请先输入 B 站视频链接", 400)
+
+    emit_module_analyze_progress(
+        progress_callback,
+        stage="resolve_video",
+        percent=8.0,
+        message="正在解析视频信息...",
+    )
+    try:
+        resolved = payload.get("resolved") if is_resolved_payload_usable(payload.get("resolved"), url) else resolve_video_payload(url)
+    except Exception as exc:
+        raise ModuleAnalyzeRequestError(f"链接解析失败：{exc}", 400) from exc
+
+    emit_module_analyze_progress(
+        progress_callback,
+        stage="video_resolved",
+        percent=18.0,
+        message="已解析当前视频信息",
+        resolved=resolved,
+    )
+
+    if runtime_llm_enabled():
+        emit_module_analyze_progress(
+            progress_callback,
+            stage="load_reference_videos",
+            percent=28.0,
+            message="正在加载对标样本...",
+            resolved=resolved,
+        )
+        executor = ThreadPoolExecutor(max_workers=1)
+        market_snapshot_future = executor.submit(build_hot_peer_market_snapshot, resolved)
+        market_snapshot, prefetch_state = get_prefetched_market_snapshot(
+            market_snapshot_future,
+            resolved,
+            VIDEO_ANALYZE_MARKET_SNAPSHOT_PREFETCH_WAIT_SECONDS,
+        )
+        sample_count = safe_int(market_snapshot.get("source_count"))
+        if sample_count > 0:
+            emit_module_analyze_progress(
+                progress_callback,
+                stage="reference_videos_ready",
+                percent=40.0,
+                message=f"已获取 {sample_count} 个对标爆款视频",
+                reference_sample_count=sample_count,
+            )
+        elif prefetch_state == "pending":
+            emit_module_analyze_progress(
+                progress_callback,
+                stage="reference_videos_pending",
+                percent=40.0,
+                message="对标样本仍在加载，先继续检索本地知识库...",
+                reference_sample_count=0,
+            )
+        elif prefetch_state == "error":
+            emit_module_analyze_progress(
+                progress_callback,
+                stage="reference_videos_failed",
+                percent=40.0,
+                message="对标样本加载失败，先继续检索本地知识库...",
+                reference_sample_count=0,
+            )
+        else:
+            emit_module_analyze_progress(
+                progress_callback,
+                stage="reference_videos_sparse",
+                percent=40.0,
+                message="当前未拿到足够对标样本，先继续检索本地知识库...",
+                reference_sample_count=0,
+            )
+
+        try:
+            emit_module_analyze_progress(
+                progress_callback,
+                stage="retrieval_and_analysis",
+                percent=56.0,
+                message="正在检索本地知识库并分析视频...",
+            )
+            result = run_llm_module_analyze(
+                payload,
+                resolved,
+                market_snapshot,
+                market_snapshot_future=market_snapshot_future,
+                progress_callback=progress_callback,
+            )
+            emit_module_analyze_progress(
+                progress_callback,
+                stage="finalizing_result",
+                percent=94.0,
+                message="正在整理优化建议和参考视频...",
+                reference_sample_count=len(result.get("reference_videos") or []),
+            )
+            return result
+        except Exception as exc:
+            if should_skip_same_provider_fallback(exc):
+                message = (
+                    f"LLM Agent 分析失败：{format_llm_error(exc)} "
+                    "当前不会继续尝试同 provider 的 fallback，请稍后重试。"
+                )
+                raise ModuleAnalyzeRequestError(
+                    message,
+                    llm_error_http_status(exc),
+                    build_llm_runtime_reconfigure_data(message),
+                ) from exc
+
+            emit_module_analyze_progress(
+                progress_callback,
+                stage="fallback_analysis",
+                percent=72.0,
+                message="Agent 中枢执行失败，正在切换 LLM 直出分析...",
+            )
+            try:
+                fallback_result = run_llm_module_analyze_fallback(
+                    payload,
+                    resolved,
+                    market_snapshot,
+                    market_snapshot_future=market_snapshot_future,
+                    progress_callback=progress_callback,
+                )
+                fallback_result["llm_warning"] = f"Agent 中枢执行失败，已切换到 LLM 直出分析：{format_llm_error(exc)}"
+                emit_module_analyze_progress(
+                    progress_callback,
+                    stage="finalizing_result",
+                    percent=94.0,
+                    message="正在整理回退分析结果...",
+                    reference_sample_count=len(fallback_result.get("reference_videos") or []),
+                )
+                return fallback_result
+            except Exception as fallback_exc:
+                message = (
+                    f"LLM Agent 分析失败：{format_llm_error(exc)}；"
+                    f"LLM fallback 也失败：{format_llm_error(fallback_exc)}"
+                )
+                raise ModuleAnalyzeRequestError(
+                    message,
+                    llm_error_http_status(fallback_exc),
+                    build_llm_runtime_reconfigure_data(message),
+                ) from fallback_exc
+        finally:
+            executor.shutdown(wait=False)
+
+    emit_module_analyze_progress(
+        progress_callback,
+        stage="classify_performance",
+        percent=40.0,
+        message="正在判断视频表现...",
+    )
+    topic_result = run_topic(
+        partition_name=resolved.get("partition"),
+        up_ids=resolved.get("up_ids"),
+        seed_topic=resolved.get("topic"),
+    )
+    performance = classify_video_performance(resolved)
+
+    copy_result = None
+    optimize_result: dict = {}
+    analysis = {}
+    if performance["is_hot"]:
+        emit_module_analyze_progress(
+            progress_callback,
+            stage="generate_suggestions",
+            percent=72.0,
+            message="正在整理爆款原因和后续题材...",
+        )
+        analysis = build_hot_analysis(resolved, performance, topic_result)
+    else:
+        emit_module_analyze_progress(
+            progress_callback,
+            stage="generate_suggestions",
+            percent=72.0,
+            message="正在生成优化建议和文案...",
+        )
+        optimize_result = to_plain_data(build_rule_optimization_agent().run(resolved.get("bv_id", "BV1Demo411111")))
+        copy_result = to_plain_data(
+            build_rule_copy_agent().run(
+                topic=resolved.get("topic") or resolved.get("title") or "视频优化",
+                style=resolved.get("style", "干货"),
+            )
+        )
+        analysis = build_low_performance_analysis(resolved, performance, optimize_result, topic_result)
+
+    emit_module_analyze_progress(
+        progress_callback,
+        stage="finalizing_result",
+        percent=90.0,
+        message="正在整理参考视频和最终结果...",
+    )
+    reference_videos = select_reference_videos(
+        topic_result.get("videos", []),
+        exclude_bvid=resolved.get("bv_id", ""),
+        limit=6,
+        query_text=build_reference_query_text(resolved),
+        resolved=resolved,
+    )
+
+    return {
+        "resolved": resolved,
+        "performance": performance,
+        "topic_result": topic_result,
+        "optimize_result": optimize_result,
+        "copy_result": copy_result,
+        "analysis": analysis,
+        "reference_videos": reference_videos,
+        "reference_videos_notice": (
+            "" if reference_videos else "当前题材公开可用的对标样本不足，暂未整理出可直接展示的参考视频。"
+        ),
+        "runtime_mode": "rules",
+    }
 
 
 @app.get("/api/runtime-info")
@@ -4927,98 +5628,68 @@ def api_module_create():
 # 执行视频分析模块，根据运行模式返回规则或 LLM 分析结果。
 def api_module_analyze():
     data = request.get_json(silent=True) or {}
-    url = (data.get("url") or "").strip()
-    if not url:
-        return jsonify({"success": False, "error": "请先输入 B 站视频链接"}), 400
-
     try:
-        resolved = data.get("resolved") if is_resolved_payload_usable(data.get("resolved"), url) else resolve_video_payload(url)
+        result = execute_module_analyze_request(data)
+        return jsonify({"success": True, "data": result})
+    except ModuleAnalyzeRequestError as exc:
+        return jsonify({"success": False, "error": exc.message, "data": exc.payload}), exc.status_code
     except Exception as exc:
-        return jsonify({"success": False, "error": f"链接解析失败：{exc}"}), 400
+        return jsonify({"success": False, "error": f"视频分析失败：{exc}"}), 500
 
-    if runtime_llm_enabled():
-        market_snapshot = build_hot_peer_market_snapshot(resolved)
-        try:
-            return jsonify({"success": True, "data": run_llm_module_analyze(data, resolved, market_snapshot)})
-        except Exception as exc:
-            if should_skip_same_provider_fallback(exc):
-                message = (
-                    f"LLM Agent 分析失败：{format_llm_error(exc)} "
-                    "当前不会继续尝试同 provider 的 fallback，请稍后重试。"
-                )
-                return (
-                    jsonify(
-                        {
-                            "success": False,
-                            "error": message,
-                            "data": build_llm_runtime_reconfigure_data(message),
-                        }
-                    ),
-                    llm_error_http_status(exc),
-                )
-            try:
-                fallback_result = run_llm_module_analyze_fallback(data, resolved, market_snapshot)
-                fallback_result["llm_warning"] = f"Agent 中枢执行失败，已切换到 LLM 直出分析：{format_llm_error(exc)}"
-                return jsonify({"success": True, "data": fallback_result})
-            except Exception as fallback_exc:
-                message = (
-                    f"LLM Agent 分析失败：{format_llm_error(exc)}；"
-                    f"LLM fallback 也失败：{format_llm_error(fallback_exc)}"
-                )
-                return (
-                    jsonify(
-                        {
-                            "success": False,
-                            "error": message,
-                            "data": build_llm_runtime_reconfigure_data(message),
-                        }
-                    ),
-                    llm_error_http_status(fallback_exc),
-                )
 
-    topic_result = run_topic(
-        partition_name=resolved.get("partition"),
-        up_ids=resolved.get("up_ids"),
-        seed_topic=resolved.get("topic"),
-    )
-    performance = classify_video_performance(resolved)
+@app.post("/api/module-analyze/start")
+# 启动视频分析异步任务，供前端通过 SSE 订阅实时进度。
+def api_module_analyze_start():
+    data = request.get_json(silent=True) or {}
+    job = start_module_analyze_job(data)
+    return jsonify({"success": True, "data": {"job": job}})
 
-    copy_result = None
-    optimize_result: dict = {}
-    analysis = {}
-    if performance["is_hot"]:
-        analysis = build_hot_analysis(resolved, performance, topic_result)
-    else:
-        optimize_result = to_plain_data(build_rule_optimization_agent().run(resolved.get("bv_id", "BV1Demo411111")))
-        copy_result = to_plain_data(
-            build_rule_copy_agent().run(
-                topic=resolved.get("topic") or resolved.get("title") or "视频优化",
-                style=resolved.get("style", "干货"),
-            )
-        )
-        analysis = build_low_performance_analysis(resolved, performance, optimize_result, topic_result)
 
-    reference_videos = select_reference_videos(
-        topic_result.get("videos", []),
-        exclude_bvid=resolved.get("bv_id", ""),
-        limit=6,
-        query_text=build_reference_query_text(resolved),
-        resolved=resolved,
-    )
+@app.get("/api/module-analyze/jobs/<job_id>")
+# 返回指定视频分析任务的当前状态或最终结果。
+def api_module_analyze_job(job_id: str):
+    job = get_module_analyze_job(job_id.strip())
+    if not job:
+        return jsonify({"success": False, "error": "未找到对应的视频分析任务。"}), 404
+    return jsonify({"success": True, "data": job})
 
-    return jsonify(
-        {
-            "success": True,
-            "data": {
-                "resolved": resolved,
-                "performance": performance,
-                "topic_result": topic_result,
-                "optimize_result": optimize_result,
-                "copy_result": copy_result,
-                "analysis": analysis,
-                "reference_videos": reference_videos,
-            },
-        }
+
+@app.get("/api/module-analyze/jobs/<job_id>/events")
+# 通过 SSE 持续推送视频分析任务的阶段进度。
+def api_module_analyze_job_events(job_id: str):
+    job_id = job_id.strip()
+    if not get_module_analyze_job(job_id):
+        return jsonify({"success": False, "error": "未找到对应的视频分析任务。"}), 404
+
+    @stream_with_context
+    def generate():
+        last_version = -1
+        yield "retry: 1000\n\n"
+        while True:
+            job = get_module_analyze_job(job_id)
+            if not job:
+                yield build_sse_event("error", {"error": "未找到对应的视频分析任务。"})
+                break
+            version = safe_int(job.get("version"))
+            status = str(job.get("status") or "")
+            if version != last_version:
+                event_name = "done" if status in {"completed", "failed"} else "progress"
+                yield build_sse_event(event_name, job)
+                last_version = version
+                if status in {"completed", "failed"}:
+                    break
+            else:
+                yield ": keep-alive\n\n"
+            time.sleep(0.5)
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 

@@ -44,6 +44,10 @@ const state = {
   introCollapse: 0,
   sceneTicking: false,
   progressJobs: {},
+  analyzeTask: {
+    id: '',
+    eventSource: null,
+  },
   activeModule: 'analyze',
   knowledgeActiveSubtab: 'upload',
   knowledgeStatus: null,
@@ -1316,12 +1320,18 @@ function referenceGrid(items = [], compact = false) {
 }
 
 // 生成参考视频区块，统一处理空状态和说明文案。
-function referenceSection(items = [], title = '可直接参考的高表现视频', desc = '点击卡片可直接打开当前做得好的视频页面。') {
+function referenceSection(
+  items = [],
+  title = '可直接参考的高表现视频',
+  desc = '点击卡片可直接打开当前做得好的视频页面。',
+  notice = '',
+) {
   const grid = referenceGrid(items, false);
+  const emptyDesc = notice || '当前已优先按视频标题和主题检索同题材高表现视频；如果这一区块为空，通常是公开搜索结果过少或题材过窄。';
   return `
     <section class="copy-block" id="videoReferenceSection">
       <div class="block-title"><div><h4>${escapeHtml(title)}</h4><p>${escapeHtml(desc)}</p></div></div>
-      ${grid || '<div class="info-card"><h4>暂未找到强相关参考视频</h4><p>当前已优先按视频标题和主题检索同题材高表现视频；如果这一区块为空，通常是公开搜索结果过少或题材过窄。</p></div>'}
+      ${grid || `<div class="info-card"><h4>暂未找到强相关参考视频</h4><p>${escapeHtml(emptyDesc)}</p></div>`}
     </section>
   `;
 }
@@ -1554,7 +1564,12 @@ function videoResult(data) {
       ${topicSection(topics, perf.is_hot ? '建议继续延展的后续题材' : '建议下一批优先尝试的题材', perf.is_hot ? '可以沿着这条视频的表现结构继续放大。' : '优先从更容易起量的切口重新测试。')}
       ${!perf.is_hot ? optimizeSection(titleSuggestions, coverSuggestion, contentSuggestions) : ''}
       ${data.copy_result ? `<section class="copy-block" id="videoCopySection"><div class="block-title"><div><h4>优化后可直接使用的文案</h4><p>当视频当前表现偏弱时，可直接拿下面这版标题和脚本做新一轮测试。</p></div></div>${copyResult(data.copy_result)}</section>` : ''}
-      ${referenceSection(data.reference_videos || [], perf.is_hot ? '同赛道高表现参考视频' : '建议直接对标的参考视频', '点击卡片可直接跳转到当前表现更好的视频页面。')}
+      ${referenceSection(
+        data.reference_videos || [],
+        perf.is_hot ? '同赛道高表现参考视频' : '建议直接对标的参考视频',
+        '点击卡片可直接跳转到当前表现更好的视频页面。',
+        data.reference_videos_notice || '',
+      )}
     </div>
   `;
 }
@@ -2280,6 +2295,102 @@ function renderProgressInto(containerId, title, desc, steps, percent) {
   container.innerHTML = loadingCard(title, desc, steps, percent);
 }
 
+function closeAnalyzeTaskStream() {
+  const source = state.analyzeTask?.eventSource;
+  if (source) source.close();
+  state.analyzeTask = { id: '', eventSource: null };
+}
+
+function syncAnalyzePreview(job = {}) {
+  if (!job?.resolved) return;
+  state.videoResolved = job.resolved;
+  state.videoResolvedUrl = ($('#videoLink').value || '').trim() || job.url || state.videoResolvedUrl;
+  $('#videoPreview').innerHTML = videoPreview(job.resolved);
+}
+
+function renderAnalyzeTaskProgress(job = {}) {
+  const title = '正在分析视频';
+  const desc = job.message || '系统正在分阶段完成视频解析、对标样本加载和优化建议生成。';
+  const steps = ['解析视频信息', '加载对标样本', '检索知识库', '生成建议'];
+  syncAnalyzePreview(job);
+  renderProgressInto('videoResult', title, desc, steps, Number(job.percent || 0));
+  renderWorkspaceOutline();
+}
+
+function buildAnalyzeTaskError(job = {}) {
+  const error = new Error(job.error || job.message || '视频分析失败');
+  error.payload = job.payload || {};
+  return error;
+}
+
+async function pollAnalyzeTaskResult(jobId, onProgress) {
+  while (true) {
+    const snapshot = await requestGetJson(`/api/module-analyze/jobs/${encodeURIComponent(jobId)}`);
+    if (typeof onProgress === 'function') onProgress(snapshot);
+    if (snapshot.status === 'completed') return snapshot.result || {};
+    if (snapshot.status === 'failed') throw buildAnalyzeTaskError(snapshot);
+    await sleep(700);
+  }
+}
+
+function waitForAnalyzeTaskResult(job = {}, onProgress) {
+  const jobId = String(job?.id || '').trim();
+  if (!jobId) return Promise.reject(new Error('视频分析任务启动失败，缺少任务 ID。'));
+  if (!window.EventSource) {
+    return pollAnalyzeTaskResult(jobId, onProgress);
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    closeAnalyzeTaskStream();
+    const source = new EventSource(`/api/module-analyze/jobs/${encodeURIComponent(jobId)}/events`);
+    state.analyzeTask = { id: jobId, eventSource: source };
+
+    const finalize = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      closeAnalyzeTaskStream();
+      fn(value);
+    };
+
+    const handleSnapshot = payload => {
+      const snapshot = payload && typeof payload === 'object' ? payload : {};
+      if (typeof onProgress === 'function') onProgress(snapshot);
+      if (snapshot.status === 'completed') {
+        finalize(resolve, snapshot.result || {});
+        return;
+      }
+      if (snapshot.status === 'failed') {
+        finalize(reject, buildAnalyzeTaskError(snapshot));
+      }
+    };
+
+    source.addEventListener('progress', event => {
+      try {
+        handleSnapshot(JSON.parse(event.data || '{}'));
+      } catch (error) {}
+    });
+
+    source.addEventListener('done', event => {
+      try {
+        handleSnapshot(JSON.parse(event.data || '{}'));
+      } catch (error) {
+        finalize(reject, new Error('视频分析进度数据解析失败，请稍后重试。'));
+      }
+    });
+
+    source.onerror = async () => {
+      if (settled) return;
+      try {
+        const snapshot = await requestGetJson(`/api/module-analyze/jobs/${encodeURIComponent(jobId)}`);
+        handleSnapshot(snapshot);
+      } catch (error) {
+        finalize(reject, new Error('视频分析进度连接已中断，请稍后重试。'));
+      }
+    };
+  });
+}
+
 // 渲染带实时进度的助手思考占位气泡。
 function assistantPendingBubble() {
   const percent = currentProgressPercent('assistant');
@@ -2351,6 +2462,7 @@ function clearResults() {
   stopProgressJob('creator');
   stopProgressJob('analyze');
   stopProgressJob('assistant');
+  closeAnalyzeTaskStream();
   state.videoResolved = null;
   state.videoResolvedUrl = '';
   state.videoResolveSeq += 1;
@@ -2463,18 +2575,22 @@ async function runAnalyzeModule() {
 
   setButtonLoading('videoAnalyzeBtn', true);
   setStatus(title, 'loading');
-  startProgressJob('analyze', percent => renderProgressInto('videoResult', title, desc, steps, percent), {
-    start: 8,
-    max: 93,
-    minStep: 0.5,
-    durationMs: 13500,
-    interval: 180,
-  });
+  stopProgressJob('analyze');
+  closeAnalyzeTaskStream();
+  renderProgressInto('videoResult', title, desc, steps, 4);
+  renderWorkspaceOutline();
 
   try {
     if (!isResolvedForUrl(url)) await resolveVideoLink(url, ++state.videoResolveSeq, { silent: true });
-    const data = await requestJson('/api/module-analyze', { url, resolved: state.videoResolved });
-    stopProgressJob('analyze', 100);
+    const startData = await requestJson('/api/module-analyze/start', { url, resolved: state.videoResolved });
+    const job = startData.job || {};
+    renderAnalyzeTaskProgress(job);
+    const data = await waitForAnalyzeTaskResult(job, snapshot => {
+      renderAnalyzeTaskProgress(snapshot);
+      if (snapshot?.message) {
+        setStatus(snapshot.message, snapshot.status === 'failed' ? 'error' : 'loading');
+      }
+    });
     if (data.resolved) {
       state.videoResolved = data.resolved;
       state.videoResolvedUrl = url;
@@ -2486,7 +2602,7 @@ async function runAnalyzeModule() {
     if (data.llm_warning) showToast('LLM 已回退', 'Agent 中枢失败，已自动回退到直接 LLM 分析。', 'error');
     setStatus('视频分析已完成', 'success');
   } catch (error) {
-    stopProgressJob('analyze', 100);
+    closeAnalyzeTaskStream();
     $('#videoResult').innerHTML = infoCard('分析失败', error.message, 'danger');
     renderWorkspaceOutline();
     setStatus('视频分析失败', 'error');
@@ -2495,7 +2611,7 @@ async function runAnalyzeModule() {
       promptRuntimeConfigFromError(error, () => runAnalyzeModule());
     }
   } finally {
-    stopProgressJob('analyze');
+    closeAnalyzeTaskStream();
     setButtonLoading('videoAnalyzeBtn', false);
   }
 }

@@ -14,8 +14,10 @@ from agents.topic_agent import TopicAgent
 from web.app import (
     build_creator_reason,
     build_hot_peer_market_snapshot,
+    build_reference_query_text,
     build_llm_video_payload_from_resolved,
     build_resolved_payload,
+    build_video_benchmark_profile,
     build_video_benchmark_queries,
     normalize_analysis_topics,
     select_creator_topic_cue,
@@ -160,6 +162,46 @@ class VideoAnalysisRuleTests(unittest.TestCase):
         self.assertTrue(any("钢琴" in query for query in queries))
         self.assertTrue(any("Una Mattina" in query for query in queries))
         self.assertFalse(any("爆款" in query or "高播放" in query or "高点赞" in query for query in queries))
+
+    def test_build_video_benchmark_profile_expands_sea_harvest_lane_terms(self) -> None:
+        resolved = {
+            "title": "法国赶海遇蜘蛛蟹繁殖，徒手能抓十几只，浸油膏蟹鲜美",
+            "topic": "赶海收获记录",
+            "partition": "life",
+            "partition_label": "生活",
+            "tname": "田园美食",
+            "keywords": ["法国赶海遇蜘蛛蟹繁殖", "徒手能抓十几只", "浸油膏蟹鲜美", "冬捕冬钓大作战", "搞笑", "生活记录", "法国", "海鲜"],
+        }
+
+        profile = build_video_benchmark_profile(resolved)
+        queries = build_video_benchmark_queries(resolved)
+        query_text = build_reference_query_text(resolved)
+
+        self.assertIn("赶海", profile["terms"])
+        self.assertIn("海鲜收获", profile["terms"])
+        self.assertTrue(any("法国" in term or "海外赶海" in term for term in profile["terms"]))
+        self.assertTrue(any("赶海" in query and "海鲜收获" in query for query in queries))
+        self.assertTrue(any("法国" in query or "海外赶海" in query for query in queries))
+        self.assertEqual(query_text.count("田园美食"), 1)
+
+    def test_build_video_benchmark_profile_extracts_narrative_conflict_terms(self) -> None:
+        resolved = {
+            "title": "我持续蹲守了两年半，终于抓到了当初骂我几个月的网络喷子",
+            "topic": "我持续蹲守了两年半，终于抓到了当初骂我几个月的网络喷子",
+            "partition": "life",
+            "partition_label": "生活",
+            "tname": "",
+            "keywords": ["我持续蹲守了两年半", "终于抓到了当初骂我几个月的网络喷子", "发现Call of Silence", "开启2026生活记录", "社会", "生活记录", "潜伏", "人性"],
+        }
+
+        profile = build_video_benchmark_profile(resolved)
+        queries = build_video_benchmark_queries(resolved)
+        query_text = build_reference_query_text(resolved)
+
+        self.assertTrue(any(term in profile["terms"] for term in ["网络喷子", "喷子"]))
+        self.assertIn("人性", profile["terms"])
+        self.assertTrue(any("网络喷子" in query for query in queries))
+        self.assertNotIn("生活 ", query_text)
 
     def test_fetch_hot_peer_videos_only_keeps_same_direction_recent_hits(self) -> None:
         agent = TopicAgent(request_interval=0)

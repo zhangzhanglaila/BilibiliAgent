@@ -686,25 +686,29 @@
 5. 用户点击视频分析，前端把：
    - `url`
    - 已解析好的 `resolved`
-   一起发给 `/api/module-analyze`
-6. `/api/module-analyze` 先判断前端带来的 `resolved` 是否可复用
+   发给 `/api/module-analyze/start`
+6. 后端创建分析任务后，前端通过 `/api/module-analyze/jobs/<job_id>/events` 订阅 SSE 进度
+7. 任务执行时先判断前端带来的 `resolved` 是否可复用
    - 如果可复用，直接沿用，不重新完整解析
    - 如果不可复用，再走完整解析链路 `resolve_video_payload()`
-7. 后端执行 `build_hot_peer_market_snapshot(resolved)`
+8. 后端异步启动 `build_hot_peer_market_snapshot(resolved)`
    - 纯代码预抓“同方向爆款” `peer_samples`
    - 这一步直接走 B 站公开 HTTP 接口，不走 Chroma
-8. 进入 `run_llm_module_analyze()`
-9. `run_structured()` 在严格约束下先调用 `retrieval`
-10. `retrieval` 走本地知识库检索
+   - 先做一次很短的等待窗口；如果样本还没回来，主链路会先进入 `run_llm_module_analyze()` 做 retrieval 和分析
+9. 进入 `run_llm_module_analyze()`
+10. `run_structured()` 在严格约束下先调用 `retrieval`
+11. `retrieval` 走本地知识库检索
     - `KNOWLEDGE_BASE.retrieve(...)`
     - 过滤条件是 `static_hot_case + knowledge_base`
-11. 如果 retrieval 样本明显不足，模型才允许继续调 `web_search`
-12. 工具调用完成后，模型直接输出 `final`
-13. `finalize_module_analyze_result()` 做统一后处理：
+12. 如果 retrieval 样本明显不足，模型才允许继续调 `web_search`
+13. 工具调用完成后，模型直接输出 `final`
+14. `finalize_module_analyze_result()` 做统一后处理：
     - 统一 `performance / optimize_result / analysis`
     - 合并 `peer_samples + retrieval` 为 `reference_videos`
-    - 如果真实 `reference_videos` 为空，就回退使用 LLM 已给出的 `benchmark_videos` 作为轻量参考卡片
-14. 前端渲染：
+    - `analysis.benchmark_analysis.benchmark_videos` 只保留后端核验通过的真实参考视频
+    - 如果真实 `reference_videos` 为空，直接返回空数组和显式提示，不允许回退使用 LLM 编造的 `benchmark_videos`
+15. 任务线程把 `stage / percent / message / resolved / result` 持续写入任务状态，SSE 按增量推送到前端
+16. 前端渲染：
     - 当前视频基础信息
     - 表现判断
     - 下一批题材建议
