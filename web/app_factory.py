@@ -8,6 +8,7 @@ from web.routes.api import api_bp
 from web.routes.pages import pages_bp
 
 
+# 创建并配置Flask应用实例，注册蓝图、错误处理器，返回完整的Web应用。
 def create_app() -> Flask:
     app = Flask(
         __name__,

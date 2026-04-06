@@ -3,14 +3,17 @@ from __future__ import annotations
 from web.core.shared import *
 
 
+# 判断是否已保存有效的运行时 LLM 配置（API Key 非空）。
 def has_saved_runtime_llm_config() -> bool:
     return bool((RUNTIME_LLM_CONFIG or {}).get("api_key", "").strip())
 
 
+# 返回当前时间的格式化字符串（YYYY-MM-DD HH:MM:SS）。
 def now_text() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
 
+# 对知识库更新任务做快照，深拷贝并移除内部时间戳字段后返回。
 def snapshot_knowledge_update_job(job: dict | None) -> dict | None:
     if not job:
         return None
@@ -19,6 +22,7 @@ def snapshot_knowledge_update_job(job: dict | None) -> dict | None:
     return payload
 
 
+# 清理已过期的知识库更新任务（在 KNOWLEDGE_UPDATE_JOB_LOCK 锁内调用）。
 def cleanup_knowledge_update_jobs_locked() -> None:
     expires_before = time.time() - KNOWLEDGE_UPDATE_JOB_TTL_SECONDS
     expired_job_ids = [
@@ -31,6 +35,7 @@ def cleanup_knowledge_update_jobs_locked() -> None:
         KNOWLEDGE_UPDATE_JOBS.pop(job_id, None)
 
 
+# 获取当前正在运行的知识库更新任务（在锁内调用，不做清理）。
 def active_knowledge_update_job_locked() -> dict | None:
     if not KNOWLEDGE_UPDATE_ACTIVE_JOB_ID:
         return None
@@ -42,18 +47,21 @@ def active_knowledge_update_job_locked() -> dict | None:
     return job
 
 
+# 获取当前活跃的知识库更新任务（含自动清理）。
 def get_active_knowledge_update_job() -> dict | None:
     with KNOWLEDGE_UPDATE_JOB_LOCK:
         cleanup_knowledge_update_jobs_locked()
         return snapshot_knowledge_update_job(active_knowledge_update_job_locked())
 
 
+# 根据 job_id 获取指定的知识库更新任务（含自动清理）。
 def get_knowledge_update_job(job_id: str) -> dict | None:
     with KNOWLEDGE_UPDATE_JOB_LOCK:
         cleanup_knowledge_update_jobs_locked()
         return snapshot_knowledge_update_job(KNOWLEDGE_UPDATE_JOBS.get(job_id))
 
 
+# 更新指定知识库更新任务的进度信息（状态、百分比、消息等）。
 def update_knowledge_update_job(job_id: str, payload: dict) -> dict | None:
     with KNOWLEDGE_UPDATE_JOB_LOCK:
         job = KNOWLEDGE_UPDATE_JOBS.get(job_id)
@@ -68,6 +76,7 @@ def update_knowledge_update_job(job_id: str, payload: dict) -> dict | None:
         return snapshot_knowledge_update_job(job)
 
 
+# 清除当前活跃知识库更新任务（仅当 job_id 匹配时）。
 def clear_active_knowledge_update_job(job_id: str) -> None:
     global KNOWLEDGE_UPDATE_ACTIVE_JOB_ID
     with KNOWLEDGE_UPDATE_JOB_LOCK:
@@ -75,6 +84,7 @@ def clear_active_knowledge_update_job(job_id: str) -> None:
             KNOWLEDGE_UPDATE_ACTIVE_JOB_ID = None
 
 
+# 在后台线程中执行知识库更新任务，更新任务状态并处理锁和错误。
 def run_knowledge_update_job(job_id: str, limit: int) -> None:
     acquired = KNOWLEDGE_UPDATE_EXECUTION_LOCK.acquire(blocking=False)
     if not acquired:
@@ -138,6 +148,7 @@ def run_knowledge_update_job(job_id: str, limit: int) -> None:
         KNOWLEDGE_UPDATE_EXECUTION_LOCK.release()
 
 
+# 创建并启动一个新的知识库更新任务，返回(任务快照, 是否已有任务运行, 错误信息)。
 def start_knowledge_update_job(limit: int) -> tuple[dict | None, bool, str]:
     global KNOWLEDGE_UPDATE_ACTIVE_JOB_ID
     with KNOWLEDGE_UPDATE_JOB_LOCK:
@@ -184,6 +195,7 @@ def start_knowledge_update_job(limit: int) -> tuple[dict | None, bool, str]:
     return snapshot, False, ""
 
 
+# 对视频分析任务做快照，深拷贝并移除内部时间戳字段后返回。
 def snapshot_module_analyze_job(job: dict | None) -> dict | None:
     if not job:
         return None
@@ -192,6 +204,7 @@ def snapshot_module_analyze_job(job: dict | None) -> dict | None:
     return payload
 
 
+# 清理已过期的视频分析任务（在锁内调用）。
 def cleanup_module_analyze_jobs_locked() -> None:
     expires_before = time.time() - MODULE_ANALYZE_JOB_TTL_SECONDS
     expired_job_ids = [
@@ -204,12 +217,14 @@ def cleanup_module_analyze_jobs_locked() -> None:
         MODULE_ANALYZE_JOBS.pop(job_id, None)
 
 
+# 根据 job_id 获取指定的视频分析任务（含自动清理）。
 def get_module_analyze_job(job_id: str) -> dict | None:
     with MODULE_ANALYZE_JOB_LOCK:
         cleanup_module_analyze_jobs_locked()
         return snapshot_module_analyze_job(MODULE_ANALYZE_JOBS.get(job_id))
 
 
+# 更新指定视频分析任务的进度信息（状态、结果、版本号等）。
 def update_module_analyze_job(job_id: str, payload: dict) -> dict | None:
     with MODULE_ANALYZE_JOB_LOCK:
         job = MODULE_ANALYZE_JOBS.get(job_id)
@@ -225,6 +240,7 @@ def update_module_analyze_job(job_id: str, payload: dict) -> dict | None:
         return snapshot_module_analyze_job(job)
 
 
+# 向视频分析任务的进度回调函数发送进度更新。
 def emit_module_analyze_progress(
     progress_callback,
     *,
@@ -244,10 +260,12 @@ def emit_module_analyze_progress(
     progress_callback(payload)
 
 
+# 构造 Server-Sent Events 格式的事件字符串，用于 SSE 流式推送。
 def build_sse_event(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# 在后台线程中执行视频分析任务，更新任务状态并处理执行和错误。
 def run_module_analyze_job(job_id: str, data: dict) -> None:
     from web.services.llm import execute_module_analyze_request
 
@@ -314,6 +332,7 @@ def run_module_analyze_job(job_id: str, data: dict) -> None:
         )
 
 
+# 创建并启动一个新的视频分析任务，返回任务元数据。
 def start_module_analyze_job(data: dict) -> dict:
     with MODULE_ANALYZE_JOB_LOCK:
         cleanup_module_analyze_jobs_locked()
@@ -514,6 +533,7 @@ def safe_metric_int(value: object) -> int:
         return 0
 
 
+# 从知识库文本（JSON字符串）中提取指定字段的值。
 def extract_knowledge_text_field(text: object, field_name: str) -> str:
     raw = str(text or "")
     if not raw or not field_name:
@@ -531,11 +551,13 @@ def extract_knowledge_text_field(text: object, field_name: str) -> str:
     return partial_match.group(1).rstrip('", ').strip() if partial_match else ""
 
 
+# 规范化知识库搜索类别输入，只返回在预定义规则中存在的类别，否则返回空。
 def normalize_knowledge_search_category(value: object) -> str:
     clean = str(value or "").strip()
     return clean if clean in KNOWLEDGE_SEARCH_CATEGORY_RULES else ""
 
 
+# 从知识库条目中推断其所属的大区分（game/tech/life/ent/knowledge）。
 def infer_knowledge_item_broad_partition(item: dict) -> str:
     metadata = item.get("metadata") or {}
     board_type = str(metadata.get("board_type") or extract_knowledge_text_field(item.get("text"), "榜单来源") or "").strip().lower()
@@ -558,6 +580,7 @@ def infer_knowledge_item_broad_partition(item: dict) -> str:
     return ""
 
 
+# 判断知识库条目是否匹配指定类别（通过分区、关键词、大区等规则判断）。
 def knowledge_item_matches_category(item: dict, category: str) -> bool:
     rule = KNOWLEDGE_SEARCH_CATEGORY_RULES.get(category) or {}
     if not rule or rule.get("match_all"):
@@ -585,12 +608,14 @@ def knowledge_item_matches_category(item: dict, category: str) -> bool:
     return bool(rule.get("allow_broad_match") and broad_partition in allowed_broad)
 
 
+# 获取知识库条目中的分块索引，用于排序（未找到时返回一个大值排到最后）。
 def knowledge_chunk_index(item: dict) -> int:
     metadata = item.get("metadata") or {}
     value = metadata.get("chunk_index")
     return safe_int(value) if value is not None else 10**9
 
 
+# 合并知识库检索结果中相同文档的不同分块，保留最高分和最早出现的分块内容。
 def collapse_knowledge_matches(matches: list[dict]) -> list[dict]:
     groups: dict[str, dict] = {}
     for index, item in enumerate(matches or []):
@@ -690,6 +715,7 @@ def normalize_copy_result_payload(copy_result: object, topic: str, style: str) -
 
 # 解码 HTTP 响应体，兼容 B 站当前会返回的 gzip 压缩页面。
 
+# 构造前端初始化运行时所需的全部配置信息（运行模式、LLM状态、会话存储指标等）。
 def build_runtime_payload() -> dict:
     from web.services.session_memory import get_chat_session_memory_store
 
@@ -739,6 +765,7 @@ def build_llm_runtime_reconfigure_data(reason: str) -> dict:
     }
 
 
+# 视频分析请求异常类，包含错误消息、HTTP状态码和额外负载信息。
 class ModuleAnalyzeRequestError(Exception):
     def __init__(self, message: str, status_code: int = 400, payload: dict | None = None) -> None:
         super().__init__(message)

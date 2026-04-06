@@ -25,6 +25,8 @@ class AgentTool:
 
 
 class RetrievalTool(AgentTool):
+    """从本地知识库检索案例、经验和结构化资料的工具。"""
+
     def __init__(self, description: str | None = None, timeout_seconds: float | None = None) -> None:
         super().__init__(
             name="retrieval",
@@ -39,7 +41,12 @@ class RetrievalTool(AgentTool):
 
 
 class LLMWorkspaceAgent:
-    """Constrained ReAct runtime driven by the LLM."""
+    """
+    基于 LLM 的约束型 ReAct 工作空间 Agent。
+
+    该 Agent 通过 ReAct（Reasoning + Acting）范式驱动 LLM 进行推理和工具调用，
+    支持多步推理、工具预算控制、长期记忆和结果自检反思。
+    """
 
     def __init__(
         self,
@@ -59,6 +66,7 @@ class LLMWorkspaceAgent:
             self.memory_store = LongTermMemory()
 
     def _tool_block(self, allowed_tools: Sequence[str]) -> str:
+        """将允许使用的工具列表格式化为可供 LLM 阅读的描述文本块。"""
         lines = []
         for name in allowed_tools:
             tool = self.tools[name]
@@ -66,6 +74,7 @@ class LLMWorkspaceAgent:
         return "\n".join(lines)
 
     def _scratchpad_block(self, scratchpad: List[Dict[str, Any]]) -> str:
+        """将历史工具调用的观察结果格式化为可供 LLM 回顾的文本块。"""
         if not scratchpad:
             return "暂无工具调用记录。"
 
@@ -83,15 +92,18 @@ class LLMWorkspaceAgent:
         return "\n\n".join(blocks)
 
     def _validate_final(self, final: Dict[str, Any], required_final_keys: Sequence[str]) -> List[str]:
+        """检查最终结果是否包含所有必需字段，返回缺失字段的列表。"""
         return [key for key in required_final_keys if key not in final]
 
     def _payload_text(self, payload: Any) -> str:
+        """将任意对象序列化为可读的 JSON 字符串，失败时回退为字符串表示。"""
         try:
             return json.dumps(payload, ensure_ascii=False)
         except Exception:
             return str(payload)
 
     def _build_history_key(self, task_name: str, user_payload: Dict[str, Any]) -> str:
+        """从用户输入中提取用于标识历史记忆的键，优先使用 user_id/memory_user_id/session_id。"""
         for key in ["user_id", "memory_user_id", "session_id"]:
             value = str(user_payload.get(key) or "").strip()
             if value:
@@ -108,6 +120,7 @@ class LLMWorkspaceAgent:
         return f"default:{task_name}"
 
     def _build_query_text(self, task_name: str, task_goal: str, user_payload: Dict[str, Any]) -> str:
+        """将任务信息和用户输入合并为一段用于检索历史记忆的查询文本。"""
         parts = [task_name, task_goal]
         for _, value in user_payload.items():
             if isinstance(value, dict):
@@ -121,6 +134,7 @@ class LLMWorkspaceAgent:
         return " ".join(part for part in parts if part)[:1000]
 
     def _history_block(self, user_id: str, query_text: str) -> str:
+        """从长期记忆中检索与当前用户和查询相关联的历史记录，格式化为供 LLM 回顾的文本块。"""
         if not self.memory_store:
             return "暂无历史上下文。"
         try:
@@ -145,6 +159,7 @@ class LLMWorkspaceAgent:
         allowed_tools: Sequence[str],
         max_steps: int | None = None,
     ) -> Dict[str, Any]:
+        """根据任务名称从配置中获取工具调用预算，包括最大步数、调用次数限制和每个工具的使用限制。"""
         budget = dict(CONFIG.llm_agent_budget(task_name))
         if max_steps is not None:
             budget["max_steps"] = max(1, int(max_steps))
@@ -161,6 +176,7 @@ class LLMWorkspaceAgent:
         return budget
 
     def _tool_budget_block(self, budget: Dict[str, Any]) -> str:
+        """将工具预算信息格式化为可供 LLM 理解的文本说明。"""
         tool_limits = ", ".join(
             f"{name}<={limit}"
             for name, limit in dict(budget.get("tool_limits") or {}).items()
@@ -173,6 +189,7 @@ class LLMWorkspaceAgent:
         )
 
     def _normalize_action_input(self, action_input: Dict[str, Any]) -> str:
+        """将工具调用参数规范化为字符串形式，用于检测重复调用。"""
         try:
             return json.dumps(action_input, ensure_ascii=False, sort_keys=True)
         except Exception:
@@ -189,6 +206,7 @@ class LLMWorkspaceAgent:
         repeated_action_inputs: Dict[str, int],
         recent_tool_actions: List[str],
     ) -> str:
+        """检测工具调用是否超出了预算限制，返回错误信息或空字符串表示正常。"""
         max_tool_calls = int(budget.get("max_tool_calls") or 1)
         if total_tool_calls >= max_tool_calls:
             return f"工具调用总次数已达到上限 {max_tool_calls}，请基于现有 observation 完成判断。"
@@ -217,6 +235,7 @@ class LLMWorkspaceAgent:
         used_tools: Sequence[str],
         strict_required_tool_order: bool,
     ) -> str:
+        """检测工具调用顺序是否符合要求，返回错误信息或空字符串表示正常。"""
         if not strict_required_tool_order or not required_tools or action == "final":
             return ""
         remaining_required_tools = [name for name in required_tools if name not in used_tools]
@@ -228,6 +247,7 @@ class LLMWorkspaceAgent:
         return ""
 
     def _score_candidate(self, candidate: Dict[str, Any], required_final_keys: Sequence[str]) -> float:
+        """基于启发式规则对候选结果打分，缺失字段越多分数越低，包含错误或内容过少也会扣分。"""
         missing_keys = self._validate_final(candidate, required_final_keys)
         score = 100.0 - len(missing_keys) * 25
         payload_text = self._payload_text(candidate)

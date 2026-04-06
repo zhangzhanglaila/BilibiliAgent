@@ -57,18 +57,22 @@ from web.services.runtime import (
     knowledge_item_matches_category,
 )
 
+# API 路由蓝本，用于 Flask 应用。
 api_bp = Blueprint("api", __name__)
 
 
+# 获取 web.app 模块的延迟加载。
 def app_exports():
     return import_module("web.app")
 
 
+# 获取运行时信息（分区、模式等）。
 @api_bp.get("/api/runtime-info")
 def api_runtime_info():
     return jsonify({"success": True, "data": build_runtime_payload()})
 
 
+# 设置运行时 LLM 模式（启用/禁用）。
 @api_bp.post("/api/runtime-mode")
 def api_runtime_mode():
     data = request.get_json(silent=True) or {}
@@ -90,6 +94,7 @@ def api_runtime_mode():
     return jsonify({"success": True, "data": payload})
 
 
+# 保存运行时 LLM 配置（API Key、Base URL、Model 等）。
 @api_bp.post("/api/runtime-llm-config")
 def api_runtime_llm_config():
     data = request.get_json(silent=True) or {}
@@ -103,11 +108,13 @@ def api_runtime_llm_config():
     return jsonify({"success": True, "data": payload})
 
 
+# 获取知识库后端状态信息。
 @api_bp.get("/api/knowledge/status")
 def api_knowledge_status():
     return jsonify({"success": True, "data": build_knowledge_base_status()})
 
 
+# 分页获取知识库中的文档列表。
 @api_bp.get("/api/knowledge/sample")
 def api_knowledge_sample():
     limit = max(1, min(safe_int(request.args.get("limit") or 10), 20))
@@ -119,6 +126,7 @@ def api_knowledge_sample():
         return jsonify({"success": False, "error": f"读取知识库内容失败：{exc}"}), 500
 
 
+# 搜索知识库中的相关文档。
 @api_bp.get("/api/knowledge/search")
 def api_knowledge_search():
     query = (request.args.get("q") or "").strip()
@@ -142,6 +150,7 @@ def api_knowledge_search():
         return jsonify({"success": False, "error": f"检索知识库失败：{exc}"}), 500
 
 
+# 上传文件到知识库（支持 txt/md/docx/pdf）。
 @api_bp.post("/api/knowledge/upload")
 def api_knowledge_upload():
     uploaded = request.files.get("file")

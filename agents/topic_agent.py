@@ -326,9 +326,11 @@ class TopicAgent:
         except Exception:
             return 0
 
+    # 规范化热门对标文本，只保留数字、字母和中文。
     def _normalize_hot_peer_text(self, value: Any) -> str:
         return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").lower())
 
+    # 从查询词中提取有效的检索词，过滤停用词和弱词。
     def _extract_hot_peer_query_terms(self, queries: Iterable[str]) -> List[str]:
         terms: List[str] = []
         seen: set[str] = set()
@@ -351,6 +353,7 @@ class TopicAgent:
                 terms.append(normalized)
         return sorted(terms, key=lambda item: (-len(item), item))
 
+    # 判断候选文本是否匹配查询词（基于语义包含关系）。
     def _hot_peer_query_matches(self, candidate_text: str, query_terms: Iterable[str]) -> bool:
         normalized_terms = [str(term or "").strip() for term in query_terms if str(term or "").strip()]
         if not normalized_terms:

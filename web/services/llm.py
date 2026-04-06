@@ -13,10 +13,12 @@ from web.services.session_memory import (
 )
 
 
+# 获取 web.app 模块的导出，用于延迟加载避免循环依赖。
 def app_exports():
     return import_module("web.app")
 
 
+# 工作台聊天中触发历史对话检索的关键词列表。
 WORKSPACE_CHAT_HISTORY_TRIGGER_KEYWORDS = (
     "历史对话",
     "回顾",
@@ -36,11 +38,13 @@ WORKSPACE_CHAT_RETRIEVAL_TRIGGER_KEYWORDS = WORKSPACE_CHAT_HISTORY_TRIGGER_KEYWO
 )
 
 
+# 判断用户消息是否包含需要检索历史对话或知识库的关键词。
 def should_allow_workspace_chat_retrieval(message: str) -> bool:
     clean_message = str(message or "").strip()
     return any(keyword in clean_message for keyword in WORKSPACE_CHAT_RETRIEVAL_TRIGGER_KEYWORDS)
 
 
+# 构建工作台聊天 Agent 的系统提示词，包含对话规则和工具调用约束。
 def build_workspace_chat_system_prompt() -> str:
     return (
         "你是 B 站创作工作台里的智能对话助手。\n"
@@ -50,6 +54,7 @@ def build_workspace_chat_system_prompt() -> str:
         "如果工具超时、失败或无结果，直接跳过该工具，基于现有上下文继续回答，不要卡住。"
     )
 
+# 将视频信息构建成 LLM 提示词使用的视频结构。
 def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
     resolved = build_resolved_payload(info, bvid)
     return build_llm_video_payload_from_resolved(resolved, url)
@@ -207,6 +212,7 @@ def save_tool_result_to_knowledge_base(
     thread.start()
 
 
+# 返回知识库和长期记忆的后端状态信息。
 def build_knowledge_base_status() -> dict:
     status = KNOWLEDGE_BASE.backend_status()
     status["vector_db_path"] = CONFIG.vector_db_path
@@ -291,10 +297,12 @@ def hot_board_snapshot_tool_handler(payload: dict) -> dict:
     return result
 
 
+# 根据场景名称返回允许使用的工具列表。
 def allowed_tools_for_scene(scene_name: str) -> list[str]:
     return list(LLM_SCENE_ALLOWED_TOOLS.get(scene_name, LLM_SCENE_ALLOWED_TOOLS["workspace_chat"]))
 
 
+# 判断是否应该为创作模块预加载简报（根据关键词触发）。
 def should_preload_creator_briefing(data: dict) -> bool:
     query_text = " ".join(
         str(data.get(key) or "").strip()
@@ -324,6 +332,7 @@ def load_creator_preprocessed_context(data: dict) -> dict:
 
 
 # 懒加载并返回全局 LLMWorkspaceAgent 实例。
+# 构建工作台 Agent 可用的工具列表（视频简报、热点快照、检索、网络搜索）。
 def build_workspace_agent_tools() -> list[AgentTool]:
     return [
         AgentTool(
@@ -348,6 +357,7 @@ def build_workspace_agent_tools() -> list[AgentTool]:
     ]
 
 
+# 获取全局工作台 Agent 实例（懒加载，根据配置变化重建）。
 def get_llm_workspace_agent() -> LLMWorkspaceAgent:
     global LLM_WORKSPACE_AGENT, LLM_WORKSPACE_SIGNATURE
     active_config = get_active_runtime_llm_config()
@@ -446,6 +456,7 @@ def get_llm_workspace_chat_agent() -> LLMWorkspaceAgent:
     return LLM_WORKSPACE_CHAT_AGENT
 
 
+# 视频分析模块的检索工具处理器，只返回静态热门样本，过滤运行时脏数据。
 def video_analyze_retrieval_tool_handler(payload: dict) -> dict:
     query = str(payload.get("query") or "").strip()
     limit = max(1, min(safe_int(payload.get("limit") or 4), 8))
@@ -470,6 +481,7 @@ def video_analyze_retrieval_tool_handler(payload: dict) -> dict:
     }
 
 
+# 视频分析 Agent 的动作验证器，拦截不允许的工具调用。
 def video_analyze_action_validator(
     action: str,
     action_input: dict,

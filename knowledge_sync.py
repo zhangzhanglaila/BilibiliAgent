@@ -75,6 +75,7 @@ LEGACY_PRIMARY_PARTITIONS = ("knowledge", "tech", "life", "game", "ent")
 ProgressCallback = Callable[[Dict[str, Any]], None]
 
 
+# 安全地调用进度回调函数，捕获异常以防止进度回调失败导致主流程中断。
 def notify_progress(progress_callback: ProgressCallback | None, payload: Dict[str, Any]) -> None:
     if progress_callback is None:
         return
@@ -84,6 +85,7 @@ def notify_progress(progress_callback: ProgressCallback | None, payload: Dict[st
         return
 
 
+# 规范化知识库文本，清除多余空白字符（换行压缩、多余空格、制表符），返回干净文本。
 def normalize_kb_text(text: str) -> str:
     clean = str(text or "").replace("\r", "\n")
     clean = re.sub(r"\n{3,}", "\n\n", clean)
@@ -91,6 +93,7 @@ def normalize_kb_text(text: str) -> str:
     return clean.strip()
 
 
+# 安全地将值转换为整数，转换失败时返回默认值。
 def safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(value or 0)
@@ -98,6 +101,7 @@ def safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+# 解析视频时长字符串（支持 "HH:MM:SS" / "MM:SS" 格式或整数秒数），返回总秒数。
 def parse_duration_seconds(value: Any) -> int:
     if value is None:
         return 0
@@ -122,14 +126,17 @@ def parse_duration_seconds(value: Any) -> int:
     return seconds
 
 
+# 从文本中提取关键词token（中文2-8字，英文单词），用于热词统计和内容分析。
 def keyword_tokens(text: str) -> List[str]:
     return re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9]{2,20}", str(text or "").lower())
 
 
+# 从文件名中提取后缀（小写），用于判断文件类型。
 def detect_file_suffix(filename: str) -> str:
     return Path(filename or "").suffix.lower()
 
 
+# 读取上传的文件内容，根据文件类型（txt/md/docx/pdf）解码并返回纯文本。
 def read_uploaded_file_content(filename: str, raw_bytes: bytes) -> str:
     suffix = detect_file_suffix(filename)
     if suffix in {".txt", ".md"}:
@@ -155,6 +162,7 @@ def read_uploaded_file_content(filename: str, raw_bytes: bytes) -> str:
     raise ValueError("暂不支持该文件格式，仅支持 txt / md / docx / pdf。")
 
 
+# 将用户上传的文件内容摄入到知识库，返回摄入结果（含文件名、hash、状态）。
 def ingest_uploaded_file(filename: str, raw_bytes: bytes, metadata: Dict[str, Any] | None = None) -> Dict[str, Any]:
     text = read_uploaded_file_content(filename, raw_bytes)
     if not text:
@@ -181,6 +189,7 @@ def ingest_uploaded_file(filename: str, raw_bytes: bytes, metadata: Dict[str, An
     return result
 
 
+# 安全地同步执行异步协程，异常时返回默认值，避免阻塞主流程。
 def _safe_sync(coro, default):
     try:
         return sync(coro)
@@ -188,6 +197,7 @@ def _safe_sync(coro, default):
         return default
 
 
+# 获取指定视频评论区的热词（点赞最高的评论中提取关键词），用于内容分析。
 def _comment_hotwords(aid: int, limit: int = 8) -> List[str]:
     payload = _safe_sync(
         comment.get_comments(aid, comment.CommentResourceType.VIDEO, page_index=1, order=comment.OrderType.LIKE),
@@ -204,6 +214,7 @@ def _comment_hotwords(aid: int, limit: int = 8) -> List[str]:
     return [word for word, _ in words.most_common(limit)]
 
 
+# 格式化视频发布时间戳，返回 "年-月-日 时:分（时段）" 字符串，时段分为早间/午间/下午/晚高峰/夜间。
 def _format_pub_slot(pub_ts: int) -> str:
     if pub_ts <= 0:
         return "未知"
@@ -221,6 +232,7 @@ def _format_pub_slot(pub_ts: int) -> str:
     return f"{dt.strftime('%Y-%m-%d %H:%M')}（{period}）"
 
 
+# 分析视频标题的爆款因子（提问式、数字期数、反差体验等），返回亮点描述。
 def _title_advantage(title: str) -> str:
     text = title or ""
     traits = []
@@ -235,6 +247,7 @@ def _title_advantage(title: str) -> str:
     return "；".join(traits[:2])
 
 
+# 根据视频时长和简介内容，分析脚本结构优势，返回脚本组织建议。
 def _script_advantage(duration: int, desc: str) -> str:
     if duration and duration <= 90:
         return "内容长度偏短，通常适合快速抛钩子后直接进入核心信息。"
@@ -245,6 +258,7 @@ def _script_advantage(duration: int, desc: str) -> str:
     return "视频适合先立主题，再用中段补充案例或体验，最后用互动问题收束。"
 
 
+# 根据视频时长、播放量、点赞数分析节奏把控特点，返回节奏评价。
 def _rhythm_advantage(duration: int, view: int, like: int) -> str:
     if duration and duration < 60:
         return "整体节奏偏快，更适合连续高信息密度输出。"
@@ -253,6 +267,7 @@ def _rhythm_advantage(duration: int, view: int, like: int) -> str:
     return "节奏大概率靠主题推进和镜头切换维持，不依赖单一爆点。"
 
 
+# 根据标题、评论数和热词分析互动设计优势，返回互动引导建议。
 def _interaction_advantage(title: str, reply: int, hotwords: List[str]) -> str:
     if reply > 500:
         return "评论量较高，说明话题天然适合引发站队、补充经历或观点讨论。"
@@ -263,6 +278,7 @@ def _interaction_advantage(title: str, reply: int, hotwords: List[str]) -> str:
     return "题材具备讨论空间，适合在结尾主动抛出选择题或经历型提问。"
 
 
+# 分析视频标签策略优势，返回标签围绕主题的程度评价。
 def _tag_advantage(tags: Iterable[str], partition_label: str) -> str:
     clean_tags = [str(tag).strip() for tag in tags if str(tag).strip()]
     if clean_tags:
@@ -270,6 +286,7 @@ def _tag_advantage(tags: Iterable[str], partition_label: str) -> str:
     return f"分区语义集中在「{partition_label}」，建议继续围绕同赛道关键词做标签补强。"
 
 
+# 将视频信息结构化整合为知识库可存储的文本，包含标题、UP主、分区、播放点赞数据、优势分析等。
 def _structured_video_text(board_type: str, item: dict, detail: dict, tags: List[str], hotwords: List[str], board_url: str = "") -> str:
     stat = detail.get("stat") or item.get("stat") or {}
     title = str(detail.get("title") or item.get("title") or "").strip()
@@ -304,12 +321,14 @@ def _structured_video_text(board_type: str, item: dict, detail: dict, tags: List
     return normalize_kb_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+# 获取指定B站视频的详细信息（标题、UP主、统计数据等），失败时返回空字典。
 def _video_detail(bvid: str) -> dict:
     if not bvid:
         return {}
     return _safe_sync(video.Video(bvid=bvid).get_info(), {})
 
 
+# 获取指定视频的所有标签名称列表。
 def _video_tags(video_obj: dict) -> List[str]:
     bvid = str(video_obj.get("bvid") or "").strip()
     if not bvid:
@@ -320,8 +339,8 @@ def _video_tags(video_obj: dict) -> List[str]:
     return [str(item.get("tag_name") or "").strip() for item in data if str(item.get("tag_name") or "").strip()]
 
 
-def _ingest_hot_items(
-    board_type: str,
+# 批量摄入热门视频列表到知识库，对每条视频抓取详情、标签、评论热词并存储。
+def _ingest_hot_items(    board_type: str,
     items: Iterable[dict],
     limit: int = 10,
     board_url: str = "",
@@ -410,8 +429,8 @@ def _ingest_hot_items(
     return {"board_type": board_type, "saved_count": saved, "updated_count": updated, "failed": failed}
 
 
-def crawl_and_store_bilibili_hot_videos(
-    per_board_limit: int = 10,
+# 抓取B站全站热门榜、每周必看、入站必刷及各分区热门榜视频，存入知识库。
+def crawl_and_store_bilibili_hot_videos(    per_board_limit: int = 10,
     progress_callback: ProgressCallback | None = None,
 ) -> Dict[str, Any]:
     summary: List[Dict[str, Any]] = []
@@ -655,8 +674,8 @@ def crawl_and_store_bilibili_hot_videos(
     return result
 
 
-def update_chroma_knowledge_base(
-    per_board_limit: int = 10,
+# 更新Chroma知识库，有回调则带进度，无回调则直接同步执行。
+def update_chroma_knowledge_base(    per_board_limit: int = 10,
     progress_callback: ProgressCallback | None = None,
 ) -> Dict[str, Any]:
     if progress_callback is None:

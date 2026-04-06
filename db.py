@@ -10,6 +10,7 @@ from config import CONFIG
 from models import VideoMetrics
 
 
+# SQLite 数据库封装类，提供视频指标快照的持久化存储和查询功能。
 class SQLiteStore:
     # 初始化 SQLite 存储并确保基础表结构存在。
     def __init__(self, db_path: str | None = None) -> None:

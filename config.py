@@ -1,4 +1,4 @@
-"""Project configuration."""
+"""项目配置模块，定义全局参数、环境变量解析和应用配置类。"""
 from __future__ import annotations
 
 import os
@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# B站分区名称到对应 tid 的映射表，用于将分区名转换为B站接口所需的分区ID。
 PARTITION_TIDS = {
     "knowledge": 36,
     "tech": 124,
@@ -18,6 +19,8 @@ PARTITION_TIDS = {
     "ent": 5,
 }
 
+# 分区别名映射，将用户可能使用的多种分区名统一归类到主分区。
+# 例如 "business"、"career"、"study" 都映射到 "knowledge"（知识分区）。
 PARTITION_ALIASES = {
     "business": "knowledge",
     "career": "knowledge",
@@ -39,6 +42,7 @@ PARTITION_ALIASES = {
 }
 
 
+# 从环境变量读取布尔值，支持 "1"/"true"/"yes"/"on" 等多种写法。
 def env_bool(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -46,6 +50,7 @@ def env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# 从环境变量读取整数值，解析失败时返回默认值。
 def env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
     if raw is None:
@@ -56,6 +61,7 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+# 应用配置数据类，集中管理所有从环境变量读取的配置项。
 @dataclass
 class AppConfig:
     request_interval: float = float(os.getenv("REQUEST_INTERVAL", "1.2"))
@@ -132,6 +138,7 @@ class AppConfig:
     def partition_tid(self, partition_name: str | None = None) -> int:
         return PARTITION_TIDS[self.normalize_partition(partition_name)]
 
+    # 根据任务名称返回对应的 LLM Agent 预算配置（最大步数、工具调用次数、重复限制等）。
     def llm_agent_budget(self, task_name: str) -> dict:
         default_budget = {
             "max_steps": self.llm_agent_default_max_steps,
@@ -190,4 +197,5 @@ class AppConfig:
         }
 
 
+# 全局配置单例，整个项目通过导入此对象获取配置。
 CONFIG = AppConfig()

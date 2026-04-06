@@ -42,6 +42,7 @@ except Exception:  # pragma: no cover
     SentenceTransformer = None
 
 
+# 知识库文档数据类，包含文档 ID、正文内容和可选的元数据。
 @dataclass
 class Document:
     id: str
@@ -49,18 +50,24 @@ class Document:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+# 运行时动态生成的脏数据来源标记，这些来源的记录不适合持久化到知识库。
 DIRTY_RUNTIME_SOURCES = {"creator_briefing", "video_briefing", "hot_board_snapshot"}
+# 静态样本数据来源标识
 STATIC_SAMPLE_SOURCE = "knowledge_base"
+# 静态样本数据类型
 STATIC_SAMPLE_DATA_TYPE = "static_hot_case"
+# 原始来源标识，用于追踪数据同步历史
 STATIC_SAMPLE_ORIGINAL_SOURCE = "bilibili_hot_sync"
 
 
+# 将文本拆分为中文字符串（1-6字）和英文数字词组（2-24字符）的混合 token 列表。
 def keyword_tokens(text: str) -> List[str]:
     clean = str(text or "").lower()
     tokens = re.findall(r"[\u4e00-\u9fff]{1,6}|[a-z0-9]{2,24}", clean)
     return [token for token in tokens if token.strip()]
 
 
+# 确定性向量嵌入实现，不依赖外部 API，在离线环境下也能生成向量。
 class DeterministicEmbeddings(Embeddings):
     """Offline-safe embeddings so the vector layer can work without external APIs."""
 
@@ -87,6 +94,7 @@ class DeterministicEmbeddings(Embeddings):
         return self._embed(text)
 
 
+# 基于 sentence-transformers 的语义向量嵌入，支持本地模型加载，失败时自动降级到确定性嵌入。
 class SemanticEmbeddings(Embeddings):
     """Sentence-transformers based embeddings with deterministic fallback."""
 
@@ -191,6 +199,8 @@ def build_default_embeddings() -> Embeddings:
     return SemanticEmbeddings()
 
 
+# 知识库主类，基于 Chroma 向量库存储，支持 LangChain Chroma 和原生 ChromaDB 两种后端，
+# 在均不可用时自动降级到 JSON 文件存储。
 class KnowledgeBase:
     def __init__(self, persist_directory: str | None = None, collection_name: str = "bilibili_knowledge") -> None:
         self.persist_directory = Path(persist_directory or CONFIG.vector_db_path)
@@ -247,12 +257,14 @@ class KnowledgeBase:
                 self.init_error = str(exc)
                 raise
 
+    # 启用 JSON 文件作为知识库的降级存储后端，当 Chroma 不可用时使用。
     def _enable_json_fallback(self, detail: str = "") -> None:
         self.backend = "json_fallback"
         self.backend_detail = detail.strip()
         if not self.fallback_store_path.exists():
             self._write_fallback_payload([])
 
+    # 向 JSON 降级存储文件写入记录列表，使用临时文件原子替换保证数据一致性。
     def _write_fallback_payload(self, records: List[Dict[str, Any]]) -> None:
         payload = {
             "collection_name": self.collection_name,
@@ -264,6 +276,7 @@ class KnowledgeBase:
             temp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             temp_path.replace(self.fallback_store_path)
 
+    # 从 JSON 降级存储文件读取所有记录，处理文件不存在或格式错误等异常情况。
     def _load_fallback_records(self) -> List[Dict[str, Any]]:
         if not self.fallback_store_path.exists():
             self._write_fallback_payload([])
@@ -276,6 +289,7 @@ class KnowledgeBase:
         items = payload.get("items") if isinstance(payload, dict) else payload
         return [dict(item or {}) for item in (items or []) if isinstance(item, dict)]
 
+    # 归一化向量记录的元数据，过滤掉运行时脏数据，并将静态样本标记为统一格式。
     def _normalize_vector_metadata(self, metadata: Dict[str, Any] | None) -> Dict[str, Any] | None:
         normalized = dict(metadata or {})
         source = str(normalized.get("source") or "").strip()
@@ -302,6 +316,7 @@ class KnowledgeBase:
             normalized["original_source"] = STATIC_SAMPLE_ORIGINAL_SOURCE
         return normalized
 
+    # 清理向量库中的无效记录：移除脏数据来源的记录、重复 ID 记录，并重建集合。
     def _sanitize_vector_records(self) -> None:
         collection = self._active_collection()
         payload = collection.get(include=["documents", "metadatas"])
@@ -335,6 +350,7 @@ class KnowledgeBase:
         if changed:
             self._recreate_collection(next_ids, next_documents, next_metadatas)
 
+    # 将 JSON 降级存储中的历史数据迁移到向量库中，按 document_id 分组合并切片。
     def _migrate_fallback_store_to_vector(self) -> None:
         if not self.fallback_store_path.exists():
             return
@@ -371,6 +387,7 @@ class KnowledgeBase:
                 )
             )
 
+    # 判断单条记录是否匹配给定的元数据过滤器，用于降级存储的条件查询。
     def _record_matches_metadata(self, record: Dict[str, Any], metadata_filter: Dict[str, Any] | None = None) -> bool:
         filters = dict(metadata_filter or {})
         if not filters:
@@ -386,6 +403,7 @@ class KnowledgeBase:
                 return False
         return True
 
+    # 计算两个向量的余弦相似度分数，用于降级存储的向量检索。
     def _vector_score(self, query_vector: List[float], item_vector: List[float]) -> float:
         if not query_vector or not item_vector:
             return 0.0
@@ -394,6 +412,7 @@ class KnowledgeBase:
             return 0.0
         return sum(float(query_vector[index]) * float(item_vector[index]) for index in range(size))
 
+    # 将长文本按指定 token 数量和重叠长度切分为多个小块，支持 tiktoken 分词器（优先）或空格分词。
     def _split_text(self, text: str, chunk_size: int = 320, overlap: int = 60) -> List[str]:
         clean = (text or "").strip()
         if not clean:
@@ -427,15 +446,18 @@ class KnowledgeBase:
             start = max(end - overlap, start + 1)
         return [chunk for chunk in chunks if chunk]
 
+    # 要求向量后端必须可用，否则抛出清晰的错误说明，便于排查配置问题。
     def _require_vector_backend(self) -> None:
         if self.vectorstore is not None or self.collection is not None:
             return
         detail = self.init_error or "Chroma backend not initialized"
         raise RuntimeError(f"知识库当前不可用：未检测到可用的 Chroma 向量库。{detail}")
 
+    # 检查知识库当前是否可用（至少有一种后端在正常工作）。
     def available(self) -> bool:
         return self.vectorstore is not None or self.collection is not None
 
+    # 返回知识库中当前存储的文档（chunk）总数。
     def count(self) -> int:
         self._require_vector_backend()
         if self.backend == "json_fallback":
@@ -457,6 +479,7 @@ class KnowledgeBase:
         self._require_vector_backend()
         return 0
 
+    # 返回知识库后端状态的完整诊断信息，包括后端类型、向量维度、嵌入模型、错误详情等。
     def backend_status(self) -> Dict[str, Any]:
         last_updated_at = ""
         try:
@@ -487,6 +510,7 @@ class KnowledgeBase:
             "last_updated_at": last_updated_at,
         }
 
+    # 获取当前正在使用的 Chroma/LangChain collection 对象，统一访问入口。
     def _active_collection(self):
         self._require_vector_backend()
         if self.vectorstore is not None:
@@ -501,6 +525,7 @@ class KnowledgeBase:
         self._require_vector_backend()
         return None
 
+    # 将元数据过滤器字典转换为 Chroma 查询用的 where 子句格式。
     def _where_clause(self, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any] | None:
         filters = dict(metadata_filter or {})
         if not filters:
@@ -510,9 +535,11 @@ class KnowledgeBase:
             return {key: {"$eq": value}}
         return {"$and": [{key: {"$eq": value}} for key, value in filters.items()]}
 
+    # 获取当前嵌入模型生成的向量维度。
     def _embedding_dimension(self) -> int:
         return len(self.embeddings.embed_query("B站内容向量维度检查"))
 
+    # 从向量库现有记录中获取实际存储的向量维度，用于检测维度不匹配问题。
     def _collection_embedding_dimension(self) -> int:
         collection = self._active_collection()
         payload = collection.get(limit=1, include=["embeddings"])
@@ -524,6 +551,7 @@ class KnowledgeBase:
             return 0
         return len(first)
 
+    # 重建 Chroma collection：先删除旧 collection，再按新维度重新创建并批量写入数据。
     def _recreate_collection(self, ids: List[str], documents: List[str], metadatas: List[Dict[str, Any]]) -> None:
         client = None
         if self.vectorstore is not None:
@@ -566,6 +594,7 @@ class KnowledgeBase:
                     embeddings=self.embeddings.embed_documents(docs_batch),
                 )
 
+    # 确保向量库中存储的向量维度与当前嵌入模型一致，不一致时触发 collection 重建。
     def _ensure_embedding_dimension(self) -> None:
         collection = self._active_collection()
         expected_dimension = self._embedding_dimension()
@@ -579,6 +608,7 @@ class KnowledgeBase:
         metadatas = [dict(item or {}) for item in payload.get("metadatas") or []]
         self._recreate_collection(ids, documents, metadatas)
 
+    # 分页获取知识库中的文档列表，支持按元数据过滤。
     def sample(self, limit: int = 10, offset: int = 0, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if self.backend == "json_fallback":
             start = max(0, int(offset or 0))
@@ -615,6 +645,7 @@ class KnowledgeBase:
             )
         return {"items": items, "limit": limit, "offset": offset}
 
+    # 检查指定 document_id 或满足元数据过滤条件的文档是否存在。
     def exists(self, document_id: str | None = None, metadata_filter: Dict[str, Any] | None = None) -> bool:
         if self.backend == "json_fallback":
             where = dict(metadata_filter or {})
@@ -628,6 +659,7 @@ class KnowledgeBase:
         payload = collection.get(limit=1, where=self._where_clause(where), include=["metadatas"])
         return bool(payload.get("ids"))
 
+    # 删除指定 document_id 或满足元数据过滤条件的文档，返回实际删除数量。
     def delete(self, document_id: str | None = None, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
         if self.backend == "json_fallback":
             where = dict(metadata_filter or {})
@@ -654,6 +686,7 @@ class KnowledgeBase:
             collection.delete(where=clause)
         return {"deleted_count": len(ids), "where": where}
 
+    # 将文档添加到知识库，自动按 chunk_size=320 overlap=60 切分文本并生成向量。
     def add_document(self, document: Document) -> Dict[str, Any]:
         self._require_vector_backend()
         chunks = self._split_text(document.text)
@@ -699,6 +732,7 @@ class KnowledgeBase:
 
         return {"status": "updated" if existed else "ok", "document_id": document.id, "chunk_count": len(chunks)}
 
+    # 降级存储使用的词项重叠评分，作为向量相似度的补充指标。
     def _fallback_score(self, query: str, text: str) -> float:
         query_tokens = set(keyword_tokens(query))
         text_tokens = set(keyword_tokens(text))
@@ -707,6 +741,7 @@ class KnowledgeBase:
         overlap = len(query_tokens & text_tokens)
         return overlap / max(len(query_tokens), 1)
 
+    # 通过 LangChain Chroma 接口执行带分数的相似度检索。
     def _vector_matches_from_langchain(
         self,
         query: str,
@@ -727,6 +762,7 @@ class KnowledgeBase:
             )
         return results
 
+    # 直接通过 ChromaDB Python 客户端执行带分数的相似度检索。
     def _vector_matches_from_chromadb(
         self,
         query: str,
@@ -757,6 +793,7 @@ class KnowledgeBase:
             )
         return results
 
+    # 检索与查询文本最相关的 limit 条文档，支持元数据过滤和追踪。
     def retrieve(self, query: str, limit: int = 4, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
         clean_query = (query or "").strip()
         if not clean_query:
@@ -822,24 +859,30 @@ class KnowledgeBase:
             return result
 
 
+# 全局默认知识库实例，供整个项目直接调用。
 DEFAULT_KNOWLEDGE_BASE = KnowledgeBase()
 
 
+# 将文档添加到默认知识库。
 def add_document(document: Document) -> Dict[str, Any]:
     return DEFAULT_KNOWLEDGE_BASE.add_document(document)
 
 
+# 在默认知识库中检索相关文档。
 def retrieve(query: str, limit: int = 4, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return DEFAULT_KNOWLEDGE_BASE.retrieve(query, limit=limit, metadata_filter=metadata_filter)
 
 
+# 分页获取默认知识库中的文档。
 def sample(limit: int = 10, offset: int = 0, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return DEFAULT_KNOWLEDGE_BASE.sample(limit=limit, offset=offset, metadata_filter=metadata_filter)
 
 
+# 检查文档是否存在于默认知识库中。
 def document_exists(document_id: str | None = None, metadata_filter: Dict[str, Any] | None = None) -> bool:
     return DEFAULT_KNOWLEDGE_BASE.exists(document_id=document_id, metadata_filter=metadata_filter)
 
 
+# 从默认知识库中删除文档。
 def delete_documents(document_id: str | None = None, metadata_filter: Dict[str, Any] | None = None) -> Dict[str, Any]:
     return DEFAULT_KNOWLEDGE_BASE.delete(document_id=document_id, metadata_filter=metadata_filter)

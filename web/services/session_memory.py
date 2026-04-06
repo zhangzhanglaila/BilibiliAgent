@@ -27,6 +27,7 @@ VALID_CHAT_ROLES = {"user", "assistant", "system"}
 SESSION_ID_PATTERN = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._:-]{0,127}$")
 
 
+# 校验或生成会话 ID，确保格式合法，无效时自动生成新的 UUID。
 def ensure_session_id(value: object) -> tuple[str, bool]:
     raw = str(value or "").strip()
     if raw and SESSION_ID_PATTERN.match(raw):
@@ -36,6 +37,7 @@ def ensure_session_id(value: object) -> tuple[str, bool]:
     return session_id, True
 
 
+# 规范化聊天历史记录，过滤无效角色和空内容，保留 actions 和 references 字段。
 def normalize_chat_history(value: object, limit: int | None = None) -> list[dict[str, Any]]:
     max_items = max(1, int(limit or CONFIG.chat_session_history_limit))
     history: list[dict[str, Any]] = []
@@ -56,6 +58,7 @@ def normalize_chat_history(value: object, limit: int | None = None) -> list[dict
     return history[-max_items:]
 
 
+# 根据命名空间和负载内容生成缓存唯一标识（SHA1 哈希）。
 def build_cache_identity(namespace: str, payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()
@@ -73,6 +76,7 @@ class SessionMemoryMetrics:
     memory_evictions: int = 0
 
 
+# 基于内存和 Redis 的会话存储管理器，支持读写分离和 LRU 淘汰。
 class ChatSessionMemoryStore:
     def __init__(self, memory_cache_max_entries: int | None = None) -> None:
         self._lock = threading.Lock()
@@ -85,9 +89,11 @@ class ChatSessionMemoryStore:
         self._redis_initialized = False
         self._metrics = SessionMemoryMetrics()
 
+    # 返回当前时间戳（秒）。
     def _now(self) -> float:
         return time.time()
 
+    # 获取或初始化 Redis 客户端，超时控制避免阻塞。
     def _get_redis_client(self):
         if self._redis_initialized:
             return self._redis_client
@@ -112,6 +118,7 @@ class ChatSessionMemoryStore:
             self._redis_client = None
         return self._redis_client
 
+    # 从内存缓存读取数据，自动清理过期条目。
     def _memory_get(self, key: str) -> Any | None:
         with self._lock:
             self._prune_memory_locked(now=self._now())
@@ -124,6 +131,7 @@ class ChatSessionMemoryStore:
             self._memory_cache.move_to_end(key)
             return item.get("value")
 
+    # 向内存缓存写入数据，自动淘汰超出容量限制的旧条目。
     def _memory_set(self, key: str, value: Any, ttl_seconds: int) -> None:
         with self._lock:
             now = self._now()
@@ -134,6 +142,7 @@ class ChatSessionMemoryStore:
             self._memory_cache.move_to_end(key)
             self._prune_memory_locked(now=now)
 
+    # 清理内存缓存中的过期条目和超出容量限制的旧数据。
     def _prune_memory_locked(self, now: float | None = None) -> None:
         current_time = float(now if now is not None else self._now())
         expired_keys = [
@@ -148,6 +157,7 @@ class ChatSessionMemoryStore:
             self._memory_cache.popitem(last=False)
             self._metrics.memory_evictions += 1
 
+    # 从 Redis 或内存缓存读取 JSON 数据，优先 Redis。
     def _read_json(self, key: str, *, track_redis_miss: bool = False) -> tuple[Any | None, str]:
         client = self._get_redis_client()
         if client is not None:
@@ -167,6 +177,7 @@ class ChatSessionMemoryStore:
         payload = self._memory_get(key)
         return payload, "memory" if payload is not None else ""
 
+    # 向 Redis 和内存缓存双写 JSON 数据，Redis 失败时只写内存。
     def _write_json(self, key: str, value: Any, ttl_seconds: int) -> str:
         payload_text = json.dumps(value, ensure_ascii=False)
         client = self._get_redis_client()
@@ -182,6 +193,7 @@ class ChatSessionMemoryStore:
         self._memory_set(key, value, ttl_seconds)
         return source or "memory"
 
+    # 加载指定会话的历史记录，优先从缓存读取，缓存不存在时使用前端传来的历史。
     def load_session_history(self, session_id: str, frontend_history: object = None) -> dict[str, Any]:
         started_at = time.perf_counter()
         key = f"{SESSION_KEY_PREFIX}{session_id}"
@@ -221,6 +233,7 @@ class ChatSessionMemoryStore:
             "load_ms": load_ms,
         }
 
+    # 保存会话历史到 Redis 和内存缓存。
     def save_session_history(self, session_id: str, history: object) -> None:
         key = f"{SESSION_KEY_PREFIX}{session_id}"
         normalized_history = normalize_chat_history(history, limit=CONFIG.chat_session_history_limit)
@@ -237,6 +250,7 @@ class ChatSessionMemoryStore:
             len(normalized_history),
         )
 
+    # 异步保存会话历史，避免阻塞主响应。
     def save_session_history_async(self, session_id: str, history: object) -> None:
         def worker() -> None:
             try:
@@ -250,13 +264,16 @@ class ChatSessionMemoryStore:
             name=f"chat-session-save-{session_id[:8]}",
         ).start()
 
+    # 获取缓存的有效载荷（用于 LLM 调用结果缓存）。
     def get_cached_payload(self, cache_identity: str) -> Any | None:
         payload, _ = self._read_json(f"{CACHE_KEY_PREFIX}{cache_identity}")
         return payload
 
+    # 设置缓存的有效载荷。
     def set_cached_payload(self, cache_identity: str, payload: Any, ttl_seconds: int) -> None:
         self._write_json(f"{CACHE_KEY_PREFIX}{cache_identity}", payload, ttl_seconds)
 
+    # 返回当前缓存和会话存储的统计指标快照。
     def metrics_snapshot(self) -> dict[str, Any]:
         with self._lock:
             redis_reads = self._metrics.redis_hits + self._metrics.redis_misses
@@ -284,6 +301,7 @@ class ChatSessionMemoryStore:
 _CHAT_SESSION_MEMORY_STORE: ChatSessionMemoryStore | None = None
 
 
+# 获取全局会话存储单例。
 def get_chat_session_memory_store() -> ChatSessionMemoryStore:
     global _CHAT_SESSION_MEMORY_STORE
     if _CHAT_SESSION_MEMORY_STORE is None:
@@ -301,6 +319,7 @@ SESSION_META_SUFFIX = "_meta.json"
 SESSION_HISTORY_SUFFIX = "_history.json"
 
 
+# 基于本地 JSON 文件的历史会话管理器，支持跨刷新持久化。
 class ChatSessionMetadataStore:
     """基于本地 JSON 文件的历史会话管理器，刷新页面后不丢失。"""
 
@@ -314,21 +333,27 @@ class ChatSessionMetadataStore:
             self._sessions_dir = Path(CONFIG.vector_db_path).resolve() / SESSIONS_DIR_NAME
         return self._sessions_dir
 
+    # 确保会话存储目录已创建。
     def _ensure_dir(self) -> None:
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
 
+    # 返回当前时间戳（秒）。
     def _now_ts(self) -> int:
         return int(time.time())
 
+    # 获取会话元数据文件路径。
     def _meta_path(self, session_id: str) -> Path:
         return self.sessions_dir / f"{session_id}{SESSION_META_SUFFIX}"
 
+    # 获取会话历史文件路径。
     def _history_path(self, session_id: str) -> Path:
         return self.sessions_dir / f"{session_id}{SESSION_HISTORY_SUFFIX}"
 
+    # 获取会话索引文件路径。
     def _index_path(self) -> Path:
         return self.sessions_dir / SESSIONS_INDEX_FILE
 
+    # 从文件加载会话索引列表。
     def _load_index(self) -> list[dict[str, Any]]:
         index_file = self._index_path()
         if not index_file.exists():
@@ -340,6 +365,7 @@ class ChatSessionMetadataStore:
         except Exception:
             return []
 
+    # 将会话索引列表保存到文件。
     def _save_index(self, index: list[dict[str, Any]]) -> None:
         self._ensure_dir()
         index_file = self._index_path()
@@ -349,6 +375,7 @@ class ChatSessionMetadataStore:
         except Exception as exc:
             LOGGER.warning("chat_sessions.index_save_failed error=%s", exc)
 
+    # 更新索引中指定会话的元数据，将新数据插入最前。
     def _upsert_index(self, session_id: str, meta: dict[str, Any]) -> None:
         """将 session 更新到 index 列表（按 updated_at 倒序）。"""
         with self._lock:
@@ -357,6 +384,7 @@ class ChatSessionMetadataStore:
             index.insert(0, meta)  # 最新更新的放最前
             self._save_index(index)
 
+    # 持久化保存会话元数据和历史记录到本地文件。
     def save_session(
         self,
         session_id: str,
@@ -411,6 +439,7 @@ class ChatSessionMetadataStore:
         # 更新 index
         self._upsert_index(session_id, meta)
 
+    # 异步保存会话数据，不阻塞主线程。
     def save_session_async(
         self,
         session_id: str,
@@ -426,6 +455,7 @@ class ChatSessionMetadataStore:
 
         threading.Thread(target=worker, daemon=True, name=f"chat-session-meta-{session_id[:8]}").start()
 
+    # 返回所有会话列表，按更新时间倒序。
     def list_sessions(self) -> list[dict[str, Any]]:
         """返回所有会话列表（按 updated_at 倒序）。"""
         with self._lock:
@@ -444,6 +474,7 @@ class ChatSessionMetadataStore:
             })
         return result
 
+    # 读取指定会话的完整元数据和历史记录。
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         """读取指定会话的元数据+历史。"""
         meta_file = self._meta_path(session_id)
@@ -477,6 +508,7 @@ class ChatSessionMetadataStore:
             "history": history,
         }
 
+    # 删除指定会话的元数据、历史文件和索引记录。
     def delete_session(self, session_id: str) -> bool:
         """删除指定会话的元数据和历史文件，并从索引中移除。"""
         meta_file = self._meta_path(session_id)
@@ -504,6 +536,7 @@ class ChatSessionMetadataStore:
 _CHAT_SESSION_METADATA_STORE: ChatSessionMetadataStore | None = None
 
 
+# 获取全局会话元数据存储单例。
 def get_chat_session_metadata_store() -> ChatSessionMetadataStore:
     global _CHAT_SESSION_METADATA_STORE
     if _CHAT_SESSION_METADATA_STORE is None:

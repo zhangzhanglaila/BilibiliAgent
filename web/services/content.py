@@ -5,20 +5,24 @@ from importlib import import_module
 from web.services.runtime import *
 
 
+# 延迟加载 web.app 模块，用于解决循环导入问题。
 def app_exports():
     return import_module("web.app")
 
 
+# 对音乐参考类文本做清洗，去除特殊符号并转小写，便于关键词匹配。
 def _normalize_reference_text_for_music(text: str) -> str:
     value = re.sub(r"[【】\[\]（）()<>《》\"'`~!@#$%^&*_+=|\\/:;,.?？！，。、“”·-]+", " ", text or "")
     return re.sub(r"\s+", " ", value).strip().lower()
 
 
+# 判断给定文本是否像是音乐类内容引用（包含音乐相关关键词）。
 def looks_like_music_reference(text: str) -> bool:
     normalized = _normalize_reference_text_for_music(text)
     return bool(normalized) and any(token in normalized for token in MUSIC_REFERENCE_KEYWORDS)
 
 
+# 解码 HTTP 响应体，支持 gzip/deflate 解压，返回 UTF-8 文本。
 def decode_http_response_body(raw_body: bytes, content_encoding: str = "", charset: str = "utf-8") -> str:
     body = raw_body or b""
     encoding = str(content_encoding or "").lower().strip()
@@ -363,6 +367,7 @@ def strip_leading_context(text: str, contexts: list[str]) -> str:
     return result
 
 
+# 判断创作者关键词是否为噪音词（太短、是停用词、含数字等）。
 def is_creator_keyword_noise(keyword: str, strict: bool = False) -> bool:
     if not keyword or len(keyword) < 2:
         return True
@@ -394,6 +399,7 @@ def extract_creator_keywords(text: str, strict: bool = False) -> list[str]:
     return keywords
 
 
+# 清洗单个创作者关键词，去除冗余修饰词（助词、量词前缀、句尾词），返回干净文本。
 def clean_creator_keyword(keyword: str) -> str:
     clean = normalize_creator_text(keyword)
     clean = re.sub(r"^[的地得把被让跟与和在从向给将]+", "", clean)
@@ -402,6 +408,7 @@ def clean_creator_keyword(keyword: str) -> str:
     return normalize_creator_text(clean)
 
 
+# 合并多组创作者关键词列表，去重后返回（最多8个）。
 def merge_creator_keywords(*groups: list[str]) -> list[str]:
     merged: list[str] = []
     for group in groups:
@@ -418,10 +425,12 @@ def merge_creator_keywords(*groups: list[str]) -> list[str]:
     return pruned
 
 
+# 从多段文本中提取创作者上下文关键词，合并去重后最多返回8个。
 def build_creator_context_keywords(*texts: str) -> list[str]:
     return merge_creator_keywords(*[extract_creator_keywords(text) for text in texts if text])[:8]
 
 
+# 从给定主题文本推断创作者的核心方向（情感/知识/细节/日常等）。
 def infer_creator_topic_focus(topic: str) -> str:
     text = normalize_creator_text(topic)
     if any(token in text for token in ["两性", "情感", "恋爱", "情侣", "夫妻", "婚姻", "坦白局", "私密", "伴侣", "相处"]):
@@ -437,6 +446,7 @@ def infer_creator_topic_focus(topic: str) -> str:
     return "general"
 
 
+# 根据主题方向返回适合的选题切入视角描述（如"关系视角"、"问题拆解"等）。
 def select_creator_topic_cue(topic: str) -> str:
     focus = infer_creator_topic_focus(topic)
     mapping = {
@@ -450,12 +460,14 @@ def select_creator_topic_cue(topic: str) -> str:
     return mapping.get(focus, "核心切口")
 
 
+# 判断单个关键词是否匹配创作者上下文（完全相等或包含关系）。
 def keyword_matches_creator_context(keyword: str, context_keywords: list[str]) -> bool:
     if not context_keywords:
         return True
     return any(keyword == context or keyword in context or context in keyword for context in context_keywords)
 
 
+# 判断视频标题是否匹配创作者上下文（标题或其关键词是否与上下文相关）。
 def title_matches_creator_context(title: str, title_keywords: list[str], context_keywords: list[str]) -> bool:
     if not context_keywords:
         return bool(title_keywords)

@@ -5,14 +5,17 @@ from importlib import import_module
 from web.services.content import *
 
 
+# 延迟加载 web.app 模块，用于解决循环导入问题。
 def app_exports():
     return import_module("web.app")
 
+# 判断给定文本是否像是音乐类内容引用（包含音乐相关关键词）。
 def looks_like_music_reference(text: str) -> bool:
     normalized = normalize_reference_text(text)
     return bool(normalized) and any(token in normalized for token in MUSIC_REFERENCE_KEYWORDS)
 
 
+# 从文本中提取拉丁字母短语（英文单词或词组），用于参考类内容识别。
 def extract_latin_reference_phrases(text: str) -> list[str]:
     phrases: list[str] = []
     seen: set[str] = set()
@@ -26,6 +29,7 @@ def extract_latin_reference_phrases(text: str) -> list[str]:
     return phrases[:4]
 
 
+# 向基准查询列表追加一个去重的查询词（通过 seen 集合去重）。
 def append_benchmark_query(queries: list[str], seen: set[str], parts: list[str]) -> None:
     value = re.sub(r"\s+", " ", " ".join(str(part or "").strip() for part in parts if str(part or "").strip())).strip(
         " ，,。.;；:-_|"
@@ -37,6 +41,7 @@ def append_benchmark_query(queries: list[str], seen: set[str], parts: list[str])
     queries.append(value)
 
 
+# 规范化基准查询词，清洗后返回有效词条，无效或为停用词时返回空字符串。
 def normalize_benchmark_term(value: object) -> str:
     clean = re.sub(r"\s+", " ", str(value or "").strip()).strip(" ，,。.;；:-_|")
     marker = clean.lower()
@@ -45,6 +50,7 @@ def normalize_benchmark_term(value: object) -> str:
     return clean
 
 
+# 向基准词列表追加一个规范化后的词，控制在总数不超过 limit。
 def append_benchmark_term(terms: list[str], value: object, limit: int = 8) -> None:
     clean = normalize_benchmark_term(value)
     marker = clean.lower()
@@ -57,6 +63,7 @@ def append_benchmark_term(terms: list[str], value: object, limit: int = 8) -> No
         del terms[limit:]
 
 
+# 从文本中提取海外参考地名词（国家/地区名称），用于跨地域内容参考识别。
 def extract_geo_reference_terms(text: str) -> list[str]:
     terms: list[str] = []
     source_text = str(text or "")
@@ -70,6 +77,7 @@ def extract_geo_reference_terms(text: str) -> list[str]:
     return terms[:4]
 
 
+# 从文本中提取赶海相关词汇，用于识别赶海类内容参考。
 def extract_sea_harvest_reference_terms(text: str) -> list[str]:
     terms: list[str] = []
     source_text = str(text or "")
@@ -90,6 +98,7 @@ def extract_sea_harvest_reference_terms(text: str) -> list[str]:
     return terms[:8]
 
 
+# 从文本中提取叙事参考关键词（网暴/跟踪/反转等），用于争议性内容识别。
 def extract_narrative_reference_terms(text: str) -> list[str]:
     terms: list[str] = []
     source_text = str(text or "")
@@ -103,6 +112,7 @@ def extract_narrative_reference_terms(text: str) -> list[str]:
     return terms[:8]
 
 
+# 根据查询文本和已解析的视频信息构建参考匹配关键词列表。
 def build_reference_match_terms(query_text: str = "", resolved: dict | None = None) -> list[str]:
     terms: list[str] = []
     if isinstance(resolved, dict):
@@ -114,6 +124,7 @@ def build_reference_match_terms(query_text: str = "", resolved: dict | None = No
         append_benchmark_term(terms, term, limit=24)
     return terms[:24]
 
+# 将 VideoMetrics 对象或同结构对象展开为普通字典。
 def serialize_video_metric(video_metric: object) -> dict:
     payload = video_metric.to_dict() if hasattr(video_metric, "to_dict") else dict(video_metric)
     return {
@@ -214,6 +225,7 @@ def build_market_snapshot(
     }
 
 
+# 构建一个指定分区的空市场快照结构（用于无参考样本时的兜底）。
 def build_empty_market_snapshot(partition_name: str) -> dict:
     normalized_partition = CONFIG.normalize_partition(partition_name)
     partition_label = PARTITION_LABELS.get(normalized_partition, normalized_partition)
@@ -331,6 +343,7 @@ def build_video_benchmark_queries(resolved: dict) -> list[str]:
     return list(build_video_benchmark_profile(resolved).get("queries") or [])
 
 
+# 宽松回填：优先取近期爆款样本，样本不足时扩展时间范围和降低门槛再取。
 def fetch_hot_peer_samples_with_relaxed_backfill(
     queries: list[str],
     *,
@@ -514,6 +527,7 @@ def extract_reference_terms(text: str) -> list[str]:
     return terms[:32]
 
 
+# 从文本中提取系列参考类关键词（连续剧相关词汇），用于系列内容识别。
 def extract_series_reference_terms(text: str) -> list[str]:
     source_text = str(text or "")
     compact_text = re.sub(r"\s+", "", source_text)
@@ -770,6 +784,7 @@ def fetch_direct_related_reference_videos(bvid: str, limit: int = 10) -> list[di
     return results
 
 
+# 获取同 UP 主的历史视频作为参考样本，用于分析该 UP 的内容风格。
 def fetch_same_up_reference_videos(resolved: dict | None = None, limit: int = 8) -> list[dict]:
     resolved = resolved or {}
     exports = app_exports()
@@ -990,10 +1005,12 @@ def reference_video_needs_metric_refresh(item: dict) -> bool:
     return view is None or view <= 0 or like is None or (like <= 0 and like_rate <= 0.0)
 
 
+# 判断参考视频是否需要更新封面信息。
 def reference_video_needs_cover_refresh(item: dict) -> bool:
     return not normalize_text_value(item.get("cover"))
 
 
+# 判断参考视频是否需要更新语义信息（标题、分区关键词等）。
 def reference_video_needs_semantic_refresh(item: dict) -> bool:
     partition = str(item.get("partition") or "").strip()
     topic = str(item.get("topic") or "").strip()
@@ -1002,6 +1019,7 @@ def reference_video_needs_semantic_refresh(item: dict) -> bool:
     return not partition or not topic or (not tname and not keywords)
 
 
+# 为参考视频构建语义描述文本，用于内容分析和匹配。
 def build_reference_semantic_text(item: dict) -> str:
     parts = [
         str(item.get("title") or ""),
@@ -1341,10 +1359,12 @@ def build_reference_videos_from_market_snapshot(
         ]
 
 
+# 将任意值规范化为字符串，空值返回空字符串。
 def normalize_text_value(value: object) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n-_|，,。.;；")
 
 
+# 将任意值规范化为字符串列表，可选限制最大长度。
 def normalize_text_list(value: object, limit: int = 0) -> list[str]:
     raw_items: list[object] = []
     if isinstance(value, str):
@@ -1370,6 +1390,7 @@ def normalize_text_list(value: object, limit: int = 0) -> list[str]:
     return result
 
 
+# 合并多个文本列表，去重后返回，可选限制最大长度。
 def merge_text_lists(*values: object, limit: int = 0) -> list[str]:
     result: list[str] = []
     seen: set[str] = set()
@@ -1385,6 +1406,7 @@ def merge_text_lists(*values: object, limit: int = 0) -> list[str]:
     return result
 
 
+# 将任意值规范化为字典对象，非字典类型返回空字典。
 def normalize_object_payload(value: object) -> dict:
     if isinstance(value, dict):
         return dict(value)
@@ -1416,6 +1438,7 @@ def normalize_object_payload(value: object) -> dict:
     return {}
 
 
+# 从对象中提取指定键的列表字段，规范化为列表并可选限制长度后返回。
 def normalize_named_list_payload(value: object, target_key: str, limit: int = 0) -> dict:
     payload = normalize_object_payload(value)
     if payload:
@@ -1426,6 +1449,7 @@ def normalize_named_list_payload(value: object, target_key: str, limit: int = 0)
     return {target_key: texts}
 
 
+# 将任意值规范化为布尔值，转换失败时返回默认值。
 def normalize_bool_flag(value: object, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -1440,6 +1464,7 @@ def normalize_bool_flag(value: object, default: bool = False) -> bool:
     return bool(value)
 
 
+# 从 Agent 工具调用观测记录中提取检索匹配结果列表。
 def extract_retrieval_matches_from_tool_observations(observations: list[dict]) -> list[dict]:
     matches: list[dict] = []
     for item in observations or []:
@@ -1454,6 +1479,7 @@ def extract_retrieval_matches_from_tool_observations(observations: list[dict]) -
     return matches
 
 
+# 将知识库检索匹配结果转换为参考视频格式。
 def build_reference_video_from_knowledge_match(match: dict) -> dict | None:
     metadata = dict((match or {}).get("metadata") or {})
     text = str((match or {}).get("text") or "")
@@ -1496,6 +1522,7 @@ def build_reference_video_from_knowledge_match(match: dict) -> dict | None:
     }
 
 
+# 将多个检索匹配列表合并转换为参考视频列表。
 def build_reference_videos_from_retrieval_matches(
     matches: list[dict],
     exclude_bvid: str = "",
@@ -1547,6 +1574,7 @@ def build_reference_videos_from_retrieval_matches(
     return result
 
 
+# 为视频分析模块构建完整的参考视频列表（从多个来源聚合筛选）。
 def build_module_analyze_reference_videos(
     market_snapshot: dict,
     tool_observations: list[dict] | None = None,
@@ -1639,6 +1667,7 @@ def build_module_analyze_reference_videos(
     return result
 
 
+# 从视频标题推断其标题公式类型（如"对比类"、"数字类"等）。
 def infer_title_formula(title: str) -> str:
     text = normalize_text_value(title)
     if not text:
@@ -1654,6 +1683,7 @@ def infer_title_formula(title: str) -> str:
     return "具体场景 + 核心看点 + 情绪结果"
 
 
+# 根据分区和视频表现生成内容策略手册（发布节奏、标签策略等）。
 def build_partition_playbook(resolved: dict, performance: dict) -> dict:
     partition = str(resolved.get("partition") or "").strip()
     if partition == "knowledge":
@@ -1705,6 +1735,7 @@ def build_partition_playbook(resolved: dict, performance: dict) -> dict:
     }
 
 
+# 生成默认的标题备选集合，用于分析或推荐。
 def build_default_title_sets(resolved: dict, performance: dict) -> dict:
     base_topic = normalize_text_value(resolved.get("topic") or resolved.get("title") or resolved.get("partition_label") or "这条内容")
     base_topic = base_topic[:18] or "这条内容"
@@ -1734,6 +1765,7 @@ def build_default_title_sets(resolved: dict, performance: dict) -> dict:
     }
 
 
+# 生成默认的封面方案建议。
 def build_default_cover_plan(resolved: dict, title_sets: dict, playbook: dict) -> dict:
     keywords = extract_video_keywords(resolved.get("keywords"))
     hero = keywords[0] if keywords else normalize_text_value(resolved.get("topic") or resolved.get("partition_label") or "核心画面")
@@ -1751,6 +1783,7 @@ def build_default_cover_plan(resolved: dict, title_sets: dict, playbook: dict) -
     }
 
 
+# 生成默认的标签策略建议。
 def build_default_tag_strategy(resolved: dict, benchmark_videos: list[dict]) -> dict:
     keywords = extract_video_keywords(resolved.get("keywords"))
     partition_label = normalize_text_value(resolved.get("partition_label") or PARTITION_LABELS.get(resolved.get("partition", ""), ""))
@@ -1777,6 +1810,7 @@ def build_default_tag_strategy(resolved: dict, benchmark_videos: list[dict]) -> 
     }
 
 
+# 生成默认的发布策略建议（时间、频率等）。
 def build_default_publish_strategy(resolved: dict, performance: dict, playbook: dict) -> dict:
     partition_label = normalize_text_value(resolved.get("partition_label") or PARTITION_LABELS.get(resolved.get("partition", ""), "当前赛道"))
     should_ask_for_coin = normalize_bool_flag(playbook.get("coin"), default=not bool(performance.get("is_hot")))
@@ -1796,6 +1830,7 @@ def build_default_publish_strategy(resolved: dict, performance: dict, playbook: 
     }
 
 
+# 生成可复用的爆款要素总结，用于指导内容创作。
 def build_default_reusable_hit_points(
     resolved: dict,
     benchmark_videos: list[dict],
@@ -1817,6 +1852,7 @@ def build_default_reusable_hit_points(
     return normalize_text_list(points, limit=5)
 
 
+# 构建完整的默认分析结果 payload（包含分析要点、对标样本、标题集等）。
 def build_default_analysis_payload(
     resolved: dict,
     performance: dict,
@@ -1897,6 +1933,7 @@ def build_default_analysis_payload(
     return analysis_payload
 
 
+# 规范化视频分析模块的表现判断结果 payload。
 def normalize_module_performance_payload(performance: object, resolved: dict) -> dict:
     baseline = classify_video_performance(resolved)
     if not isinstance(performance, dict):
@@ -1925,6 +1962,7 @@ def normalize_module_performance_payload(performance: object, resolved: dict) ->
     return normalized
 
 
+# 规范化视频分析模块的完整分析结果 payload。
 def normalize_module_analysis_payload(
     result: dict,
     *,
@@ -2100,6 +2138,7 @@ def normalize_module_analysis_payload(
     return normalized_analysis
 
 
+# 根据参考视频列表和市场快照生成前端提示文本。
 def build_reference_videos_notice(reference_videos: list[dict], market_snapshot: dict) -> str:
     if reference_videos:
         return ""
@@ -2111,6 +2150,7 @@ def build_reference_videos_notice(reference_videos: list[dict], market_snapshot:
     return "暂时无法获取对标样本，请稍后重试。"
 
 
+# 获取预抓取的市场快照数据，用于视频分析前的数据准备。
 def get_prefetched_market_snapshot(
     market_snapshot_future,
     resolved: dict,

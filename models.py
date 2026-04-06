@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Dict, List
 
 
+# 视频指标数据类，存储单个视频的各类统计数据和评分。
 @dataclass
 class VideoMetrics:
     bvid: str
@@ -33,6 +34,7 @@ class VideoMetrics:
         return asdict(self)
 
 
+# 选题方向数据类，存储选题主题、推荐理由和视频类型。
 @dataclass
 class TopicIdea:
     topic: str
@@ -42,6 +44,7 @@ class TopicIdea:
     score: float = 0.0
 
 
+# 文案结果数据类，存储生成的标题、脚本、描述、标签等完整文案内容。
 @dataclass
 class CopywritingResult:
     topic: str
@@ -54,6 +57,7 @@ class CopywritingResult:
     raw_text: str = ""
 
 
+# 互动动作数据类，描述对视频的单个操作（如评论、删除、点赞、关注）。
 @dataclass
 class InteractionAction:
     action: str
@@ -62,6 +66,7 @@ class InteractionAction:
     dry_run: bool = True
 
 
+# 操作结果数据类，汇总对视频的多种互动操作结果。
 @dataclass
 class OperationResult:
     bv_id: str
@@ -72,6 +77,7 @@ class OperationResult:
     summary: str
 
 
+# 优化建议数据类，存储视频标题、封面、内容等方面的优化建议和对标视频摘要。
 @dataclass
 class OptimizationSuggestion:
     bv_id: str
