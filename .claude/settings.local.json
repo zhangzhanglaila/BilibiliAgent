@@ -7,7 +7,9 @@
       "Bash(echo \"exit: $?\")",
       "Bash(python3 -m json.tool)",
       "Bash(python3:*)",
-      "Bash(node --check web/static/app.js)"
+      "Bash(node --check web/static/app.js)",
+      "Bash(D:/agent/.venv/Scripts/python.exe:*)",
+      "Bash(D:/agent/.venv/Scripts/pip.exe list:*)"
     ]
   }
 }

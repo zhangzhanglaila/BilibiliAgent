@@ -1,0 +1,1 @@
+- [langchain 版本不兼容问题](fix_langchain_version_incompatibility.md) — langchain-core 与 langchain-openai 不兼容导致 LLM 不可用

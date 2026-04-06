@@ -1,0 +1,1 @@
+invalid type: string "{\"task_name\": \"workspace_chat\", \"user_payload\": {\"message\": \"舞台\", \"history\": [{\"role\": \"user\", \"content\": \"想看跳舞视频\"}, {\"role\": \"assistant\", \"content\": \"想看哪种舞蹈呢？比如街舞/韩舞/爵士/古风/拉丁，或者舞台演出、练习室、翻跳、编舞哪种风格？也可以说下在B站看还是想要选题推荐。\"
