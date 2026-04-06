@@ -311,10 +311,16 @@
               <div class="assistant-input-shell">
                 <div class="assistant-session-header">
                   <label class="assistant-input-label" for="assistantMessage">对话输入</label>
-                  <button class="assistant-sessions-btn" id="assistantSessionsBtn" type="button">
-                    <span class="assistant-sessions-btn__icon"></span>
-                    历史会话
-                  </button>
+                  <div class="assistant-session-actions">
+                    <button class="assistant-new-session-btn" id="assistantNewSessionBtn" type="button">
+                      <span class="assistant-new-session-btn__icon"></span>
+                      新建会话
+                    </button>
+                    <button class="assistant-sessions-btn" id="assistantSessionsBtn" type="button">
+                      <span class="assistant-sessions-btn__icon"></span>
+                      历史会话
+                    </button>
+                  </div>
                 </div>
                 <div class="assistant-input-box">
                   <textarea id="assistantMessage" rows="3" placeholder="{% if initial_runtime.chat_available %}例如：帮我分析这个视频为什么没有起量；或者：我想做颜值向舞蹈账号，第一条视频该拍什么{% else %}当前为无 Key 逻辑模式。开启上方 LLM Agent 开关后，这里才可真正发起智能会话。{% endif %}"></textarea>

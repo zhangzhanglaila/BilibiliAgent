@@ -36,6 +36,7 @@ const KNOWLEDGE_PARTITION_LABELS = {
 
 const CHAT_SESSION_ID_STORAGE_KEY = 'workspace_chat_session_id';
 const CHAT_SESSION_HISTORY_STORAGE_KEY = 'workspace_chat_session_history';
+const CHAT_SESSION_ID_PERSIST_KEY = 'workspace_chat_session_id_persist'; // localStorage，跨刷新/重启持久化
 const CHAT_SESSION_HISTORY_LIMIT = 10;
 const CHAT_SESSION_STORAGE_MAX_ITEM_CHARS = 4000;
 const CHAT_SESSION_STORAGE_MAX_TOTAL_CHARS = 24000;
@@ -2162,18 +2163,60 @@ function resetAssistantSession() {
   writeSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, []);
 }
 
+function createNewChatSession() {
+  // 如果当前已在空的新会话中，不需要重复新建
+  const alreadyEmpty = state.chatHistory.length === 0 && !state.chatPending;
+  if (alreadyEmpty) {
+    hideChatSessionsPopup();
+    showToast('当前已是新会话', '', 'info');
+    return;
+  }
+  resetAssistantSession();
+  state.chatHistory = [];
+  // 同步到 localStorage（跨刷新/重启持久化）
+  try {
+    window.localStorage.setItem(CHAT_SESSION_ID_PERSIST_KEY, state.chatSessionId);
+  } catch (_) {}
+  renderAssistant();
+  hideChatSessionsPopup();
+  showToast('已开启新会话', '', 'success');
+}
+
 function applyBackendSessionId(sessionId = '') {
   const nextId = String(sessionId || '').trim();
   if (!nextId) return;
   state.chatSessionId = nextId;
   try {
     window.sessionStorage.setItem(CHAT_SESSION_ID_STORAGE_KEY, nextId);
+    window.localStorage.setItem(CHAT_SESSION_ID_PERSIST_KEY, nextId);
   } catch (error) {
     return;
   }
 }
 
 // 历史会话管理
+
+// 页面加载时，从 localStorage 恢复上一个 session，自动加载其历史
+async function restoreLastChatSession() {
+  try {
+    const lastId = window.localStorage.getItem(CHAT_SESSION_ID_PERSIST_KEY);
+    if (!lastId) return;
+    const resp = await fetch(`/api/chat/sessions/${lastId}`);
+    const json = await resp.json();
+    if (!json.success || !json.data) return;
+    const data = json.data;
+    state.chatSessionId = lastId;
+    state.chatHistory = (data.history || []).map(item => ({
+      role: item.role,
+      content: item.content,
+    }));
+    try {
+      window.sessionStorage.setItem(CHAT_SESSION_ID_STORAGE_KEY, lastId);
+    } catch (_) {}
+    writeSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, state.chatHistory);
+  } catch (_) {}
+}
+
 async function loadChatSessionsList() {
   try {
     const resp = await fetch('/api/chat/sessions');
@@ -2248,9 +2291,10 @@ async function switchToChatSession(sessionId) {
       role: item.role,
       content: item.content,
     }));
-    // 同步到 sessionStorage
+    // 同步到 sessionStorage + localStorage（跨刷新/重启持久化）
     try {
       window.sessionStorage.setItem(CHAT_SESSION_ID_STORAGE_KEY, sessionId);
+      window.localStorage.setItem(CHAT_SESSION_ID_PERSIST_KEY, sessionId);
     } catch (_) {}
     writeSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, state.chatHistory);
     renderAssistant();
@@ -2261,7 +2305,11 @@ async function switchToChatSession(sessionId) {
 }
 
 function showChatSessionsPopup() {
-  hideChatSessionsPopup();
+  const existing = document.getElementById('chatSessionsPopup');
+  if (existing) {
+    hideChatSessionsPopup();
+    return;
+  }
   loadChatSessionsList();
 }
 
@@ -2497,6 +2545,11 @@ function initEvents() {
   $('#assistantSessionsBtn').addEventListener('click', (e) => {
     e.stopPropagation();
     showChatSessionsPopup();
+  });
+
+  $('#assistantNewSessionBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    createNewChatSession();
   });
 
   $$('.assistant-prompt').forEach(button => {
@@ -3072,6 +3125,8 @@ function init() {
   setKnowledgeSubtab(state.knowledgeActiveSubtab);
   $('#videoPreview').innerHTML = videoPreview(null);
   renderWorkspaceOutline();
+  // 恢复上一个会话（跨刷新/重启持久化）
+  restoreLastChatSession();
   renderAssistant();
   initEvents();
   initSpeechRecognition();

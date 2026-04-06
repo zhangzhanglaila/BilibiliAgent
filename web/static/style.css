@@ -1606,6 +1606,39 @@ button {
   display: inline-block;
 }
 
+/* 新建会话按钮 */
+.assistant-session-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.assistant-new-session-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #666;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 20px;
+  cursor: pointer;
+  transition: background 180ms ease, color 180ms ease;
+}
+
+.assistant-new-session-btn:hover {
+  background: rgba(0, 0, 0, 0.08);
+  color: #333;
+}
+
+.assistant-new-session-btn__icon {
+  width: 12px;
+  height: 12px;
+  display: inline-block;
+}
+
 /* 历史会话浮层 */
 .chat-sessions-popup {
   position: absolute;
