@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from importlib import import_module
-
 from web.services.content import *
 
 
-# 延迟加载 web.app 模块，用于解决循环导入问题。
 def app_exports():
     return import_module("web.app")
 
