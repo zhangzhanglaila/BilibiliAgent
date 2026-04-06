@@ -4,7 +4,8 @@
       "Bash(python -m pytest tests/test_llm_workspace_agent.py -v --tb=short)",
       "Bash(python:*)",
       "Bash(pip install:*)",
-      "Bash(echo \"exit: $?\")"
+      "Bash(echo \"exit: $?\")",
+      "Bash(python3 -m json.tool)"
     ]
   }
 }

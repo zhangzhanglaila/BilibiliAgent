@@ -36,9 +36,9 @@ def ensure_session_id(value: object) -> tuple[str, bool]:
     return session_id, True
 
 
-def normalize_chat_history(value: object, limit: int | None = None) -> list[dict[str, str]]:
+def normalize_chat_history(value: object, limit: int | None = None) -> list[dict[str, Any]]:
     max_items = max(1, int(limit or CONFIG.chat_session_history_limit))
-    history: list[dict[str, str]] = []
+    history: list[dict[str, Any]] = []
     for item in value or []:
         if not isinstance(item, dict):
             continue
@@ -46,7 +46,13 @@ def normalize_chat_history(value: object, limit: int | None = None) -> list[dict
         content = str(item.get("content") or "").strip()
         if role not in VALID_CHAT_ROLES or not content:
             continue
-        history.append({"role": role, "content": content})
+        normalized: dict[str, Any] = {"role": role, "content": content}
+        # 保留 actions 和 references（用于智能会话的视频卡片和推荐操作）
+        if isinstance(item.get("actions"), list):
+            normalized["actions"] = item["actions"]
+        if isinstance(item.get("references"), list):
+            normalized["references"] = item["references"]
+        history.append(normalized)
     return history[-max_items:]
 
 

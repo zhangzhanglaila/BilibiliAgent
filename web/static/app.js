@@ -2134,11 +2134,16 @@ function normalizeAssistantSessionHistory(items = [], options = {}) {
   const maxTotalChars = Math.max(maxItemChars, Number(options.maxTotalChars || CHAT_SESSION_STORAGE_MAX_TOTAL_CHARS) || CHAT_SESSION_STORAGE_MAX_TOTAL_CHARS);
 
   const normalized = (Array.isArray(items) ? items : [])
-    .map(item => ({
-      role: String(item?.role || '').trim(),
-      content: String(item?.fullContent || item?.content || '').trim().slice(-maxItemChars),
-    }))
-    .filter(item => (item.role === 'user' || item.role === 'assistant' || item.role === 'system') && item.content)
+    .map(item => {
+      const role = String(item?.role || '').trim();
+      const content = String(item?.fullContent || item?.content || '').trim().slice(-maxItemChars);
+      if (!['user', 'assistant', 'system'].includes(role) || !content) return null;
+      const normalized = { role, content };
+      if (Array.isArray(item?.actions)) normalized.actions = item.actions;
+      if (Array.isArray(item?.references)) normalized.references = item.references;
+      return normalized;
+    })
+    .filter(item => item !== null)
     .slice(-maxItems);
 
   const kept = [];
@@ -2207,8 +2212,10 @@ async function restoreLastChatSession() {
     const data = json.data;
     state.chatSessionId = lastId;
     state.chatHistory = (data.history || []).map(item => ({
-      role: item.role,
-      content: item.content,
+      role: item.role || 'user',
+      content: item.content || '',
+      actions: item.actions || [],
+      references: item.references || [],
     }));
     try {
       window.sessionStorage.setItem(CHAT_SESSION_ID_STORAGE_KEY, lastId);
@@ -2285,11 +2292,13 @@ async function switchToChatSession(sessionId) {
       return;
     }
     const data = json.data;
-    // 更新 session ID 和历史
+    // 更新 session ID 和历史（含 actions 和 references）
     state.chatSessionId = sessionId;
     state.chatHistory = (data.history || []).map(item => ({
-      role: item.role,
-      content: item.content,
+      role: item.role || 'user',
+      content: item.content || '',
+      actions: item.actions || [],
+      references: item.references || [],
     }));
     // 同步到 sessionStorage + localStorage（跨刷新/重启持久化）
     try {
@@ -3114,7 +3123,7 @@ function videoPreview(data, options = {}) {
 }
 
 // 初始化页面默认状态、事件绑定和运行模式信息。
-function init() {
+async function init() {
   restoreCreatorContextCache();
   resetAssistantSession();
   setActiveModule(state.activeModule);
@@ -3126,7 +3135,7 @@ function init() {
   $('#videoPreview').innerHTML = videoPreview(null);
   renderWorkspaceOutline();
   // 恢复上一个会话（跨刷新/重启持久化）
-  restoreLastChatSession();
+  await restoreLastChatSession();
   renderAssistant();
   initEvents();
   initSpeechRecognition();

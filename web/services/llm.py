@@ -932,9 +932,16 @@ def run_llm_chat(data: dict) -> dict:
         )
     else:
         result["reference_links"] = []
+    # 保存完整的历史消息（含 actions 和 references），便于历史恢复时完整展示
+    assistant_msg = {
+        "role": "assistant",
+        "content": str(result.get("reply") or "").strip() or "暂无回复",
+        "actions": result.get("suggested_next_actions") or [],
+        "references": result.get("reference_links") or [],
+    }
     updated_history = history + [
         {"role": "user", "content": message},
-        {"role": "assistant", "content": str(result.get("reply") or "").strip() or "暂无回复"},
+        assistant_msg,
     ]
     session_store.save_session_history_async(session_id, updated_history)
     # 持久化历史会话（文件存储，刷新后不丢失）
