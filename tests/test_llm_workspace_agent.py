@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -248,6 +249,43 @@ class LLMWorkspaceAgentTests(unittest.TestCase):
             if item.get("action") == "validation_error"
         ]
         self.assertTrue(any("已达上限" in error for error in errors))
+
+
+    def test_run_structured_marks_tool_timeout_and_continues(self) -> None:
+        llm = FakeLLM(
+            [
+                {"action": "web_search", "action_input": {"query": "slow", "limit": 3}, "final": None},
+                {"action": "final", "action_input": {}, "final": {"reply": "done"}},
+            ]
+        )
+        agent = LLMWorkspaceAgent(
+            llm_client=llm,
+            memory_store=None,
+            tools=[
+                AgentTool(
+                    name="web_search",
+                    description="search",
+                    handler=lambda payload: (time.sleep(0.12), {"query": payload.get("query", ""), "results": []})[1],
+                    timeout_seconds=0.01,
+                )
+            ],
+        )
+
+        result = agent.run_structured(
+            task_name="workspace_chat",
+            task_goal="answer the user",
+            user_payload={"message": "search something"},
+            response_contract="return JSON with reply",
+            allowed_tools=["web_search"],
+            required_final_keys=["reply"],
+            load_history=False,
+            save_memory=False,
+            enable_reflection=False,
+        )
+
+        self.assertEqual(result["agent_trace"], ["web_search"])
+        self.assertTrue(result["tool_observations"][0]["observation"]["timed_out"])
+        self.assertEqual(result["tool_observations"][0]["observation"]["tool"], "web_search")
 
 
 class SearchToolTests(unittest.TestCase):

@@ -140,7 +140,14 @@ def serialize_video_metric(video_metric: object) -> dict:
 
 
 # 汇总全站、分区和同类账号样本，生成一份市场快照。
-def build_market_snapshot(partition_name: str, up_ids: list[int] | None = None) -> dict:
+def build_market_snapshot(
+    partition_name: str,
+    up_ids: list[int] | None = None,
+    *,
+    include_hot_board: bool = True,
+    include_partition_samples: bool = True,
+    include_peer_samples: bool = True,
+) -> dict:
     normalized_partition = CONFIG.normalize_partition(partition_name)
     partition_label = PARTITION_LABELS.get(normalized_partition, normalized_partition)
 
@@ -176,13 +183,26 @@ def build_market_snapshot(partition_name: str, up_ids: list[int] | None = None) 
         except Exception:
             return []
 
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        hot_future = executor.submit(fetch_hot_board)
-        partition_future = executor.submit(fetch_partition_samples)
-        peer_future = executor.submit(fetch_peer_samples)
-        hot_board = hot_future.result()
-        partition_samples = partition_future.result()
-        peer_samples = peer_future.result()
+    hot_board: list[dict] = []
+    partition_samples: list[dict] = []
+    peer_samples: list[dict] = []
+    future_map: dict[str, object] = {}
+    max_workers = sum(bool(flag) for flag in (include_hot_board, include_partition_samples, include_peer_samples))
+    if max_workers > 0:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            if include_hot_board:
+                future_map["hot_board"] = executor.submit(fetch_hot_board)
+            if include_partition_samples:
+                future_map["partition_samples"] = executor.submit(fetch_partition_samples)
+            if include_peer_samples:
+                future_map["peer_samples"] = executor.submit(fetch_peer_samples)
+
+            if "hot_board" in future_map:
+                hot_board = future_map["hot_board"].result()
+            if "partition_samples" in future_map:
+                partition_samples = future_map["partition_samples"].result()
+            if "peer_samples" in future_map:
+                peer_samples = future_map["peer_samples"].result()
 
     return {
         "partition": normalized_partition,
@@ -2120,6 +2140,8 @@ def extract_reference_links_from_tool_observations(
     query_text: str = "",
     resolved: dict | None = None,
 ) -> list[dict]:
+    if not observations:
+        return []
     sources: list[dict] = []
     query_parts = [query_text]
     for item in observations or []:

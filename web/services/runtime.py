@@ -443,9 +443,11 @@ def sanitize_runtime_llm_config_payload(data: dict) -> dict[str, str]:
 
 # 清空缓存的 LLM Agent，确保切模式或改配置后会按新参数重建。
 def clear_llm_workspace_agent_cache() -> None:
-    global LLM_WORKSPACE_AGENT, LLM_WORKSPACE_SIGNATURE
+    global LLM_WORKSPACE_AGENT, LLM_WORKSPACE_SIGNATURE, LLM_WORKSPACE_CHAT_AGENT, LLM_WORKSPACE_CHAT_SIGNATURE
     LLM_WORKSPACE_AGENT = None
     LLM_WORKSPACE_SIGNATURE = None
+    LLM_WORKSPACE_CHAT_AGENT = None
+    LLM_WORKSPACE_CHAT_SIGNATURE = None
 
 
 # 保存新的运行时 LLM 配置，并立即切换到 LLM Agent 模式。
@@ -689,6 +691,8 @@ def normalize_copy_result_payload(copy_result: object, topic: str, style: str) -
 # 解码 HTTP 响应体，兼容 B 站当前会返回的 gzip 压缩页面。
 
 def build_runtime_payload() -> dict:
+    from web.services.session_memory import get_chat_session_memory_store
+
     mode = runtime_mode()
     llm_enabled = runtime_llm_enabled()
     saved_config = get_saved_runtime_llm_config() or {}
@@ -720,6 +724,7 @@ def build_runtime_payload() -> dict:
             if has_saved_config
             else "当前还没有可用 LLM 配置，打开右侧开关后需要先填写 URL、Key 和模型供应商。"
         ),
+        "session_memory_metrics": get_chat_session_memory_store().metrics_snapshot(),
     }
 
 

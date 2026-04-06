@@ -34,6 +34,13 @@ const KNOWLEDGE_PARTITION_LABELS = {
   ent: '娱乐',
 };
 
+const CHAT_SESSION_ID_STORAGE_KEY = 'workspace_chat_session_id';
+const CHAT_SESSION_HISTORY_STORAGE_KEY = 'workspace_chat_session_history';
+const CHAT_SESSION_HISTORY_LIMIT = 10;
+const CHAT_SESSION_STORAGE_MAX_ITEM_CHARS = 4000;
+const CHAT_SESSION_STORAGE_MAX_TOTAL_CHARS = 24000;
+const CREATOR_CONTEXT_STORAGE_KEY = 'workspace_creator_context';
+
 const state = {
   videoResolved: null,
   videoResolvedUrl: '',
@@ -67,6 +74,7 @@ const state = {
   chatPending: false,
   chatTyping: false,
   chatHistory: [],
+  chatSessionId: '',
   pendingRuntimeRetryAction: null,
   runtime: {
     mode: INITIAL_RUNTIME.mode || 'rules',
@@ -2095,6 +2103,214 @@ async function runAnalyzeModule() {
 }
 
 // 收集当前页面输入，作为助手对话的上下文。
+function createChatSessionId() {
+  if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+  return `chat_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function readSessionJson(key, fallback) {
+  try {
+    const raw = window.sessionStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch (error) {
+    return fallback;
+  }
+}
+
+function writeSessionJson(key, value) {
+  try {
+    window.sessionStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function normalizeAssistantSessionHistory(items = [], options = {}) {
+  const maxItems = Math.max(1, Number(options.maxItems || CHAT_SESSION_HISTORY_LIMIT) || CHAT_SESSION_HISTORY_LIMIT);
+  const maxItemChars = Math.max(200, Number(options.maxItemChars || CHAT_SESSION_STORAGE_MAX_ITEM_CHARS) || CHAT_SESSION_STORAGE_MAX_ITEM_CHARS);
+  const maxTotalChars = Math.max(maxItemChars, Number(options.maxTotalChars || CHAT_SESSION_STORAGE_MAX_TOTAL_CHARS) || CHAT_SESSION_STORAGE_MAX_TOTAL_CHARS);
+
+  const normalized = (Array.isArray(items) ? items : [])
+    .map(item => ({
+      role: String(item?.role || '').trim(),
+      content: String(item?.fullContent || item?.content || '').trim().slice(-maxItemChars),
+    }))
+    .filter(item => (item.role === 'user' || item.role === 'assistant' || item.role === 'system') && item.content)
+    .slice(-maxItems);
+
+  const kept = [];
+  let totalChars = 0;
+  for (let index = normalized.length - 1; index >= 0; index -= 1) {
+    const item = normalized[index];
+    const itemChars = item.role.length + item.content.length;
+    if (kept.length && totalChars + itemChars > maxTotalChars) continue;
+    kept.push(item);
+    totalChars += itemChars;
+  }
+  return kept.reverse();
+}
+
+function resetAssistantSession() {
+  state.chatSessionId = createChatSessionId();
+  try {
+    window.sessionStorage.setItem(CHAT_SESSION_ID_STORAGE_KEY, state.chatSessionId);
+  } catch (error) {
+    return;
+  }
+  writeSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, []);
+}
+
+function applyBackendSessionId(sessionId = '') {
+  const nextId = String(sessionId || '').trim();
+  if (!nextId) return;
+  state.chatSessionId = nextId;
+  try {
+    window.sessionStorage.setItem(CHAT_SESSION_ID_STORAGE_KEY, nextId);
+  } catch (error) {
+    return;
+  }
+}
+
+// 历史会话管理
+async function loadChatSessionsList() {
+  try {
+    const resp = await fetch('/api/chat/sessions');
+    const json = await resp.json();
+    if (json.success && json.data && json.data.sessions) {
+      renderChatSessionsPopup(json.data.sessions);
+    }
+  } catch (err) {
+    renderChatSessionsPopup([]);
+  }
+}
+
+function renderChatSessionsPopup(sessions) {
+  hideChatSessionsPopup();
+  const popup = document.createElement('div');
+  popup.className = 'chat-sessions-popup';
+  popup.id = 'chatSessionsPopup';
+
+  if (!sessions || sessions.length === 0) {
+    popup.innerHTML = '<div class="chat-sessions-popup__empty">暂无历史会话</div>';
+  } else {
+    popup.innerHTML = sessions.map(s => `
+      <div class="chat-sessions-popup__item" data-session-id="${s.session_id}">
+        <span class="chat-sessions-popup__time">${s.created_at_display || s.session_id}</span>
+        <span class="chat-sessions-popup__summary">${escapeHtml(s.first_question || '无标题')}</span>
+      </div>
+    `).join('');
+    popup.querySelectorAll('.chat-sessions-popup__item').forEach(item => {
+      item.addEventListener('click', () => {
+        const sid = item.dataset.sessionId;
+        switchToChatSession(sid);
+      });
+    });
+  }
+
+  const shell = document.querySelector('.assistant-input-shell');
+  if (shell) {
+    shell.appendChild(popup);
+    // 点击外部关闭
+    setTimeout(() => {
+      document.addEventListener('click', hideChatSessionsPopupOnClickOutside, { once: true });
+    }, 0);
+  }
+}
+
+function hideChatSessionsPopupOnClickOutside(e) {
+  const popup = document.getElementById('chatSessionsPopup');
+  const btn = document.getElementById('assistantSessionsBtn');
+  if (popup && !popup.contains(e.target) && (!btn || !btn.contains(e.target))) {
+    hideChatSessionsPopup();
+  }
+}
+
+function hideChatSessionsPopup() {
+  const popup = document.getElementById('chatSessionsPopup');
+  if (popup) popup.remove();
+}
+
+async function switchToChatSession(sessionId) {
+  hideChatSessionsPopup();
+  try {
+    const resp = await fetch(`/api/chat/sessions/${sessionId}`);
+    const json = await resp.json();
+    if (!json.success || !json.data) {
+      showToast('加载会话失败', json.error || '会话不存在', 'error');
+      return;
+    }
+    const data = json.data;
+    // 更新 session ID 和历史
+    state.chatSessionId = sessionId;
+    state.chatHistory = (data.history || []).map(item => ({
+      role: item.role,
+      content: item.content,
+    }));
+    // 同步到 sessionStorage
+    try {
+      window.sessionStorage.setItem(CHAT_SESSION_ID_STORAGE_KEY, sessionId);
+    } catch (_) {}
+    writeSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, state.chatHistory);
+    renderAssistant();
+    showToast('已切换到历史会话', '', 'success');
+  } catch (err) {
+    showToast('加载会话失败', err.message, 'error');
+  }
+}
+
+function showChatSessionsPopup() {
+  hideChatSessionsPopup();
+  loadChatSessionsList();
+}
+
+function escapeHtml(str = '') {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function storedAssistantSessionHistory() {
+  return normalizeAssistantSessionHistory(readSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, []));
+}
+
+function persistAssistantSessionHistory() {
+  const normalizedHistory = normalizeAssistantSessionHistory(state.chatHistory);
+  if (writeSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, normalizedHistory)) return;
+  try {
+    window.sessionStorage.removeItem(CHAT_SESSION_HISTORY_STORAGE_KEY);
+  } catch (error) {
+    return;
+  }
+  const emergencyHistory = normalizeAssistantSessionHistory(normalizedHistory, {
+    maxItems: Math.min(4, CHAT_SESSION_HISTORY_LIMIT),
+    maxItemChars: 1200,
+    maxTotalChars: 4800,
+  });
+  writeSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, emergencyHistory);
+}
+
+function persistCreatorContextCache() {
+  try {
+    window.localStorage.setItem(CREATOR_CONTEXT_STORAGE_KEY, JSON.stringify(chatContext()));
+  } catch (error) {
+    return;
+  }
+}
+
+function restoreCreatorContextCache() {
+  try {
+    const raw = JSON.parse(window.localStorage.getItem(CREATOR_CONTEXT_STORAGE_KEY) || '{}');
+    if (typeof raw !== 'object' || raw === null) return;
+    if (!($('#creatorField').value || '').trim()) $('#creatorField').value = raw.field || '';
+    if (!($('#creatorDirection').value || '').trim()) $('#creatorDirection').value = raw.direction || '';
+    if (!($('#creatorIdea').value || '').trim()) $('#creatorIdea').value = raw.idea || '';
+    if (!($('#creatorPartition').value || '').trim() && raw.partition) $('#creatorPartition').value = raw.partition;
+    if (!($('#creatorStyle').value || '').trim() && raw.style) $('#creatorStyle').value = raw.style;
+  } catch (error) {
+    return;
+  }
+}
+
 function chatContext() {
   return {
     field: ($('#creatorField').value || '').trim(),
@@ -2119,6 +2335,7 @@ async function sendAssistantMessage(forced = '') {
     return;
   }
   state.chatHistory.push({ role: 'user', content: message });
+  persistAssistantSessionHistory();
   state.chatPending = true;
   input.value = '';
   autosize(input);
@@ -2127,10 +2344,13 @@ async function sendAssistantMessage(forced = '') {
   setStatus('智能助手正在思考', 'loading');
   try {
     const data = await requestJson('/api/chat', {
+      session_id: state.chatSessionId,
       message,
-      history: state.chatHistory.map(item => ({ role: item.role, content: item.content })),
+      history: storedAssistantSessionHistory(),
       context: chatContext(),
     });
+    persistAssistantSessionHistory();
+    applyBackendSessionId(data.session_id);
     state.chatHistory.push({
       role: 'assistant',
       content: data.reply || '暂无回复',
@@ -2140,6 +2360,7 @@ async function sendAssistantMessage(forced = '') {
     setStatus('智能助手已回复', 'success');
   } catch (error) {
     state.chatHistory.push({ role: 'assistant', content: `请求失败：${error.message}`, error: true });
+    persistAssistantSessionHistory();
     setStatus('智能助手请求失败', 'error');
     showToast('智能助手失败', error.message, 'error');
   } finally {
@@ -2205,6 +2426,12 @@ function initEvents() {
   $('#runtimeConfigForm').addEventListener('submit', submitRuntimeConfig);
   $('#assistantLockOverlay').addEventListener('click', handleAssistantLockedClick);
   $('#videoLink').addEventListener('input', scheduleVideoResolve);
+  ['#creatorField', '#creatorDirection', '#creatorIdea', '#creatorPartition', '#creatorStyle'].forEach(selector => {
+    const node = $(selector);
+    if (!node) return;
+    node.addEventListener('input', persistCreatorContextCache);
+    node.addEventListener('change', persistCreatorContextCache);
+  });
   $('#knowledgeActionHost')?.addEventListener('click', event => {
     const button = event.target.closest('button');
     if (!button) return;
@@ -2265,6 +2492,11 @@ function initEvents() {
 
   $('#assistantSendBtn').addEventListener('click', () => {
     ($('#assistantMessage').value || '').trim() ? sendAssistantMessage() : toggleVoiceInput();
+  });
+
+  $('#assistantSessionsBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    showChatSessionsPopup();
   });
 
   $$('.assistant-prompt').forEach(button => {
@@ -2530,6 +2762,7 @@ function clearResults() {
   state.chatPending = false;
   state.chatTyping = false;
   state.chatHistory = [];
+  resetAssistantSession();
   if (state.videoResolveTimer) {
     window.clearTimeout(state.videoResolveTimer);
     state.videoResolveTimer = null;
@@ -2723,6 +2956,7 @@ async function sendAssistantMessage(forced = '') {
 
   const userItem = { role: 'user', content: message };
   state.chatHistory.push(userItem);
+  persistAssistantSessionHistory();
   state.chatPending = true;
   input.value = '';
   autosize(input);
@@ -2740,13 +2974,15 @@ async function sendAssistantMessage(forced = '') {
 
   try {
     const data = await requestJson('/api/chat', {
+      session_id: state.chatSessionId,
       message,
-      history: state.chatHistory.map(item => ({ role: item.role, content: item.fullContent || item.content })),
+      history: storedAssistantSessionHistory(),
       context: chatContext(),
     });
 
     stopProgressJob('assistant', 100);
     state.chatPending = false;
+    applyBackendSessionId(data.session_id);
     const assistantItem = {
       role: 'assistant',
       content: '',
@@ -2756,6 +2992,7 @@ async function sendAssistantMessage(forced = '') {
       typing: true,
     };
     state.chatHistory.push(assistantItem);
+    persistAssistantSessionHistory();
     renderAssistant();
     setStatus('智能助手正在输出回答', 'loading');
     await typeAssistantReply(assistantItem);
@@ -2772,6 +3009,7 @@ async function sendAssistantMessage(forced = '') {
     renderAssistant();
   } finally {
     stopProgressJob('assistant');
+    persistAssistantSessionHistory();
     updateAssistantButton();
   }
 }
@@ -2824,6 +3062,8 @@ function videoPreview(data, options = {}) {
 
 // 初始化页面默认状态、事件绑定和运行模式信息。
 function init() {
+  restoreCreatorContextCache();
+  resetAssistantSession();
   setActiveModule(state.activeModule);
   state.knowledgeResults.upload = knowledgePlaceholder('upload');
   state.knowledgeResults.sync = knowledgePlaceholder('sync');

@@ -1,12 +1,54 @@
 from __future__ import annotations
 
 from importlib import import_module
+import threading
+import time
 
 from web.services.reference import *
+from web.services.session_memory import (
+    build_cache_identity,
+    ensure_session_id,
+    get_chat_session_memory_store,
+    get_chat_session_metadata_store,
+)
 
 
 def app_exports():
     return import_module("web.app")
+
+
+WORKSPACE_CHAT_HISTORY_TRIGGER_KEYWORDS = (
+    "历史对话",
+    "回顾",
+    "复盘",
+    "刚才聊",
+    "之前聊",
+    "上次聊",
+    "我们聊过",
+    "总结一下对话",
+    "前文",
+)
+WORKSPACE_CHAT_RETRIEVAL_TRIGGER_KEYWORDS = WORKSPACE_CHAT_HISTORY_TRIGGER_KEYWORDS + (
+    "知识库",
+    "检索",
+    "本地资料",
+    "沉淀资料",
+)
+
+
+def should_allow_workspace_chat_retrieval(message: str) -> bool:
+    clean_message = str(message or "").strip()
+    return any(keyword in clean_message for keyword in WORKSPACE_CHAT_RETRIEVAL_TRIGGER_KEYWORDS)
+
+
+def build_workspace_chat_system_prompt() -> str:
+    return (
+        "你是 B 站创作工作台里的智能对话助手。\n"
+        "回答时优先使用当前请求里已经提供的 creator_context、会话级历史和 video_url，不要为了补全上下文默认调用 retrieval。\n"
+        "只有当用户明确要求回顾历史对话、检索知识库或查本地沉淀资料时，才允许调用 retrieval。\n"
+        "如果用户请求的是找视频、看内容、搜索推荐等消费类需求，优先调用 web_search 搜索相关视频或内容。\n"
+        "如果工具超时、失败或无结果，直接跳过该工具，基于现有上下文继续回答，不要卡住。"
+    )
 
 def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
     resolved = build_resolved_payload(info, bvid)
@@ -88,13 +130,36 @@ def build_video_analyze_preloaded_context(resolved: dict, url: str, market_snaps
 
 
 # 构造指定分区的热点看板快照，供聊天和分析工具复用。
+def compact_hot_board_item_for_chat(item: dict) -> dict:
+    return {
+        "bvid": str(item.get("bvid") or "").strip(),
+        "title": str(item.get("title") or "").strip(),
+        "author": str(item.get("author") or "").strip(),
+        "view": safe_int(item.get("view")),
+        "like": safe_int(item.get("like")),
+        "like_rate": float(item.get("like_rate") or 0.0),
+        "source": str(item.get("source") or "").strip(),
+        "url": str(item.get("url") or "").strip(),
+    }
+
+
 def build_hot_board_snapshot(partition_name: str) -> dict:
-    market_snapshot = build_market_snapshot(partition_name)
+    market_snapshot = build_market_snapshot(
+        partition_name,
+        include_peer_samples=False,
+    )
     return {
         "partition": market_snapshot.get("partition"),
         "partition_label": market_snapshot.get("partition_label"),
-        "hot_board": market_snapshot.get("hot_board", []),
-        "partition_samples": market_snapshot.get("partition_samples", []),
+        "source_count": safe_int(market_snapshot.get("source_count")),
+        "hot_board": [
+            compact_hot_board_item_for_chat(item)
+            for item in (market_snapshot.get("hot_board") or [])[:5]
+        ],
+        "partition_samples": [
+            compact_hot_board_item_for_chat(item)
+            for item in (market_snapshot.get("partition_samples") or [])[:5]
+        ],
     }
 
 
@@ -105,7 +170,7 @@ def extract_first_bili_url(text: str) -> str:
 
 
 # 把工具返回的市场数据沉淀进本地知识库，供后续 RAG 检索复用。
-def save_tool_result_to_knowledge_base(source_id: str, text: str, metadata: dict | None = None) -> None:
+def _save_tool_result_to_knowledge_base_worker(source_id: str, text: str, metadata: dict | None = None) -> None:
     clean_id = normalize_creator_text(source_id) or "workspace"
     clean_text = str(text or "").strip()
     if not clean_text:
@@ -122,6 +187,26 @@ def save_tool_result_to_knowledge_base(source_id: str, text: str, metadata: dict
         return
 
 
+def save_tool_result_to_knowledge_base(
+    source_id: str,
+    text: str,
+    metadata: dict | None = None,
+    *,
+    async_write: bool = False,
+) -> None:
+    if not async_write:
+        _save_tool_result_to_knowledge_base_worker(source_id, text, metadata)
+        return
+
+    thread = threading.Thread(
+        target=_save_tool_result_to_knowledge_base_worker,
+        args=(source_id, text, metadata),
+        daemon=True,
+        name="runtime-tool-kb-save",
+    )
+    thread.start()
+
+
 def build_knowledge_base_status() -> dict:
     status = KNOWLEDGE_BASE.backend_status()
     status["vector_db_path"] = CONFIG.vector_db_path
@@ -135,19 +220,33 @@ def build_knowledge_base_status() -> dict:
 
 @traceable(run_type="tool", name="web.creator_briefing_tool_handler", tags=["tool", "creator_briefing", "rag"])
 def creator_briefing_tool_handler(payload: dict) -> dict:
+    normalized_payload = {
+        "field": str(payload.get("field") or "").strip(),
+        "direction": str(payload.get("direction") or "").strip(),
+        "idea": str(payload.get("idea") or "").strip(),
+        "partition": str(payload.get("partition") or "knowledge").strip() or "knowledge",
+    }
+    cache_store = get_chat_session_memory_store()
+    cache_identity = build_cache_identity("creator_briefing", normalized_payload)
+    cached_result = cache_store.get_cached_payload(cache_identity)
+    if isinstance(cached_result, dict):
+        return cached_result
+
     result = build_creator_briefing(
-        payload.get("field", ""),
-        payload.get("direction", ""),
-        payload.get("idea", ""),
-        payload.get("partition", "knowledge"),
+        normalized_payload["field"],
+        normalized_payload["direction"],
+        normalized_payload["idea"],
+        normalized_payload["partition"],
     )
+    cache_store.set_cached_payload(cache_identity, result, CONFIG.creator_briefing_cache_ttl_seconds)
     save_tool_result_to_knowledge_base(
-        f"creator_{payload.get('field', '')}_{payload.get('direction', '')}_{payload.get('partition', '')}",
+        f"creator_{normalized_payload['field']}_{normalized_payload['direction']}_{normalized_payload['partition']}",
         json.dumps(result, ensure_ascii=False),
         {
             "source": "creator_briefing",
-            "partition": payload.get("partition", "knowledge"),
+            "partition": normalized_payload["partition"],
         },
+        async_write=True,
     )
     return result
 
@@ -162,20 +261,32 @@ def video_briefing_tool_handler(payload: dict) -> dict:
             "source": "video_briefing",
             "partition": (result.get("video") or {}).get("retrieval_partition", ""),
         },
+        async_write=True,
     )
     return result
 
 
 @traceable(run_type="tool", name="web.hot_board_snapshot_tool_handler", tags=["tool", "hot_board_snapshot", "rag"])
 def hot_board_snapshot_tool_handler(payload: dict) -> dict:
-    result = build_hot_board_snapshot(payload.get("partition", "knowledge"))
+    normalized_payload = {
+        "partition": str(payload.get("partition") or "knowledge").strip() or "knowledge",
+    }
+    cache_store = get_chat_session_memory_store()
+    cache_identity = build_cache_identity("hot_board_snapshot", normalized_payload)
+    cached_result = cache_store.get_cached_payload(cache_identity)
+    if isinstance(cached_result, dict):
+        return cached_result
+
+    result = build_hot_board_snapshot(normalized_payload["partition"])
+    cache_store.set_cached_payload(cache_identity, result, CONFIG.hot_board_snapshot_cache_ttl_seconds)
     save_tool_result_to_knowledge_base(
-        f"hot_{payload.get('partition', 'knowledge')}",
+        f"hot_{normalized_payload['partition']}",
         json.dumps(result, ensure_ascii=False),
         {
             "source": "hot_board_snapshot",
-            "partition": payload.get("partition", "knowledge"),
+            "partition": normalized_payload["partition"],
         },
+        async_write=True,
     )
     return result
 
@@ -213,6 +324,30 @@ def load_creator_preprocessed_context(data: dict) -> dict:
 
 
 # 懒加载并返回全局 LLMWorkspaceAgent 实例。
+def build_workspace_agent_tools() -> list[AgentTool]:
+    return [
+        AgentTool(
+            name="video_briefing",
+            description="瑙ｆ瀽 B 绔欒棰戦摼鎺ワ紝杩斿洖瑙嗛鍏紑鏁版嵁锛屽苟琛ュ悓鏂瑰悜鐖嗘瀵规爣鏍锋湰銆傝緭鍏? {url}",
+            handler=video_briefing_tool_handler,
+            timeout_seconds=CONFIG.video_briefing_tool_timeout_seconds,
+        ),
+        AgentTool(
+            name="hot_board_snapshot",
+            description="鑾峰彇鎸囧畾鍒嗗尯鐨勭儹鐐规鍜屽垎鍖烘牱鏈師濮嬫暟鎹紝閫傚悎鍥炵瓟瓒嬪娍銆佺儹鐐广€佽繎鏈熶粈涔堝唴瀹圭伀銆傝緭鍏? {partition}",
+            handler=hot_board_snapshot_tool_handler,
+            timeout_seconds=CONFIG.hot_board_snapshot_tool_timeout_seconds,
+        ),
+        RetrievalTool(timeout_seconds=CONFIG.retrieval_tool_timeout_seconds),
+        AgentTool(
+            name="web_search",
+            description="瀹炴椂鎼滅储鐑偣銆佸钩鍙版椿鍔ㄣ€佺珵鍝佽秼鍔垮拰澶栭儴鍏紑淇℃伅銆傝緭鍏? {query, limit}",
+            handler=lambda payload: WEB_SEARCH.search(payload.get("query", ""), int(payload.get("limit") or 5)),
+            timeout_seconds=CONFIG.web_search_tool_timeout_seconds,
+        ),
+    ]
+
+
 def get_llm_workspace_agent() -> LLMWorkspaceAgent:
     global LLM_WORKSPACE_AGENT, LLM_WORKSPACE_SIGNATURE
     active_config = get_active_runtime_llm_config()
@@ -229,27 +364,87 @@ def get_llm_workspace_agent() -> LLMWorkspaceAgent:
         LLM_WORKSPACE_AGENT = LLMWorkspaceAgent(
             llm_client=build_runtime_llm_client(),
             memory_store=get_long_term_memory(),
+            tools=build_workspace_agent_tools(),
+        )
+        LLM_WORKSPACE_SIGNATURE = signature
+    return LLM_WORKSPACE_AGENT
+
+"""
+
+    if LLM_WORKSPACE_AGENT is None or LLM_WORKSPACE_SIGNATURE != signature:
+        LLM_WORKSPACE_AGENT = LLMWorkspaceAgent(
+            llm_client=build_runtime_llm_client(),
+            memory_store=get_long_term_memory(),
             tools=[
                 AgentTool(
                     name="video_briefing",
                     description="解析 B 站视频链接，返回视频公开数据，并补同方向爆款对标样本。输入: {url}",
                     handler=video_briefing_tool_handler,
+                    timeout_seconds=CONFIG.video_briefing_tool_timeout_seconds,
                 ),
                 AgentTool(
                     name="hot_board_snapshot",
                     description="获取指定分区的热点榜和分区样本原始数据，适合回答趋势、热点、近期什么内容火。输入: {partition}",
                     handler=hot_board_snapshot_tool_handler,
+                    timeout_seconds=CONFIG.hot_board_snapshot_tool_timeout_seconds,
                 ),
-                RetrievalTool(),
+                RetrievalTool(timeout_seconds=CONFIG.retrieval_tool_timeout_seconds),
                 AgentTool(
                     name="web_search",
                     description="实时搜索热点、平台活动、竞品趋势和外部公开信息。输入: {query, limit}",
                     handler=lambda payload: WEB_SEARCH.search(payload.get("query", ""), int(payload.get("limit") or 5)),
+                    timeout_seconds=CONFIG.web_search_tool_timeout_seconds,
                 ),
             ],
         )
         LLM_WORKSPACE_SIGNATURE = signature
     return LLM_WORKSPACE_AGENT
+
+
+def get_llm_workspace_chat_agent() -> LLMWorkspaceAgent:
+    global LLM_WORKSPACE_CHAT_AGENT, LLM_WORKSPACE_CHAT_SIGNATURE
+    active_config = get_active_runtime_llm_config()
+    if not active_config:
+        raise RuntimeError("褰撳墠鏈紑鍚?LLM Agent 妯″紡锛屾垨杩樻病鏈夊彲鐢ㄧ殑 LLM 閰嶇疆銆?)
+
+    signature = (
+        active_config.get("provider", ""),
+        active_config.get("base_url", ""),
+        active_config.get("api_key", ""),
+        active_config.get("model", ""),
+    )
+    if LLM_WORKSPACE_CHAT_AGENT is None or LLM_WORKSPACE_CHAT_SIGNATURE != signature:
+        LLM_WORKSPACE_CHAT_AGENT = LLMWorkspaceAgent(
+            llm_client=build_runtime_llm_client(),
+            enable_memory=False,
+            tools=build_workspace_agent_tools(),
+        )
+        LLM_WORKSPACE_CHAT_SIGNATURE = signature
+    return LLM_WORKSPACE_CHAT_AGENT
+"""
+
+
+def get_llm_workspace_chat_agent() -> LLMWorkspaceAgent:
+    global LLM_WORKSPACE_CHAT_AGENT, LLM_WORKSPACE_CHAT_SIGNATURE
+    active_config = get_active_runtime_llm_config()
+    if not active_config:
+        raise RuntimeError("LLM Agent mode is not enabled, or no runtime LLM config is available.")
+
+    signature = (
+        active_config.get("provider", ""),
+        active_config.get("base_url", ""),
+        active_config.get("api_key", ""),
+        active_config.get("model", ""),
+    )
+    if LLM_WORKSPACE_CHAT_AGENT is None or LLM_WORKSPACE_CHAT_SIGNATURE != signature:
+        LLM_WORKSPACE_CHAT_AGENT = LLMWorkspaceAgent(
+            llm_client=build_runtime_llm_client(),
+            enable_memory=False,
+            tools=build_workspace_agent_tools(),
+        )
+        LLM_WORKSPACE_CHAT_SIGNATURE = signature
+    return LLM_WORKSPACE_CHAT_AGENT
+
 
 def video_analyze_retrieval_tool_handler(payload: dict) -> dict:
     query = str(payload.get("query") or "").strip()
@@ -303,6 +498,22 @@ def video_analyze_action_validator(
     return ""
 
 
+def build_workspace_chat_action_validator(message: str):
+    allow_retrieval = should_allow_workspace_chat_retrieval(message)
+
+    def validator(
+        action: str,
+        action_input: dict,
+        scratchpad: list[dict],
+        used_tools: list[str],
+    ) -> str:
+        if action == "retrieval" and not allow_retrieval:
+            return "当前对话默认跳过 retrieval。只有明确要求回顾历史对话或检索本地知识库时才允许调用。"
+        return ""
+
+    return validator
+
+
 def get_video_analyze_agent() -> LLMWorkspaceAgent:
     global LLM_VIDEO_ANALYZE_AGENT, LLM_VIDEO_ANALYZE_SIGNATURE
     active_config = get_active_runtime_llm_config()
@@ -324,11 +535,13 @@ def get_video_analyze_agent() -> LLMWorkspaceAgent:
                     name="retrieval",
                     description="从 bilibili_knowledge 中检索同垂类静态爆款样本，自动过滤历史工具回流数据。输入: {query, limit}",
                     handler=video_analyze_retrieval_tool_handler,
+                    timeout_seconds=CONFIG.retrieval_tool_timeout_seconds,
                 ),
                 AgentTool(
                     name="web_search",
                     description="当 retrieval 样本不足时联网搜索最新赛道爆款规则与案例。输入: {query, limit}",
                     handler=lambda payload: WEB_SEARCH.search(payload.get("query", ""), int(payload.get("limit") or 5)),
+                    timeout_seconds=CONFIG.web_search_tool_timeout_seconds,
                 ),
             ],
         )
@@ -647,9 +860,21 @@ def run_llm_module_analyze(
 
 @traceable(run_type="chain", name="web.run_llm_chat", tags=["web", "llm", "rag", "workspace_chat"])
 def run_llm_chat(data: dict) -> dict:
-    agent = app_exports().get_llm_workspace_agent()
+    agent = app_exports().get_llm_workspace_chat_agent()
     message = (data.get("message") or "").strip()
-    history = data.get("history") if isinstance(data.get("history"), list) else []
+    session_id, _ = ensure_session_id(data.get("session_id"))
+    frontend_history = data.get("history") if isinstance(data.get("history"), list) else []
+    session_store = get_chat_session_memory_store()
+    session_context = session_store.load_session_history(session_id, frontend_history)
+    history = session_context.get("history") if isinstance(session_context.get("history"), list) else []
+    # Deduplicate: if frontend_history already contains the current message (as the last user msg),
+    # remove it to avoid counting it twice when we append at the end.
+    if (
+        history
+        and history[-1].get("role") == "user"
+        and history[-1].get("content") == message
+    ):
+        history = history[:-1]
     context = data.get("context") if isinstance(data.get("context"), dict) else {}
 
     creator_context = {
@@ -667,19 +892,25 @@ def run_llm_chat(data: dict) -> dict:
         "- suggested_next_actions: 字符串数组，可为空\n"
         "- mode: 固定返回 llm_agent\n"
     )
+    allowed_tools = allowed_tools_for_scene("workspace_chat")
     result = agent.run_structured(
         task_name="workspace_chat",
         task_goal="理解用户自然语言意图，自主决定是否调用工具来完成选题、视频分析、热点判断、文案建议等问题，并用中文直接回复。",
         user_payload={
             "message": message,
-            "history": history[-8:],
+            "history": history[-CONFIG.chat_session_history_limit :],
             "creator_context": creator_context,
             "video_url": video_url,
-            "memory_user_id": "web_workspace_chat",
+            "session_id": session_id,
+            "session_context_source": session_context.get("source", ""),
         },
         response_contract=response_contract,
-        allowed_tools=allowed_tools_for_scene("workspace_chat"),
+        allowed_tools=allowed_tools,
         required_final_keys=["reply", "suggested_next_actions", "mode"],
+        load_history=False,
+        save_memory=False,
+        system_prompt_override=build_workspace_chat_system_prompt(),
+        action_validator=build_workspace_chat_action_validator(message),
     )
     chat_query_text = " ".join(
         value
@@ -692,11 +923,32 @@ def run_llm_chat(data: dict) -> dict:
         ]
         if value
     )
-    result["reference_links"] = extract_reference_links_from_tool_observations(
-        result.get("tool_observations", []),
-        exclude_bvid="",
-        query_text=chat_query_text,
+    tool_observations = result.get("tool_observations", []) if isinstance(result.get("tool_observations"), list) else []
+    if tool_observations:
+        result["reference_links"] = extract_reference_links_from_tool_observations(
+            tool_observations,
+            exclude_bvid="",
+            query_text=chat_query_text,
+        )
+    else:
+        result["reference_links"] = []
+    updated_history = history + [
+        {"role": "user", "content": message},
+        {"role": "assistant", "content": str(result.get("reply") or "").strip() or "暂无回复"},
+    ]
+    session_store.save_session_history_async(session_id, updated_history)
+    # 持久化历史会话（文件存储，刷新后不丢失）
+    is_new_session = session_context.get("source") in ("frontend_session", "empty")
+    meta_store = get_chat_session_metadata_store()
+    meta_store.save_session_async(
+        session_id,
+        first_question=message if is_new_session else "",
+        history=updated_history,
+        created_at=int(time.time()) if is_new_session else None,
     )
+    result["session_id"] = session_id
+    result["session_context_source"] = session_context.get("source", "")
+    result["session_context_load_ms"] = session_context.get("load_ms", 0.0)
     return result
 
 

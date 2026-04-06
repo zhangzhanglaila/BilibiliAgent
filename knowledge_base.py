@@ -55,6 +55,12 @@ STATIC_SAMPLE_DATA_TYPE = "static_hot_case"
 STATIC_SAMPLE_ORIGINAL_SOURCE = "bilibili_hot_sync"
 
 
+def keyword_tokens(text: str) -> List[str]:
+    clean = str(text or "").lower()
+    tokens = re.findall(r"[\u4e00-\u9fff]{1,6}|[a-z0-9]{2,24}", clean)
+    return [token for token in tokens if token.strip()]
+
+
 class DeterministicEmbeddings(Embeddings):
     """Offline-safe embeddings so the vector layer can work without external APIs."""
 
@@ -817,12 +823,6 @@ class KnowledgeBase:
 
 
 DEFAULT_KNOWLEDGE_BASE = KnowledgeBase()
-
-
-def keyword_tokens(text: str) -> List[str]:
-    clean = str(text or "").lower()
-    tokens = re.findall(r"[\u4e00-\u9fff]{1,6}|[a-z0-9]{2,24}", clean)
-    return [token for token in tokens if token.strip()]
 
 
 def add_document(document: Document) -> Dict[str, Any]:

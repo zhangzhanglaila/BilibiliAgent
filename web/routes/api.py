@@ -29,6 +29,8 @@ from web.services.content import (
     extract_bvid,
     fetch_video_preview_info,
 )
+from web.services.session_memory import get_chat_session_metadata_store
+
 from web.services.llm import (
     build_knowledge_base_status,
     execute_module_analyze_request,
@@ -394,6 +396,22 @@ def api_chat():
             ),
             llm_error_http_status(exc),
         )
+
+
+@api_bp.get("/api/chat/sessions")
+def api_chat_sessions_list():
+    store = get_chat_session_metadata_store()
+    sessions = store.list_sessions()
+    return jsonify({"success": True, "data": {"sessions": sessions}})
+
+
+@api_bp.get("/api/chat/sessions/<session_id>")
+def api_chat_session_detail(session_id):
+    store = get_chat_session_metadata_store()
+    session_data = store.get_session(session_id)
+    if not session_data:
+        return jsonify({"success": False, "error": "会话不存在"}), 404
+    return jsonify({"success": True, "data": session_data})
 
 
 @api_bp.post("/api/topic")

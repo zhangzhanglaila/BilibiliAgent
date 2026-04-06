@@ -1,6 +1,7 @@
 """Strict LLM agent runtime for key-enabled mode."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import json
 import threading
 from dataclasses import dataclass
@@ -20,10 +21,11 @@ class AgentTool:
     name: str
     description: str
     handler: Callable[[Dict[str, Any]], Dict[str, Any]]
+    timeout_seconds: float | None = None
 
 
 class RetrievalTool(AgentTool):
-    def __init__(self, description: str | None = None) -> None:
+    def __init__(self, description: str | None = None, timeout_seconds: float | None = None) -> None:
         super().__init__(
             name="retrieval",
             description=description or "从本地知识库检索案例、经验和结构化资料。输入: {query, limit, metadata_filter}",
@@ -32,6 +34,7 @@ class RetrievalTool(AgentTool):
                 limit=max(1, min(int(payload.get("limit") or 4), 8)),
                 metadata_filter=payload.get("metadata_filter") if isinstance(payload.get("metadata_filter"), dict) else None,
             ),
+            timeout_seconds=timeout_seconds,
         )
 
 
@@ -363,6 +366,26 @@ class LLMWorkspaceAgent:
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
 
+    def _invoke_tool_with_timeout(self, tool: AgentTool, action_input: Dict[str, Any]) -> Dict[str, Any]:
+        timeout_seconds = float(tool.timeout_seconds or 0.0)
+        if timeout_seconds <= 0:
+            return tool.handler(action_input)
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(tool.handler, action_input)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FutureTimeoutError:
+            future.cancel()
+            return {
+                "error": f"tool_timeout:{tool.name}",
+                "timed_out": True,
+                "tool": tool.name,
+                "timeout_seconds": timeout_seconds,
+            }
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
     @traceable(run_type="chain", name="llm_workspace_agent.run_structured", tags=["llm_agent", "rag"])
     def run_structured(
         self,
@@ -573,7 +596,7 @@ class LLMWorkspaceAgent:
                 tags=["agent_tool", action],
             ) as run:
                 try:
-                    observation = tool.handler(action_input)
+                    observation = self._invoke_tool_with_timeout(tool, action_input)
                 except Exception as exc:
                     observation = {"error": str(exc)}
                 end_trace(run, {"observation_preview": self._payload_text(observation)[:1000]})

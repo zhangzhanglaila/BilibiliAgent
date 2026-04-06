@@ -16,6 +16,7 @@ from web.app import (
     VIDEO_ANALYZE_REQUIRED_TOOLS,
     app,
     build_empty_market_snapshot,
+    build_hot_board_snapshot,
     build_hot_peer_market_snapshot,
     build_module_analyze_reference_videos,
     build_reference_query_text,
@@ -79,6 +80,62 @@ class WebContextPolicyTests(unittest.TestCase):
         self.assertEqual(snapshot["partition_samples"], [])
         self.assertEqual(snapshot["peer_samples"], [])
         self.assertEqual(snapshot["source_count"], 0)
+
+    def test_build_hot_board_snapshot_skips_peer_samples_and_trims_payload(self) -> None:
+        with patch(
+            "web.services.llm.build_market_snapshot",
+            return_value={
+                "partition": "knowledge",
+                "partition_label": "知识",
+                "source_count": 3,
+                "hot_board": [
+                    {
+                        "bvid": "BV1demo12345",
+                        "title": "热点标题",
+                        "author": "测试UP",
+                        "view": 123456,
+                        "like": 4567,
+                        "like_rate": 0.037,
+                        "coin": 999,
+                        "favorite": 888,
+                        "reply": 777,
+                        "share": 666,
+                        "source": "全站热门榜",
+                        "url": "https://www.bilibili.com/video/BV1demo12345",
+                        "cover": "https://example.com/cover.jpg",
+                    }
+                ],
+                "partition_samples": [
+                    {
+                        "bvid": "tag-demo",
+                        "title": "分区趋势标题",
+                        "author": "分区热点",
+                        "view": 654321,
+                        "like": 7654,
+                        "like_rate": 0.011,
+                        "coin": 111,
+                        "favorite": 222,
+                        "reply": 333,
+                        "share": 444,
+                        "source": "分区热门榜:knowledge",
+                        "url": "",
+                    }
+                ],
+                "peer_samples": [{"bvid": "BVpeer"}],
+            },
+        ) as mocked_snapshot:
+            snapshot = build_hot_board_snapshot("knowledge")
+
+        mocked_snapshot.assert_called_once_with("knowledge", include_peer_samples=False)
+        self.assertEqual(snapshot["partition"], "knowledge")
+        self.assertEqual(snapshot["partition_label"], "知识")
+        self.assertEqual(snapshot["source_count"], 3)
+        self.assertEqual(
+            set(snapshot["hot_board"][0].keys()),
+            {"bvid", "title", "author", "view", "like", "like_rate", "source", "url"},
+        )
+        self.assertNotIn("coin", snapshot["hot_board"][0])
+        self.assertNotIn("peer_samples", snapshot)
 
     def test_build_hot_peer_market_snapshot_only_keeps_peer_samples(self) -> None:
         resolved = {
