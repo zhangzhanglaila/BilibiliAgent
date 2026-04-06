@@ -477,6 +477,29 @@ class ChatSessionMetadataStore:
             "history": history,
         }
 
+    def delete_session(self, session_id: str) -> bool:
+        """删除指定会话的元数据和历史文件，并从索引中移除。"""
+        meta_file = self._meta_path(session_id)
+        history_file = self._history_path(session_id)
+        deleted = False
+        try:
+            if meta_file.exists():
+                meta_file.unlink()
+                deleted = True
+        except Exception:
+            pass
+        try:
+            if history_file.exists():
+                history_file.unlink()
+        except Exception:
+            pass
+        # 从索引中移除
+        with self._lock:
+            index = self._load_index()
+            index = [item for item in index if item.get("session_id") != session_id]
+            self._save_index(index)
+        return deleted
+
 
 _CHAT_SESSION_METADATA_STORE: ChatSessionMetadataStore | None = None
 

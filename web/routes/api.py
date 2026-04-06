@@ -414,6 +414,15 @@ def api_chat_session_detail(session_id):
     return jsonify({"success": True, "data": session_data})
 
 
+@api_bp.delete("/api/chat/sessions/<session_id>")
+def api_chat_session_delete(session_id):
+    store = get_chat_session_metadata_store()
+    deleted = store.delete_session(session_id)
+    if not deleted:
+        return jsonify({"success": False, "error": "会话不存在或已删除"}), 404
+    return jsonify({"success": True})
+
+
 @api_bp.post("/api/topic")
 def api_topic():
     data = request.get_json(silent=True) or {}

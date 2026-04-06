@@ -1649,8 +1649,8 @@ button {
 .chat-sessions-popup {
   position: absolute;
   bottom: calc(100% + 8px);
-  left: 0;
-  width: 100%;
+  right: 0;
+  width: 66.67%;
   box-sizing: border-box;
   background: #fff;
   border: 1px solid rgba(124, 89, 42, 0.12);
@@ -1671,8 +1671,7 @@ button {
 
 .chat-sessions-popup__item {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  align-items: center;
   padding: 10px 16px;
   cursor: pointer;
   transition: background 150ms ease;
@@ -1687,6 +1686,14 @@ button {
   background: rgba(251, 114, 153, 0.08);
 }
 
+.chat-sessions-popup__item-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow: hidden;
+}
+
 .chat-sessions-popup__time {
   font-size: 11px;
   color: #bbb;
@@ -1698,6 +1705,26 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.chat-sessions-popup__delete {
+  flex-shrink: 0;
+  margin-left: 8px;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.06);
+  color: #999;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease;
+}
+
+.chat-sessions-popup__delete:hover {
+  background: rgba(220, 60, 60, 0.15);
+  color: #dc3c3c;
 }
 
 .assistant-thread {

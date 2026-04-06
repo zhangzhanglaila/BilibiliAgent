@@ -2247,16 +2247,28 @@ function renderChatSessionsPopup(sessions) {
   if (!sessions || sessions.length === 0) {
     popup.innerHTML = '<div class="chat-sessions-popup__empty">暂无历史会话</div>';
   } else {
-    popup.innerHTML = sessions.map(s => `
+    // 最新会话显示在最下方
+    const sorted = [...sessions].reverse();
+    popup.innerHTML = sorted.map(s => `
       <div class="chat-sessions-popup__item" data-session-id="${s.session_id}">
-        <span class="chat-sessions-popup__time">${s.created_at_display || s.session_id}</span>
-        <span class="chat-sessions-popup__summary">${escapeHtml(s.first_question || '无标题')}</span>
+        <div class="chat-sessions-popup__item-main">
+          <span class="chat-sessions-popup__time">${s.updated_at_display || s.session_id}</span>
+          <span class="chat-sessions-popup__summary">${escapeHtml(s.first_question || '无标题')}</span>
+        </div>
+        <button class="chat-sessions-popup__delete" data-delete-id="${s.session_id}" title="删除">×</button>
       </div>
     `).join('');
-    popup.querySelectorAll('.chat-sessions-popup__item').forEach(item => {
+    popup.querySelectorAll('.chat-sessions-popup__item-main').forEach(item => {
       item.addEventListener('click', () => {
-        const sid = item.dataset.sessionId;
+        const sid = item.closest('.chat-sessions-popup__item').dataset.sessionId;
         switchToChatSession(sid);
+      });
+    });
+    popup.querySelectorAll('.chat-sessions-popup__delete').forEach(btn => {
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const sid = btn.dataset.deleteId;
+        deleteChatSession(sid);
       });
     });
   }
@@ -2313,6 +2325,32 @@ async function switchToChatSession(sessionId) {
     showToast('已切换到历史会话', '', 'success');
   } catch (err) {
     showToast('加载会话失败', err.message, 'error');
+  }
+}
+
+async function deleteChatSession(sessionId) {
+  if (!confirm('确定要删除这条历史会话吗？')) return;
+  try {
+    const resp = await fetch(`/api/chat/sessions/${sessionId}`, { method: 'DELETE' });
+    const json = await resp.json();
+    if (!json.success) {
+      showToast('删除失败', json.error || '删除失败', 'error');
+      return;
+    }
+    // 从 popup 中移除该条目
+    const popup = document.getElementById('chatSessionsPopup');
+    if (popup) {
+      const item = popup.querySelector(`[data-session-id="${sessionId}"]`);
+      if (item) item.remove();
+      // 如果 popup 空了，显示空状态
+      const remaining = popup.querySelectorAll('.chat-sessions-popup__item');
+      if (remaining.length === 0) {
+        popup.innerHTML = '<div class="chat-sessions-popup__empty">暂无历史会话</div>';
+      }
+    }
+    showToast('已删除', '历史会话已删除', 'success');
+  } catch (err) {
+    showToast('删除失败', err.message, 'error');
   }
 }
 
