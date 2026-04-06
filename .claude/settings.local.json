@@ -6,7 +6,8 @@
       "Bash(pip install:*)",
       "Bash(echo \"exit: $?\")",
       "Bash(python3 -m json.tool)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(node --check web/static/app.js)"
     ]
   }
 }
