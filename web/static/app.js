@@ -2165,6 +2165,8 @@ function resetAssistantSession() {
   } catch (error) {
     return;
   }
+  // 不写入 localStorage，避免覆盖需要restore的旧session_id
+  // localStorage只在createNewChatSession（显式新建）和applyBackendSessionId（后端确认）时更新
   writeSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, []);
 }
 
@@ -2307,6 +2309,7 @@ async function switchToChatSession(sessionId) {
     } catch (_) {}
     writeSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, state.chatHistory);
     renderAssistant();
+    scrollAssistantToLastUserMessage();
     showToast('已切换到历史会话', '', 'success');
   } catch (err) {
     showToast('加载会话失败', err.message, 'error');
@@ -2747,6 +2750,30 @@ function updateAssistantMessageContent(messageItem) {
   box.scrollTop = Math.min(preservedScrollTop, Math.max(box.scrollHeight - box.clientHeight, 0));
 }
 
+// 切换历史会话后，定位到最后一个用户问题（置顶）
+function scrollAssistantToLastUserMessage() {
+  const box = $('#assistantResult');
+  if (!box) return;
+  // 找到最后一个 user 消息的 index
+  let lastUserIndex = -1;
+  for (let i = state.chatHistory.length - 1; i >= 0; i--) {
+    if (state.chatHistory[i].role === 'user') {
+      lastUserIndex = i;
+      break;
+    }
+  }
+  if (lastUserIndex < 0) return;
+  // 等 DOM 完全渲染后再计算滚动位置
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      const row = box.querySelector(`[data-chat-item="${lastUserIndex}"]`);
+      if (!row) return;
+      box.scrollTop = 0; // 先置顶
+      row.scrollIntoView({ block: 'start', behavior: 'instant' }); // 再把目标元素滚动到顶部
+    });
+  });
+}
+
 function positionAssistantMessageAtTop(messageItem) {
   if (!messageItem) return;
   const box = $('#assistantResult');
@@ -3134,8 +3161,6 @@ async function init() {
   setKnowledgeSubtab(state.knowledgeActiveSubtab);
   $('#videoPreview').innerHTML = videoPreview(null);
   renderWorkspaceOutline();
-  // 恢复上一个会话（跨刷新/重启持久化）
-  await restoreLastChatSession();
   renderAssistant();
   initEvents();
   initSpeechRecognition();

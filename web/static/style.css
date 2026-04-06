@@ -1477,6 +1477,8 @@ button {
   flex: 1;
   min-height: 0;
   padding: 0 18px 10px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .assistant-thread-wrap {
@@ -1497,6 +1499,8 @@ button {
   z-index: 2;
   margin-top: auto;
   padding-top: 14px;
+  width: 100%;
+  box-sizing: border-box;
   background: linear-gradient(180deg, rgba(247, 244, 238, 0), rgba(247, 244, 238, 0.95) 26%, rgba(247, 244, 238, 1) 100%);
 }
 
@@ -1512,6 +1516,8 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .assistant-input-label {
@@ -1644,7 +1650,8 @@ button {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
-  right: 0;
+  width: 100%;
+  box-sizing: border-box;
   background: #fff;
   border: 1px solid rgba(124, 89, 42, 0.12);
   border-radius: 12px;
