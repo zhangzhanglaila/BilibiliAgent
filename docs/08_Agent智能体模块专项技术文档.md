@@ -58,18 +58,18 @@
 如果你是只懂传统后端、不会 Agent，推荐按下面顺序理解，不要一上来就看 prompt：
 
 1. 先看 Web 入口  
-   从 `web/app.py:4268-4454` 开始，看 `api_module_create()`、`api_module_analyze()`、`api_chat()` 怎么决定是否进入 Agent 模式。
+   从 `web/routes/api.py` 开始，看 `api_module_create()`（第 246 行）、`api_module_analyze()`（第 308 行）、`api_chat()`（第 375 行）怎么决定是否进入 Agent 模式。
 
 2. 再看 Agent 主运行时  
-   看 `agents/llm_workspace_agent.py:315-467`，只抓一件事：它怎样在“调工具”和“返回 final”之间循环。
+   看 `agents/llm_workspace_agent.py:315-467`，只抓一件事：它怎样在”调工具”和”返回 final”之间循环。
 
 3. 再看工具注册表  
-   看 `web/app.py:3721-3767`，先搞清楚项目到底给 Agent 暴露了哪些能力。
+   看 `web/services/llm.py` 中的 `allowed_tools_for_scene()`（第 294 行），以及 `web/core/shared.py:384-388` 中的 `LLM_SCENE_ALLOWED_TOOLS` 常量。
 
 4. 再看每个工具的真实实现  
    顺序建议：
    - `retrieval` -> `knowledge_base.py:539-704`
-   - `creator_briefing / hot_board_snapshot / video_briefing` -> `web/app.py:3594-3717`
+   - `creator_briefing / hot_board_snapshot / video_briefing` -> `web/services/llm.py` 中的 `build_creator_briefing()`、`build_hot_board_snapshot()`、`build_video_briefing()` 工具 handler
    - `web_search` -> `tools/search_tool.py:14-49`
    - `code_interpreter` -> `tools/code_interpreter.py:15-45`
 
@@ -78,9 +78,9 @@
    - Reflection：`agents/llm_workspace_agent.py:250-285`
 
 6. 最后再看各链路自己的参数差异  
-   - `module_create`：`web/app.py:3834-3879`
-   - `module_analyze`：`web/app.py:3942-3977`
-   - `chat`：`web/app.py:4020-4071`
+   - `module_create`：`web/services/llm.py` 中的 `run_llm_module_create()`
+   - `module_analyze`：`web/services/llm.py` 中的 `run_llm_module_analyze()`
+   - `chat`：`web/services/llm.py` 中的 `run_llm_chat()`
 
 ### 2.0.2 用一句话理解整个项目
 
@@ -91,20 +91,20 @@
 ### 2.1 运行开关与入口
 
 - 运行模式开关：
-  - `web/app.py:468-481`
+  - `web/services/runtime.py:355`
   - `runtime_llm_enabled()` / `get_active_runtime_llm_config()`
-- Web 入口：
-  - 内容创作：`web/app.py:4268-4292` -> `web/app.py:3834-3879`
-  - 视频分析：`web/app.py:4330-4381` -> `web/app.py:3942-3977`
-  - 智能对话：`web/app.py:4429-4454` -> `web/app.py:4020-4071`
+- Web 入口（`web/routes/api.py`）：
+  - 内容创作：`api_module_create()`（第 246 行）-> `run_llm_module_create()`（`web/services/llm.py`）
+  - 视频分析：`api_module_analyze()`（第 308 行）-> `run_llm_module_analyze()`（`web/services/llm.py`）
+  - 智能对话：`api_chat()`（第 375 行）-> `run_llm_chat()`（`web/services/llm.py`）
 
 ### 2.2 全局基础实例
 
-- 知识库实例：`web/app.py:255`
-- 长期记忆实例：`web/app.py:256`
-- 联网搜索工具实例：`web/app.py:257`
-- 代码解释器实例：`web/app.py:258`
-- Agent 懒加载实例：`web/app.py:3721-3767`
+- 知识库实例：`web/core/shared.py:344`
+- 长期记忆实例：`web/core/shared.py:349`
+- 联网搜索工具实例：`web/core/shared.py:350`
+- 代码解释器实例：`web/core/shared.py`（在 `shared.py` 初始化）
+- Agent 懒加载实例：`web/services/llm.py:351`（`get_llm_workspace_agent`）、`web/services/llm.py:404`（`get_llm_workspace_chat_agent`）
 
 ---
 
@@ -116,15 +116,17 @@
 | LangChain/OpenAI LLM 接入 | `llm_client.py:119-173`、`llm_client.py:451-461` | 负责模型初始化、可用性检查、JSON 强约束调用 |
 | Retrieval / RAG 工具 | `agents/llm_workspace_agent.py:22-33`、`agents/llm_workspace_agent.py:137-168`、`knowledge_base.py:539-582`、`knowledge_base.py:642-704` | 本地知识库切片入库、向量检索、自动注入 Agent scratchpad |
 | Embedding / 向量库 | `knowledge_base.py:52-131`、`knowledge_base.py:178-232` | 构建 embedding、接入 Chroma、支持 fallback |
-| creator_briefing 工具 | `web/app.py:3594-3605`、`web/app.py:3673-3689`、`web/app.py:3738-3742` | 为选题创作模块生成市场简报 |
-| video_briefing 工具 | `web/app.py:3617-3625`、`web/app.py:3692-3703`、`web/app.py:3743-3747` | 解析视频并抓取对应市场样本，主要供聊天链路使用 |
-| hot_board_snapshot 工具 | `web/app.py:2015-2066`、`web/app.py:3628-3636`、`web/app.py:3706-3717`、`web/app.py:3748-3752` | 获取热点榜/分区样本，支持趋势类判断 |
-| web_search 工具 | `tools/search_tool.py:14-49`、`web/app.py:3754-3758` | 通过 SerpAPI 实时联网检索外部公开信息 |
-| code_interpreter 工具 | `tools/code_interpreter.py:15-45`、`web/app.py:3759-3763` | 执行 Python 代码做数据处理/分析 |
+| creator_briefing 工具 | `web/services/llm.py` 中的 `build_creator_briefing()` 工具 handler | 为选题创作模块生成市场简报 |
+| video_briefing 工具 | `web/services/llm.py` 中的 `build_video_briefing()` 工具 handler | 解析视频并抓取对应市场样本，主要供聊天链路使用 |
+| hot_board_snapshot 工具 | `web/services/llm.py` 中的 `build_hot_board_snapshot()` 工具 handler | 获取热点榜/分区样本，支持趋势类判断 |
+| web_search 工具 | `tools/search_tool.py:14-49`、`web/services/llm.py:294-295` | 通过 SerpAPI 实时联网检索外部公开信息 |
+| code_interpreter 工具 | `tools/code_interpreter.py:15-45` | 执行 Python 代码做数据处理/分析 |
 | 长期记忆机制 | `memory/long_term_memory.py:24-203`、`agents/llm_workspace_agent.py:119-135`、`agents/llm_workspace_agent.py:287-311`、`agents/llm_workspace_agent.py:431-432` | 检索历史上下文并在任务结束后异步写回 |
 | Reflection 反思自检 | `agents/llm_workspace_agent.py:250-285`、`agents/llm_workspace_agent.py:418-427` | 对最终 JSON 做二次审查与可选重写 |
-| 工具结果回流到知识库 | `web/app.py:3645-3659`、`web/app.py:3673-3717` | 把工具结果沉淀回知识库，形成 RAG 数据飞轮 |
-| Agent 结果后处理 | `web/app.py:3523-3550`、`web/app.py:3770-3829` | 从 `tool_observations` 中提炼参考资料并补齐前端展示结果 |
+| 工具结果回流到知识库 | `web/services/llm.py` 中各工具 handler 对 `save_tool_result_to_knowledge_base()` 的调用 | 把工具结果沉淀回知识库，形成 RAG 数据飞轮 |
+| Agent 结果后处理 | `web/services/llm.py` 中各链路的后处理函数 | 从 `tool_observations` 中提炼参考资料并补齐前端展示结果 |
+| 智能对话历史会话持久化 | `web/services/session_memory.py` 中的 `ChatSessionMetadataStore` 类 | 基于本地 JSON 文件持久化会话，刷新页面不丢失 |
+| 智能对话 API | `web/routes/api.py:374-411` | 智能对话 HTTP 入口，新增历史会话列表/详情接口 |
 
 ---
 
@@ -158,9 +160,9 @@
 **触发条件**
 
 - 只有 `runtime_llm_enabled()` 为 `true` 时，Web 才会进入 Agent 模式：
-  - `web/app.py:468-481`
-- 进入具体链路后，通过 `get_llm_workspace_agent()` 懒加载实例：
-  - `web/app.py:3721-3767`
+  - `web/services/runtime.py:355`
+- 进入具体链路后，通过 `get_llm_workspace_agent()` 或 `get_llm_workspace_chat_agent()` 懒加载实例：
+  - `web/services/llm.py:351` / `web/services/llm.py:404`
 
 **实际调用规则**
 
@@ -218,7 +220,7 @@
 - 自动检索注入：`agents/llm_workspace_agent.py:137-168`
 - 知识入库：`knowledge_base.py:539-582`
 - 知识检索：`knowledge_base.py:642-704`
-- 全局知识库实例：`web/app.py:255`
+- 全局知识库实例：`web/core/shared.py:344`
 
 **实现方式**
 
@@ -245,9 +247,9 @@
 
 - `retrieval` 是 **自动触发**，不是等模型先选工具。
 - 当前三个主链路都把 `retrieval` 放进了 `allowed_tools`：
-  - 内容创作：`web/app.py:3860`
-  - 视频分析：`web/app.py:3970`
-  - 智能对话：`web/app.py:4052`
+  - 内容创作：`web/core/shared.py:385`
+  - 视频分析：`web/core/shared.py:386`
+  - 智能对话：`web/core/shared.py:387`
 - 检索结果会被写进 `scratchpad`，供后续 LLM 继续推理：
   - `agents/llm_workspace_agent.py:165-168`
 - 发给 LLM 的不是向量数组，而是 retrieval 命中的：
@@ -292,10 +294,10 @@
 **触发条件**
 
 - 知识库实例化时自动初始化 embedding 和向量库：
-  - `web/app.py:255`
+  - `web/core/shared.py:344`（`KNOWLEDGE_BASE`）
   - `knowledge_base.py:182-232`
 - 长期记忆实例化时也会自动初始化 embedding 和 Chroma collection：
-  - `web/app.py:256`
+  - `web/core/shared.py:349`（`LONG_TERM_MEMORY`）
   - `memory/long_term_memory.py:24-59`
 
 **实际调用规则**
@@ -315,17 +317,16 @@
 
 **代码位置**
 
-- Briefing 构造：`web/app.py:3594-3605`
-- Tool handler：`web/app.py:3673-3689`
-- Tool 注册：`web/app.py:3738-3742`
-- module_create 必调约束：`web/app.py:3860-3862`
+- Briefing 构造：`web/services/llm.py` 中 `build_creator_briefing()` 函数
+- Tool handler：`web/services/llm.py` 中 `creator_briefing_tool_handler()` 函数
+- 工具注册：通过 `LLM_SCENE_ALLOWED_TOOLS["workspace_chat"]` 配置（`web/core/shared.py:387`）
 
 **实现方式**
 
 - 将用户输入的 `field / direction / idea / partition` 结构化整理。
 - 同时构造 `market_snapshot` 作为实时市场样本。
 - 工具返回结果后，会调用 `save_tool_result_to_knowledge_base()` 写回知识库：
-  - `web/app.py:3681-3688`
+  - `web/services/llm.py` 中 `creator_briefing_tool_handler()` 内部调用
 
 **触发条件**
 
@@ -337,12 +338,12 @@
 **实际调用规则**
 
 - 在 `module_create` 中：
-  - `creator_briefing` 既在 `allowed_tools` 中，也在 `required_tools` 中：
-    - `web/app.py:3860-3862`
+  - `creator_briefing` 在 `allowed_tools` 中，是 `required_tools`：
+    - 由 `web/services/llm.py` 中的 `allowed_tools_for_scene("module_create")` 决定
   - 即使模型想直接返回 `final`，如果还没调过 `creator_briefing`，也会被 Agent 拦下：
     - `agents/llm_workspace_agent.py:396-405`
 - 在 `chat` 中它是可选工具，是否调用由模型决定：
-  - `web/app.py:4052`
+  - 由 `web/services/llm.py:895` 的 `allowed_tools_for_scene("workspace_chat")` 决定
 
 ---
 
@@ -350,10 +351,9 @@
 
 **代码位置**
 
-- Video briefing 构造：`web/app.py:3617-3625`
-- Tool handler：`web/app.py:3692-3703`
-- Tool 注册：`web/app.py:3743-3747`
-- Chat 工具清单：`web/app.py:4052`
+- Video briefing 构造：`web/services/llm.py` 中 `build_video_briefing()` 函数
+- Tool handler：`web/services/llm.py` 中 `video_briefing_tool_handler()` 函数
+- Chat 工具清单：`web/core/shared.py:387`
 
 **实现方式**
 
@@ -363,18 +363,18 @@
   3. 生成 `video_payload`
   4. 构造对应分区的 `market_snapshot`
 - 工具执行结果同样会被写回知识库，供未来 retrieval 复用：
-  - `web/app.py:3695-3702`
+  - `web/services/llm.py` 中 `video_briefing_tool_handler()` 内部调用 `save_tool_result_to_knowledge_base(async_write=True)`
 
 **触发条件**
 
 - 当前主要在 `chat` 链路里可用：
-  - `web/app.py:4052`
+  - 由 `web/services/llm.py:895` 的 `allowed_tools_for_scene("workspace_chat")` 决定
 
 **实际调用规则**
 
 - `module_analyze` 当前 **不依赖 `video_briefing`**。
 - 原因是 `module_analyze` 在进入 Agent 前，后端已经先解析好了 `resolved + market_snapshot`，直接作为 `user_payload` 传入：
-  - `web/app.py:3963-3968`
+  - `web/services/llm.py` 中 `run_llm_module_analyze()` 传入
 
 ---
 
@@ -382,12 +382,11 @@
 
 **代码位置**
 
-- 市场快照并行抓取：`web/app.py:2015-2066`
-- Hot snapshot 构造：`web/app.py:3628-3636`
-- Tool handler：`web/app.py:3706-3717`
-- Tool 注册：`web/app.py:3748-3752`
-- module_analyze 可用：`web/app.py:3970`
-- chat 可用：`web/app.py:4052`
+- 市场快照并行抓取：`web/core/shared.py` 中的 `build_market_snapshot()` 调用
+- Hot snapshot 构造：`web/services/llm.py` 中 `build_hot_board_snapshot()` 函数
+- Tool handler：`web/services/llm.py` 中 `hot_board_snapshot_tool_handler()` 函数
+- module_analyze 可用：`web/core/shared.py:386`
+- chat 可用：`web/core/shared.py:387`
 
 **实现方式**
 
@@ -395,8 +394,7 @@
   - `hot_board`
   - `partition_samples`
   - `peer_samples`
-  - 通过 `ThreadPoolExecutor(max_workers=3)` 实现：
-    - `web/app.py:2051-2057`
+  - 通过 `ThreadPoolExecutor(max_workers=3)` 实现
 - `build_hot_board_snapshot()` 对外提供的是：
   - `partition`
   - `partition_label`
@@ -410,9 +408,9 @@
 **实际调用规则**
 
 - `module_analyze` 可调用，但不是必调：
-  - `web/app.py:3970`
+  - 由 `web/services/llm.py` 中 `allowed_tools_for_scene("module_analyze")` 决定
 - `chat` 可调用，但不是必调：
-  - `web/app.py:4052`
+  - 由 `web/services/llm.py:895` 的 `allowed_tools_for_scene("workspace_chat")` 决定
 - `module_create` 当前不注册该工具。
 
 ---
@@ -422,10 +420,10 @@
 **代码位置**
 
 - 搜索工具实现：`tools/search_tool.py:14-49`
-- Tool 注册：`web/app.py:3754-3758`
-- `module_create` 可用：`web/app.py:3860`
-- `module_analyze` 可用：`web/app.py:3970`
-- `chat` 可用：`web/app.py:4052`
+- 工具可用场景配置：`web/core/shared.py:384-388`
+- `module_create` 可用：`web/core/shared.py:385`
+- `module_analyze` 可用：`web/core/shared.py:386`
+- `chat` 可用：`web/core/shared.py:387`
 
 **实现方式**
 
@@ -441,12 +439,12 @@
 **触发条件**
 
 - 当前有两种触发路径：
-  1. 当前链路把 `web_search` 放进 `allowed_tools`，且模型某一步决策选择 `action="web_search"`
+  1. 当前链路把 `web_search` 放进 `allowed_tools`，且模型某一步决策选择 `action=”web_search”`
   2. 当前链路把 `web_search` 放进 `allowed_tools`，且前置 `retrieval` 结果为空、相关性很低或明显无关，此时 Agent 会自动补一次联网搜索
 
 **实际调用规则**
 
-- `web_search` 不再是“只能由模型主动选择”的工具。
+- `web_search` 不再是”只能由模型主动选择”的工具。
 - 当 `retrieval` 命中为空、top score 过高，或命中文本与查询关键片段明显对不上时，Agent 会自动执行一次 `web_search`，再把联网结果和 retrieval 结果一起交给 LLM：
   - `agents/llm_workspace_agent.py`
 - 如果缺少 `SERPAPI` key 或依赖，会返回 `warning` 而不是中断整个 Agent：
@@ -459,10 +457,7 @@
 **代码位置**
 
 - 工具实现：`tools/code_interpreter.py:15-45`
-- Tool 注册：`web/app.py:3759-3763`
-- `module_create` 可用：`web/app.py:3860`
-- `module_analyze` 可用：`web/app.py:3970`
-- `chat` 可用：`web/app.py:4052`
+- 工具可用场景配置：`web/core/shared.py:384-388`
 
 **实现方式**
 
@@ -522,12 +517,11 @@
 **实际调用规则**
 
 - `module_create`：未显式关闭，因此沿用默认 `load_history=True / save_memory=True`
-  - `agents/llm_workspace_agent.py:326-328`
-  - `web/app.py:3848-3864`
-- `module_analyze`：显式开启
-  - `web/app.py:3972-3975`
-- `chat`：未显式关闭，沿用默认开启
-  - `web/app.py:4041-4054`
+  - 由 `web/services/llm.py` 中的 `run_llm_module_create()` 显式传入
+- `module_analyze`：显式关闭
+  - `load_history=False / save_memory=False / enable_reflection=False`
+- `chat`：沿用默认开启
+  - 由 `web/services/llm.py` 中的 `run_llm_chat()` 显式传入 `load_history=False / save_memory=False`
 - 写回是异步线程，不阻塞主返回：
   - `agents/llm_workspace_agent.py:303-311`
 
@@ -562,13 +556,10 @@
 
 **实际调用规则**
 
-- `module_analyze`：显式开启
-  - `web/app.py:3975`
-- `module_create`：沿用默认开启
-  - `agents/llm_workspace_agent.py:328`
-  - `web/app.py:3848-3864`
-- `chat`：沿用默认开启
-  - `web/app.py:4041-4054`
+- `module_analyze`：当前已关闭（`enable_reflection=False`）
+  - `web/services/llm.py` 中 `run_llm_module_analyze()` 传入
+- `module_create`：默认开启
+- `chat`：默认开启
 - 如果 Reflection 失败，会回退为原始 `final`，不会直接报错中断：
   - `agents/llm_workspace_agent.py:268-276`
 
@@ -578,10 +569,11 @@
 
 **代码位置**
 
-- 回流函数：`web/app.py:3645-3659`
-- creator_briefing 写回：`web/app.py:3681-3688`
-- video_briefing 写回：`web/app.py:3695-3702`
-- hot_board_snapshot 写回：`web/app.py:3709-3716`
+- 回流函数：在 `knowledge_base.py` 中的 `save_tool_result_to_knowledge_base()`
+- 各工具 handler 内部调用：
+  - `creator_briefing_tool_handler()` 内部调用
+  - `video_briefing_tool_handler()` 内部调用
+  - `hot_board_snapshot_tool_handler()` 内部调用
 
 **实现方式**
 
@@ -593,6 +585,7 @@
 **触发条件**
 
 - 当且仅当这三个工具实际被调用时触发。
+- 当前聊天热点评分已改为 `async_write=True`，不阻塞工具返回。
 
 **实际调用规则**
 
@@ -607,11 +600,8 @@
 
 **代码位置**
 
-- 从工具观察抽取 retrieval 命中：`web/app.py:2930`
-- `module_analyze` 参考视频拼装：`web/app.py:3034-3070`
-- `chat` 可点击参考链接抽取：`web/app.py:3523-3550`
-- `module_analyze` 最终结果整理：`web/app.py:3770-3829`
-- `chat` 引用链接拼装：`web/app.py:4066-4070`
+- `chat` 引用链接拼装：`web/services/llm.py` 中 `run_llm_chat()` 内 `extract_reference_links_from_tool_observations()` 调用
+- `module_analyze` 最终结果整理：`web/services/llm.py` 中 `finalize_module_analyze_result()`
 
 **实现方式**
 
@@ -636,8 +626,8 @@
 
 **入口代码**
 
-- HTTP 入口：`web/app.py:4268-4292`
-- Agent 主流程：`web/app.py:3834-3879`
+- HTTP 入口：`web/routes/api.py:246`（`api_module_create()`）
+- Agent 主流程：`web/services/llm.py`（`run_llm_module_create()`）
 
 **调用链**
 
@@ -654,8 +644,8 @@
 
 **工具规则**
 
-- `allowed_tools=["retrieval", "creator_briefing", "web_search", "code_interpreter"]`
-- `required_tools=["creator_briefing"]`
+- `allowed_tools=["retrieval", "web_search"]`
+- `required_tools=["creator_briefing"]`（由 `web/services/llm.py` 中的 `allowed_tools_for_scene("module_create")` 决定）
 - `max_steps=2`
 
 ---
@@ -664,8 +654,8 @@
 
 **入口代码**
 
-- HTTP 入口：`web/app.py:4330-4381`
-- Agent 主流程：`web/app.py:3942-3977`
+- HTTP 入口：`web/routes/api.py:308`（`api_module_analyze()`）
+- Agent 主流程：`web/services/llm.py`（`run_llm_module_analyze()`）
 
 **调用链**
 
@@ -718,8 +708,8 @@
 
 **工具规则**
 
-- `allowed_tools=["retrieval", "web_search"]`
-- `required_tools=["retrieval"]`
+- `allowed_tools=[“retrieval”, “web_search”]`
+- `required_tools=[“retrieval”]`
 - `strict_required_tool_order=True`
 - `load_history=False`
 - `save_memory=False`
@@ -727,13 +717,13 @@
 
 **补充说明**
 
-- `/api/resolve-bili-link` 是“快速预览链路”，目标是尽快拿到基础视频信息
-- `/api/module-analyze` 是“完整分析链路”，重点是：
+- `/api/resolve-bili-link` 是”快速预览链路”，目标是尽快拿到基础视频信息
+- `/api/module-analyze` 是”完整分析链路”，重点是：
   - 使用已解析视频信息
   - 预抓同方向爆款样本
   - 检索本地静态热门案例
   - 由 LLM 生成完整分析结果
-- 当前“同类爆款视频”不是单一路径，而是三层来源：
+- 当前”同类爆款视频”不是单一路径，而是三层来源：
   1. `peer_samples`
   2. retrieval 命中的静态热门案例
   3. LLM 原始 benchmark 兜底
@@ -744,29 +734,32 @@
 
 **入口代码**
 
-- HTTP 入口：`web/app.py:4429-4454`
-- Agent 主流程：`web/app.py:4020-4071`
+- HTTP 入口：`web/routes/api.py:375`（`api_chat()`）
+- Agent 主流程：`web/services/llm.py`（`run_llm_chat()`）
+- 新增历史会话持久化：`web/services/session_memory.py`（`ChatSessionMetadataStore` 类）
 
 **调用链**
 
 1. `/api/chat` 收到自然语言消息
-2. 组装 `creator_context + history + video_url`
-3. `run_structured()` 自动先跑 `retrieval`
-4. 模型按意图决定是否再调：
+2. 从 `ChatSessionMemoryStore` 加载历史会话（Redis/内存/前端 history）
+3. 组装 `creator_context + history + video_url`
+4. `run_structured()` 自动先跑 `retrieval`
+5. 模型按意图决定是否再调：
    - `creator_briefing`
    - `video_briefing`
    - `hot_board_snapshot`
    - `web_search`
-   - `code_interpreter`
-5. 返回自然语言回复 JSON
-6. Reflection 二次审查
-7. 异步写入长期记忆
-8. 基于 `tool_observations` 抽取 `reference_links`
+6. 返回自然语言回复 JSON
+7. Reflection 二次审查
+8. 异步写入会话历史（Redis/内存）和文件持久化（`ChatSessionMetadataStore`）
+9. 基于 `tool_observations` 抽取 `reference_links`
 
 **工具规则**
 
-- `allowed_tools=["retrieval", "creator_briefing", "video_briefing", "hot_board_snapshot", "web_search", "code_interpreter"]`
+- `allowed_tools=[“retrieval”, “web_search”, “video_briefing”, “hot_board_snapshot”]`
 - 无 `required_tools`
+- `load_history=False`（历史由 `run_llm_chat()` 自行管理）
+- `save_memory=False`
 
 ---
 
@@ -827,7 +820,7 @@
 
 ```mermaid
 flowchart TD
-    A[用户提问] --> B[web/app.py 组装 message + history + creator_context + video_url]
+    A[用户提问] --> B[web/services/llm.py run_llm_chat 组装 message + history + creator_context + video_url]
     B --> C[_build_query_text 生成 query_text]
     C --> D[_auto_retrieve 自动执行 retrieval]
     D --> E[本地 Embedding: embed_query]
@@ -865,9 +858,9 @@ flowchart TD
 ## 6. 关联关系图
 
 ```text
-Web API
-  -> run_llm_module_create / run_llm_module_analyze / run_llm_chat
-    -> get_llm_workspace_agent()
+Web API (web/routes/api.py)
+  -> run_llm_module_create / run_llm_module_analyze / run_llm_chat (web/services/llm.py)
+    -> get_llm_workspace_agent() / get_llm_workspace_chat_agent()
       -> LLMWorkspaceAgent.run_structured()
         -> _history_block()        -> LongTermMemory.retrieve_user_history()
         -> _auto_retrieve()        -> RetrievalTool -> KnowledgeBase.retrieve()
@@ -877,7 +870,6 @@ Web API
            -> video_briefing       -> build_video_briefing()   -> fetch_video_info() + build_market_snapshot()
            -> hot_board_snapshot   -> build_hot_board_snapshot() -> build_market_snapshot()
            -> web_search           -> SearchTool.search()
-           -> code_interpreter     -> CodeInterpreterTool.run()
         -> final 校验
         -> Reflection              -> _reflect_final()
         -> save_memory_async()     -> LongTermMemory.save_user_data()
@@ -885,6 +877,7 @@ Web API
     -> Web 后处理
       -> module_analyze: finalize_module_analyze_result()
       -> chat: extract_reference_links_from_tool_observations()
+      -> chat: ChatSessionMetadataStore.save_session_async() 持久化会话
 ```
 
 ---
@@ -950,8 +943,7 @@ Web API
 
 这三类工具输出会回写知识库，后续又可以被 Retrieval 召回：
 
-- `web/app.py:3645-3659`
-- `web/app.py:3673-3717`
+- 各工具 handler 内部调用 `save_tool_result_to_knowledge_base()` 的逻辑
 
 ---
 
@@ -964,11 +956,12 @@ Web API
 - 联网搜索、热点快照、代码解释器都是按需工具
 - 长期记忆、Reflection、工具回流知识库共同形成增强闭环
 - 三条 Web 主链路共用同一套 Agent 中枢，但各自的 `allowed_tools / required_tools / max_steps` 不同
+- 智能对话有独立的会话持久化层（`ChatSessionMetadataStore`），基于本地 JSON 文件，刷新页面不丢失
 
 如果后续继续扩展 Agent 模块，最应该优先关注的代码入口是：
 
 - `agents/llm_workspace_agent.py:315-467`
-- `web/app.py:3721-3767`
-- `web/app.py:3834-4071`
+- `web/services/llm.py`（各链路入口函数）
+- `web/core/shared.py:384-388`（`LLM_SCENE_ALLOWED_TOOLS`）
 - `knowledge_base.py:539-704`
 - `memory/long_term_memory.py:145-203`
