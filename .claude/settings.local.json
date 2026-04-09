@@ -10,7 +10,10 @@
       "Bash(node --check web/static/app.js)",
       "Bash(D:/agent/.venv/Scripts/python.exe:*)",
       "Bash(D:/agent/.venv/Scripts/pip.exe list:*)",
-      "Bash(xxd \"D:/agent/web/app.py\")"
+      "Bash(xxd \"D:/agent/web/app.py\")",
+      "mcp__MiniMax__web_search",
+      "WebFetch(domain:github.com)",
+      "Bash(ls /d/agent/docs/test/*.md)"
     ]
   }
 }

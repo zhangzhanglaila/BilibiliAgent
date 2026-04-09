@@ -6,6 +6,8 @@ from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
+from observability import export_recent_traces_to_file, flush_traces
+
 from web.core.shared import (
     CONFIG,
     KNOWLEDGE_BASE,
@@ -263,8 +265,13 @@ def api_module_create():
 
     if runtime_llm_enabled():
         try:
-            return jsonify({"success": True, "data": run_llm_module_create(data)})
+            result = run_llm_module_create(data)
+            flush_traces()
+            export_recent_traces_to_file(module_type="module_create", trace_name_contains="web.run_llm_module_create")
+            return jsonify({"success": True, "data": result})
         except Exception as exc:
+            flush_traces()
+            export_recent_traces_to_file(module_type="module_create", trace_name_contains="web.run_llm_module_create")
             message = f"LLM Agent 生成失败：{format_llm_error(exc)}"
             return (
                 jsonify(
@@ -318,10 +325,17 @@ def api_module_analyze():
     data = request.get_json(silent=True) or {}
     try:
         result = execute_module_analyze_request(data)
+        if runtime_llm_enabled():
+            flush_traces()
+            export_recent_traces_to_file(module_type="module_analyze", trace_name_contains="web.run_llm_module_analyze")
         return jsonify({"success": True, "data": result})
     except ModuleAnalyzeRequestError as exc:
         return jsonify({"success": False, "error": exc.message, "data": exc.payload}), exc.status_code
     except Exception as exc:
+        # LLM 失败时也导出 trace
+        if runtime_llm_enabled():
+            flush_traces()
+            export_recent_traces_to_file(module_type="module_analyze", trace_name_contains="web.run_llm_module_analyze")
         return jsonify({"success": False, "error": f"视频分析失败：{exc}"}), 500
 
 
@@ -392,8 +406,12 @@ def api_chat():
 
     try:
         result = run_llm_chat(data)
+        flush_traces()
+        export_recent_traces_to_file(module_type="workspace_chat", trace_name_contains="web.run_llm_chat")
         return jsonify({"success": True, "data": result})
     except Exception as exc:
+        flush_traces()
+        export_recent_traces_to_file(module_type="workspace_chat", trace_name_contains="web.run_llm_chat")
         message = f"智能对话失败：{format_llm_error(exc)}"
         return (
             jsonify(
