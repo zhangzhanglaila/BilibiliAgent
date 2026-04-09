@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import traceback
 from pathlib import Path
 
 from flask import Flask, jsonify
@@ -20,6 +21,7 @@ def create_app() -> Flask:
 
     @app.errorhandler(Exception)
     def handle_error(exc):
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(exc)}), 500
 
     return app
