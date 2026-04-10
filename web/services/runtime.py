@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from web.core.shared import *
+from observability import export_recent_traces_to_file, flush_traces
 
 
 # 判断是否已保存有效的运行时 LLM 配置（API Key 非空）。
@@ -302,6 +303,9 @@ def run_module_analyze_job(job_id: str, data: dict) -> None:
             },
         )
     except ModuleAnalyzeRequestError as exc:
+        if runtime_llm_enabled():
+            flush_traces()
+            export_recent_traces_to_file(module_type="module_analyze", trace_name_contains="web.run_llm_module_analyze")
         job = get_module_analyze_job(job_id) or {}
         update_module_analyze_job(
             job_id,
@@ -316,6 +320,9 @@ def run_module_analyze_job(job_id: str, data: dict) -> None:
             },
         )
     except Exception as exc:
+        if runtime_llm_enabled():
+            flush_traces()
+            export_recent_traces_to_file(module_type="module_analyze", trace_name_contains="web.run_llm_module_analyze")
         job = get_module_analyze_job(job_id) or {}
         message = f"视频分析失败：{exc}"
         update_module_analyze_job(

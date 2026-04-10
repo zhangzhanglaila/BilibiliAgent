@@ -46,7 +46,9 @@ def classify_llm_error(exc: Exception) -> str:
         return "connection_blocked"
     if "503" in text and ("temporarily unavailable" in text or "service unavailable" in text):
         return "service_unavailable"
-    if "502" in text or "bad gateway" in text:
+    if "overloaded_error" in text or "529" in text:
+        return "service_overloaded"
+    if "502" in text or "bad gateway" in text or "520" in text:
         return "bad_gateway"
     if "504" in text or "gateway timeout" in text:
         return "gateway_timeout"
@@ -83,6 +85,7 @@ def should_skip_same_provider_fallback(exc: Exception) -> bool:
         "gateway_timeout",
         "auth",
         "quota",
+        "service_overloaded",
     }
 
 
@@ -407,6 +410,7 @@ class LLMClient:
                             return result
                         except Exception as http_exc:
                             exc = http_exc
+                            # fallback 失败，不要在这里 return，继续重试
                     category = classify_llm_error(exc)
                     wrapped = LLMInvocationError(
                         format_llm_error(exc),
@@ -417,8 +421,9 @@ class LLMClient:
                     last_error = wrapped
                     if attempt >= attempts or not wrapped.transient:
                         raise wrapped
-                    # 重试放在这里统一处理，这样所有上层调用拿到的错误分类和退避策略都一致。
-                    time.sleep(self.retry_backoff_seconds * attempt)
+                    # 指数退避：1.6s × 2^(attempt-1)，兼顾重试成功率和避免上游过载。
+                    # attempt=1 -> 1.6s, attempt=2 -> 3.2s, attempt=3 -> 6.4s
+                    time.sleep(self.retry_backoff_seconds * (2 ** (attempt - 1)))
 
         raise last_error or LLMInvocationError("LLM 调用失败")
 

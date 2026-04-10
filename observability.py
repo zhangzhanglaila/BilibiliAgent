@@ -163,6 +163,20 @@ def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default)
 
 
+def _get_run_depth(run: Any) -> int:
+    """从 run 的 extra.metadata 中提取 ls_run_depth，用于确定树缩进层级"""
+    extra = _get_attr(run, "extra") or {}
+    metadata = extra.get("metadata", {}) if isinstance(extra, dict) else {}
+    if isinstance(metadata, dict):
+        ls_run_depth = metadata.get("ls_run_depth")
+        if ls_run_depth is not None:
+            try:
+                return int(ls_run_depth)
+            except (TypeError, ValueError):
+                pass
+    return 0
+
+
 def _calc_latency(run: Any) -> float:
     """计算 run 的延迟（秒）"""
     start = _get_attr(run, "start_time")
@@ -173,10 +187,16 @@ def _calc_latency(run: Any) -> float:
 
 
 def _build_trace_tree(runs: list, parent_map: dict, level: int = 0) -> list[str]:
-    """构建 trace 树形结构的文本表示"""
+    """构建 trace 树形结构的文本表示。
+
+    使用 ls_run_depth 控制缩进层级（匹配 LangSmith UI 的视觉层级），
+    而非依赖 parent_run_id 的链式关系。
+    """
     lines = []
     for run in runs:
-        indent = "  " * level
+        # 用 ls_run_depth 控制缩进，而非递归深度
+        run_depth = _get_run_depth(run)
+        indent = "  " * run_depth
         name = _get_attr(run, "name") or "unnamed"
         run_type = _get_attr(run, "run_type") or ""
         latency = _calc_latency(run)
@@ -189,7 +209,7 @@ def _build_trace_tree(runs: list, parent_map: dict, level: int = 0) -> list[str]
         run_id = _get_attr(run, "id")
         children = parent_map.get(run_id) if run_id else None
         if children:
-            lines.extend(_build_trace_tree(children, parent_map, level + 1))
+            lines.extend(_build_trace_tree(children, parent_map, run_depth + 1))
     return lines
 
 
@@ -257,6 +277,14 @@ def export_recent_traces_to_file(
     """
     client = get_langsmith_client()
     if not client:
+        import logging
+        logging.warning(
+            "[observability] export_recent_traces_to_file skipped: "
+            "langsmith client not available or not enabled. "
+            f"langsmith_available={langsmith_available()}, langsmith_enabled={langsmith_enabled()}, "
+            f"langsmith_tracing={getattr(CONFIG, 'langsmith_tracing', None)}, "
+            f"langsmith_api_key set={bool(getattr(CONFIG, 'langsmith_api_key', None))}"
+        )
         return []
 
     try:
@@ -268,7 +296,7 @@ def export_recent_traces_to_file(
             project_name=project_name,
             is_root=True,
             limit=limit,
-            select=["name", "run_type", "start_time", "end_time", "error", "id", "parent_run_id", "trace_id", "total_tokens", "prompt_tokens", "completion_tokens"],
+            select=["name", "run_type", "start_time", "end_time", "error", "id", "parent_run_id", "trace_id", "total_tokens", "prompt_tokens", "completion_tokens", "extra"],
         ))
 
         if not runs:
@@ -368,4 +396,6 @@ def export_recent_traces_to_file(
         return saved_files
 
     except Exception:
+        import logging
+        logging.exception("[observability] export_recent_traces_to_file failed")
         return []

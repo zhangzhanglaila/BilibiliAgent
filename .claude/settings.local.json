@@ -13,7 +13,8 @@
       "Bash(xxd \"D:/agent/web/app.py\")",
       "mcp__MiniMax__web_search",
       "WebFetch(domain:github.com)",
-      "Bash(ls /d/agent/docs/test/*.md)"
+      "Bash(ls /d/agent/docs/test/*.md)",
+      "mcp__MiniMax__understand_image"
     ]
   }
 }

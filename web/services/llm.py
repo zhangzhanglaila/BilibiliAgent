@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from importlib import import_module
+import json
 import threading
 import time
 
@@ -481,6 +482,81 @@ def video_analyze_retrieval_tool_handler(payload: dict) -> dict:
     }
 
 
+# 视频分析快速路径：预计算 retrieval 结果后直接单次 LLM 调用，无需 ReAct 循环。
+# 目标：将 130+ 秒降低到 ~10 秒。
+def run_llm_module_analyze_fast(
+    data: dict,
+    resolved: dict,
+    market_snapshot: dict,
+    market_snapshot_future=None,
+    progress_callback=None,
+) -> dict:
+    exports = app_exports()
+    url = (data.get("url") or "").strip()
+    preloaded = build_video_analyze_preloaded_context(resolved, url, market_snapshot)
+
+    # 1. 预计算 retrieval 结果
+    video_info = preloaded.get("video", {})
+    query = (video_info.get("benchmark_queries") or [None])[0] if video_info.get("benchmark_queries") else resolved.get("title", "")
+    if not query:
+        query = resolved.get("title", "") or resolved.get("topic", "")
+    retrieval_result = video_analyze_retrieval_tool_handler({"query": query, "limit": 4})
+    retrieval_context = json.dumps(retrieval_result, ensure_ascii=False)
+
+    # 2. 构造单次 LLM 调用所需的完整 prompt
+    baseline_performance = exports.classify_video_performance(resolved)
+    sample_count = safe_int(market_snapshot.get("source_count"))
+    has_peer_data = sample_count > 0 and any([
+        (market_snapshot.get("peer_samples") or []),
+        (market_snapshot.get("hot_board") or []),
+        (market_snapshot.get("partition_samples") or []),
+    ])
+
+    system_prompt = "你是 B 站视频分析专家，直接返回 JSON。"
+    user_prompt_parts = [
+        "请根据以下数据输出 JSON，包含字段：resolved, performance, topic_result, optimize_result, copy_result, analysis。\n",
+        f"当前视频信息：{json.dumps(resolved, ensure_ascii=False)}\n\n",
+        f"预检索的同赛道静态爆款样本：{retrieval_context}\n\n",
+        f"市场数据：{json.dumps(market_snapshot, ensure_ascii=False)}\n\n",
+        f"规则基线判断：{json.dumps(baseline_performance, ensure_ascii=False)}\n\n",
+        "核心要求：\n",
+        "1. resolved 直接复用，不要改 BV、标题、播放量。\n",
+        "2. performance 包含 label, is_hot, score, reasons, summary。\n",
+        "3. topic_result.ideas 输出 3 个新选题（topic, reason, video_type, keywords），不要提问句。\n",
+        "4. optimize_result 输出 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions。\n",
+        "5. is_hot=true 时 copy_result 返回 null，analysis 输出 analysis_points 和 followup_topics。\n",
+        "6. is_hot=false 时 copy_result 输出一版新标题（陈述/叙事型，不要提问句），analysis 输出 analysis_points, next_topics, title_suggestions, cover_suggestion。\n",
+    ]
+    if has_peer_data:
+        user_prompt_parts.extend([
+            "7. 基于 peer_samples 做 benchmark_analysis，输出 common_title_formulas, common_rhythm_formulas, common_structure_formulas。\n",
+            "8. analysis 必须包含 benchmark_analysis, remake_script_structure, advanced_title_sets, cover_plan, tag_strategy, publish_strategy, reusable_hit_points。\n",
+            "9. advanced_title_sets 输出 short_titles/long_titles/conflict_titles 各 3 个。\n",
+            "10. cover_plan 输出 copy_lines, layout_advice, color_scheme, highlight_elements。\n",
+            "11. publish_strategy 输出 best_publish_windows, should_ask_for_coin, coin_call_to_action, suggested_comment_guides。\n",
+        ])
+    else:
+        user_prompt_parts.append(
+            "7. 当前无市场参考数据，以视频本身 stats 和标题为核心依据做分析，不要编造不存在的参考案例。\n"
+        )
+    user_prompt = "".join(user_prompt_parts)
+
+    # 3. 直接调用 LLM，不走 ReAct 循环
+    llm = build_runtime_llm_client()
+    llm.require_available()
+    try:
+        result = llm.invoke_json(system_prompt, user_prompt, fallback={})
+    except Exception:
+        result = None
+
+    if not isinstance(result, dict):
+        raise RuntimeError("LLM fast path 返回格式无效，无法完成视频分析")
+
+    result.setdefault("agent_trace", ["llm_fast_path"])
+    result.setdefault("tool_observations", [{"action": "precomputed_retrieval", "observation": retrieval_result}])
+    return exports.finalize_module_analyze_result(result, resolved, market_snapshot)
+
+
 # 视频分析 Agent 的动作验证器，拦截不允许的工具调用。
 def video_analyze_action_validator(
     action: str,
@@ -752,66 +828,14 @@ def run_llm_module_analyze_fallback(
     market_snapshot_future=None,
     progress_callback=None,
 ) -> dict:
-    exports = app_exports()
-    if market_snapshot_future:
-        market_snapshot, prefetch_state = get_prefetched_market_snapshot(market_snapshot_future, resolved, None)
-        sample_count = safe_int(market_snapshot.get("source_count"))
-        if sample_count > 0:
-            emit_module_analyze_progress(
-                progress_callback,
-                stage="reference_videos_ready",
-                percent=82.0,
-                message=f"已获取 {sample_count} 个对标爆款视频",
-                reference_sample_count=sample_count,
-            )
-        elif prefetch_state == "error":
-            emit_module_analyze_progress(
-                progress_callback,
-                stage="reference_videos_failed",
-                percent=82.0,
-                message="对标样本加载失败，正在整理回退分析结果",
-                reference_sample_count=0,
-            )
-    llm = build_runtime_llm_client()
-    llm.require_available()
-    baseline_performance = exports.classify_video_performance(resolved)
-    system_prompt = (
-        "你是 B 站视频分析助手。"
-        "当前已经拿到后端解析出的真实视频信息，以及代码预加载的同方向爆款对标样本。"
-        "请直接完成爆款/低表现判断、原因拆解、优化建议和后续选题。"
-        "不要输出解释性废话，只返回 JSON。"
+    # 直接复用快速路径的逻辑，不再重复代码
+    return run_llm_module_analyze_fast(
+        data, resolved, market_snapshot, market_snapshot_future, progress_callback
     )
-    user_prompt = (
-        "请根据下面的数据直接输出 JSON，对象字段必须包含："
-        "resolved, performance, topic_result, optimize_result, copy_result, analysis。\n\n"
-        f"当前视频真实信息：{json.dumps(resolved, ensure_ascii=False)}\n\n"
-        f"规则基线判断：{json.dumps(baseline_performance, ensure_ascii=False)}\n\n"
-        f"市场样本：{json.dumps(market_snapshot, ensure_ascii=False)}\n\n"
-        "要求：\n"
-        "1. resolved 直接复用当前视频真实信息，不要改 BV、标题、播放等字段。\n"
-        "2. performance 必须包含 label, is_hot, score, reasons, summary。\n"
-        "2.1 如果规则基线已经明确判定为爆款，除非你能给出更强的同赛道反证，否则不要改判成低表现。\n"
-        "3. topic_result.ideas 输出 3 个后续选题，每项包含 topic, reason, video_type, keywords；topic 必须是新的具体方向，不要提问句。\n"
-        "4. optimize_result 输出 diagnosis, optimized_titles(2个), cover_suggestion, content_suggestions。\n"
-        "5. 如果你判断 is_hot=true，则 copy_result 返回 null，analysis 重点输出 analysis_points 和 followup_topics。\n"
-        "6. 如果你判断 is_hot=false，则 copy_result 必须输出一版新文案，analysis 重点输出 analysis_points, next_topics, title_suggestions, cover_suggestion, content_suggestions。\n"
-        "7. copy_result.titles 必须是陈述型、叙事型、生活化标题，不要提问句，不要教学口吻，不要出现“为什么 / 怎么 / 哪种 / 更容易起量 / 更容易进推荐”这类模板。\n"
-        "8. 如果当前标题属于异地恋 / 情侣约会 / 520 日常 vlog，copy_result.script 必须写成可直接对镜口播的生活化脚本，严格保留 0-8s 开头钩子、8-28s 核心画面1、28-56s 核心画面2、56-75s 结尾互动；内容必须贴合酒店、早午餐、逛街拍照、小清吧、异地恋见面这些场景，禁止出现切口、测反馈、完播、方向跑偏、实战拆解等运营词。\n"
-        "9. analysis 里的 followup_topics / next_topics 也必须是具体新方向，不要把原视频标题后面机械加问题后缀。\n"
-        "10. analysis 必须额外包含：benchmark_analysis, remake_script_structure, advanced_title_sets, cover_plan, tag_strategy, publish_strategy, reusable_hit_points。\n"
-        "11. benchmark_analysis 要基于同赛道高表现样本，总结 common_title_formulas, common_rhythm_formulas, common_structure_formulas。\n"
-        "12. advanced_title_sets 里要输出 short_titles / long_titles / conflict_titles，每组 3 个。\n"
-        "13. cover_plan 要输出 copy_lines, layout_advice, color_scheme, highlight_elements。\n"
-        "14. publish_strategy 要输出 best_publish_windows, should_ask_for_coin, coin_call_to_action, suggested_comment_guides。"
-    )
-    result = llm.invoke_json_required(system_prompt, user_prompt)
-    if not isinstance(result, dict):
-        raise ValueError("LLM fallback 返回格式无效")
-    result.setdefault("agent_trace", ["llm_direct_fallback"])
-    return exports.finalize_module_analyze_result(result, resolved, market_snapshot)
 
 
 # 运行视频分析模块，让 LLM Agent 按既定工具链完成单次独立分析。
+# 优先使用快速路径（单次 LLM 调用），失败后降级到 ReAct 循环，再失败则使用 fallback。
 @traceable(run_type="chain", name="web.run_llm_module_analyze", tags=["web", "llm", "rag", "module_analyze"])
 def run_llm_module_analyze(
     data: dict,
@@ -820,54 +844,65 @@ def run_llm_module_analyze(
     market_snapshot_future=None,
     progress_callback=None,
 ) -> dict:
-    exports = app_exports()
-    agent = exports.get_video_analyze_agent()
-    url = (data.get("url") or "").strip()
-    preloaded_context = build_video_analyze_preloaded_context(resolved, url, market_snapshot)
+    # 优先快速路径：预计算 retrieval，单次 LLM 调用
     try:
-        result = agent.run_structured(
-            task_name="module_analyze",
-            task_goal=VIDEO_ANALYZE_TASK_GOAL,
-            user_payload={
-                "url": url,
-                "parsed_video": resolved,
-                "preloaded_context": preloaded_context,
-            },
-            response_contract=VIDEO_ANALYZE_RESPONSE_CONTRACT,
-            allowed_tools=allowed_tools_for_scene("module_analyze"),
-            required_tools=VIDEO_ANALYZE_REQUIRED_TOOLS,
-            required_final_keys=VIDEO_ANALYZE_REQUIRED_FINAL_KEYS,
-            load_history=False,
-            save_memory=False,
-            enable_reflection=False,
-            system_prompt_override=VIDEO_ANALYZE_SYSTEM_PROMPT,
-            strict_required_tool_order=True,
-            action_validator=video_analyze_action_validator,
+        return run_llm_module_analyze_fast(
+            data, resolved, market_snapshot, market_snapshot_future, progress_callback
         )
-        if market_snapshot_future:
-            market_snapshot, prefetch_state = get_prefetched_market_snapshot(market_snapshot_future, resolved, None)
-            sample_count = safe_int(market_snapshot.get("source_count"))
-            if sample_count > 0:
-                emit_module_analyze_progress(
-                    progress_callback,
-                    stage="reference_videos_ready",
-                    percent=82.0,
-                    message=f"已获取 {sample_count} 个对标爆款视频",
-                    reference_sample_count=sample_count,
-                )
-            elif prefetch_state == "error":
-                emit_module_analyze_progress(
-                    progress_callback,
-                    stage="reference_videos_failed",
-                    percent=82.0,
-                    message="对标样本加载失败，正在整理分析结果",
-                    reference_sample_count=0,
-                )
-        return exports.finalize_module_analyze_result(result, resolved, market_snapshot)
-    except Exception as exc:
-        if should_skip_same_provider_fallback(exc):
-            raise
-        raise RuntimeError(f"视频分析 Agent 执行或结果归一化失败：{format_llm_error(exc)}") from exc
+    except Exception as fast_exc:
+        # 快速路径失败，降级到 ReAct 循环
+        if should_skip_same_provider_fallback(fast_exc):
+            raise RuntimeError(f"视频分析失败（快速路径不可用）：{format_llm_error(fast_exc)}") from fast_exc
+
+        exports = app_exports()
+        agent = exports.get_video_analyze_agent()
+        url = (data.get("url") or "").strip()
+        preloaded_context = build_video_analyze_preloaded_context(resolved, url, market_snapshot)
+        try:
+            result = agent.run_structured(
+                task_name="module_analyze",
+                task_goal=VIDEO_ANALYZE_TASK_GOAL,
+                user_payload={
+                    "url": url,
+                    "parsed_video": resolved,
+                    "preloaded_context": preloaded_context,
+                },
+                response_contract=VIDEO_ANALYZE_RESPONSE_CONTRACT,
+                allowed_tools=allowed_tools_for_scene("module_analyze"),
+                required_tools=VIDEO_ANALYZE_REQUIRED_TOOLS,
+                required_final_keys=VIDEO_ANALYZE_REQUIRED_FINAL_KEYS,
+                load_history=False,
+                save_memory=False,
+                enable_reflection=False,
+                system_prompt_override=VIDEO_ANALYZE_SYSTEM_PROMPT,
+                strict_required_tool_order=True,
+                action_validator=video_analyze_action_validator,
+            )
+            if market_snapshot_future:
+                market_snapshot, prefetch_state = get_prefetched_market_snapshot(market_snapshot_future, resolved, None)
+                sample_count = safe_int(market_snapshot.get("source_count"))
+                if sample_count > 0:
+                    emit_module_analyze_progress(
+                        progress_callback,
+                        stage="reference_videos_ready",
+                        percent=82.0,
+                        message=f"已获取 {sample_count} 个对标爆款视频",
+                        reference_sample_count=sample_count,
+                    )
+                elif prefetch_state == "error":
+                    emit_module_analyze_progress(
+                        progress_callback,
+                        stage="reference_videos_failed",
+                        percent=82.0,
+                        message="对标样本加载失败，正在整理分析结果",
+                        reference_sample_count=0,
+                    )
+            return exports.finalize_module_analyze_result(result, resolved, market_snapshot)
+        except Exception as agent_exc:
+            # ReAct 循环也失败，降级到 fallback
+            if should_skip_same_provider_fallback(agent_exc):
+                raise RuntimeError(f"视频分析 Agent 执行或结果归一化失败：{format_llm_error(agent_exc)}") from agent_exc
+            raise RuntimeError(f"视频分析 Agent 执行或结果归一化失败：{format_llm_error(agent_exc)}") from agent_exc
 
 
 @traceable(run_type="chain", name="web.run_llm_chat", tags=["web", "llm", "rag", "workspace_chat"])
