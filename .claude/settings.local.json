@@ -14,7 +14,18 @@
       "mcp__MiniMax__web_search",
       "WebFetch(domain:github.com)",
       "Bash(ls /d/agent/docs/test/*.md)",
-      "mcp__MiniMax__understand_image"
+      "mcp__MiniMax__understand_image",
+      "Bash(node --check D:/agent/web/static/app.js)",
+      "Bash(git checkout *)",
+      "Bash(FLASK_APP=web/app flask run --host=127.0.0.1 --port=8000 --no-debugger)",
+      "Bash(curl -s http://127.0.0.1:8000/api/runtime-info)",
+      "Bash(echo \"Server PID: $!\")",
+      "Read(//tmp/**)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/chat -H \"Content-Type: application/json\" -d \"{\\\\\"message\\\\\":\\\\\"你好\\\\\",\\\\\"context\\\\\":{\\\\\"field\\\\\":\\\\\"AI\\\\\"}}\" --connect-timeout 5)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/chat -H \"Content-Type: application/json\" -d \"{\\\\\"message\\\\\":\\\\\"hello\\\\\",\\\\\"context\\\\\":{\\\\\"field\\\\\":\\\\\"AI\\\\\"}}\" --connect-timeout 10)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/chat -H \"Content-Type: application/json\" -d \"{\\\\\"message\\\\\":\\\\\"帮我查一下知识库里有什么内容\\\\\",\\\\\"context\\\\\":{\\\\\"field\\\\\":\\\\\"AI\\\\\",\\\\\"partition\\\\\":\\\\\"knowledge\\\\\"}}\" --connect-timeout 10 --max-time 40)",
+      "Bash(curl -s -X POST http://127.0.0.1:8000/api/module-create -H \"Content-Type: application/json\" -d \"{\\\\\"field\\\\\":\\\\\"AI\\\\\",\\\\\"direction\\\\\":\\\\\"教程\\\\\",\\\\\"idea\\\\\":\\\\\"如何用AI写代码\\\\\",\\\\\"partition\\\\\":\\\\\"知识\\\\\",\\\\\"style\\\\\":\\\\\"干货\\\\\"}\" --connect-timeout 10 --max-time 60)",
+      "Bash(pkill -f \"python web/app.py\")"
     ]
   }
 }

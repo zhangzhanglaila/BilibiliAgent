@@ -1,8 +1,20 @@
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, TimeoutError as FutureTimeoutError, wait
 from importlib import import_module
+import time
 
 from web.services.runtime import *
+
+_PREVIEW_EXECUTOR = ThreadPoolExecutor(max_workers=2)
+
+
+def _with_timeout(fn, timeout: float):
+    future = _PREVIEW_EXECUTOR.submit(fn)
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        raise TimeoutError(f"preview timed out after {timeout}s") from None
 
 
 # 延迟加载 web.app 模块，用于解决循环导入问题。
@@ -906,26 +918,46 @@ def fetch_video_info(url: str, bvid: str) -> dict:
     raise ValueError("；".join(errors))
 
 
-# 仅用于前端预览的快速解析链路；优先返回足够展示基础信息的结果，避免被慢接口超时拖住。
+PREVIEW_API_TIMEOUT = 5  # 预览链路总超时秒数，避免慢接口拖住前端
+
+# 仅用于前端预览的快速解析链路；API 和 bilibili_api 库并发跑，谁先返回用谁，HTML 兜底。
 def fetch_video_preview_info(url: str, bvid: str) -> dict:
     exports = app_exports()
     errors: list[str] = []
+    t_start = time.time()
 
+    # 1) 并发跑 API + bilibili_api 库，取最先返回的结果
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        api_future = pool.submit(exports.fetch_video_info_via_public_api, bvid)
+        lib_future = pool.submit(lambda: sync(video.Video(bvid=bvid).get_info()))
+
+        done, pending = wait(
+            [api_future, lib_future],
+            timeout=PREVIEW_API_TIMEOUT,
+            return_when=FIRST_COMPLETED,
+        )
+        for f in pending:
+            f.cancel()
+
+        for f in done:
+            try:
+                result = f.result(timeout=0.5)
+                print(f"[preview] winner={('api' if f is api_future else 'lib')} elapsed={time.time() - t_start:.2f}s")
+                return result
+            except Exception as exc:
+                tag = "public api" if f is api_future else "bilibili_api"
+                errors.append(f"{tag}: {exc}")
+                print(f"[preview] {tag} failed: {exc}")
+
+    # 2) 两步都失败或超时，回退到 HTML 页面解析
     try:
-        return exports.fetch_video_info_via_html(url, bvid)
+        result = exports.fetch_video_info_via_html(url, bvid)
+        print(f"[preview] html fallback elapsed={time.time() - t_start:.2f}s")
+        return result
     except Exception as exc:
-        errors.append(f"html fast path: {exc}")
+        errors.append(f"html fallback: {exc}")
 
-    try:
-        return exports.fetch_video_info_via_public_api(bvid)
-    except Exception as exc:
-        errors.append(f"public api: {exc}")
-
-    try:
-        return sync(video.Video(bvid=bvid).get_info())
-    except Exception as exc:
-        errors.append(f"bilibili_api: {exc}")
-
+    print(f"[preview] ALL FAILED elapsed={time.time() - t_start:.2f}s errors={' | '.join(errors)}")
     raise ValueError("；".join(errors))
 
 

@@ -16,3 +16,8 @@ def index():
 @pages_bp.get("/favicon.ico")
 def favicon():
     return Response(status=204)
+
+
+@pages_bp.get("/dashboard")
+def dashboard():
+    return render_template("dashboard.html")

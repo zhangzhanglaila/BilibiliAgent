@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BiliAgent Metrics Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b0f19; --card: #131a2b; --border: #1e2a3d;
+      --text: #c8d6e5; --muted: #6b7d95; --accent: #4dabf7;
+      --green: #51cf66; --yellow: #ffd43b; --red: #ff6b6b; --purple: #9775fa;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; min-height: 100vh; }
+    .topbar { background: var(--card); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
+    .topbar h1 { font-size: 18px; color: #fff; }
+    .topbar .refresh-badge { font-size: 12px; color: var(--muted); }
+    .topbar .refresh-badge span { color: var(--accent); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; padding: 20px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+    .card h2 { font-size: 14px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { color: var(--muted); font-weight: 600; text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 11px; text-transform: uppercase; }
+    td { padding: 8px 8px; border-bottom: 1px solid rgba(30,42,61,0.5); font-variant-numeric: tabular-nums; }
+    .path-tag { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; font-weight: 600; }
+    .path-tag.direct { background: rgba(81,207,102,0.15); color: var(--green); }
+    .path-tag.fast { background: rgba(77,171,247,0.15); color: var(--accent); }
+    .path-tag.agent { background: rgba(151,117,250,0.15); color: var(--purple); }
+    .path-tag.rules { background: rgba(107,125,149,0.15); color: var(--muted); }
+    .metric-row { display: flex; gap: 12px; flex-wrap: wrap; }
+    .metric-box { flex: 1; min-width: 100px; background: var(--bg); border-radius: 6px; padding: 12px; text-align: center; }
+    .metric-box .val { font-size: 24px; font-weight: 700; }
+    .metric-box .lbl { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .metric-box .val.good { color: var(--green); }
+    .metric-box .val.warn { color: var(--yellow); }
+    .metric-box .val.bad { color: var(--red); }
+    .bar-wrap { background: var(--bg); border-radius: 4px; height: 8px; margin-top: 4px; overflow: hidden; }
+    .bar-fill { height: 100%; border-radius: 4px; transition: width 0.5s; }
+    .bar-fill.direct { background: var(--green); }
+    .bar-fill.fast { background: var(--accent); }
+    .bar-fill.agent { background: var(--purple); }
+    .bar-fill.rules { background: var(--muted); }
+    .legend { display: flex; gap: 12px; font-size: 11px; margin-top: 8px; flex-wrap: wrap; }
+    .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+    .error-row { color: var(--red); }
+    .spark { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .full-width { grid-column: 1 / -1; }
+    .stale { opacity: 0.4; }
+    .pulse { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+    .target-line { border-left: 2px dashed var(--yellow); padding-left: 8px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>BiliAgent Metrics Dashboard</h1>
+    <div class="refresh-badge">Auto-refresh 3s · <span id="lastRefresh">--</span> · <a href="/" style="color:var(--accent)">Back to App</a></div>
+  </div>
+
+  <div class="grid" id="dashboardGrid">
+    <!-- Populated by JS -->
+  </div>
+
+  <script>
+    const GOOD_P50 = { direct: 3000, fast: 10000, agent: 25000, rules: 2000 };
+    const GOOD_P95 = { direct: 6000, fast: 18000, agent: 35000, rules: 5000 };
+    const GOOD_SUCCESS = 0.95;
+    const GOOD_CACHE = 0.20;
+
+    function valClass(v, good, bad) {
+      if (v <= good) return 'good';
+      if (v >= bad) return 'bad';
+      return 'warn';
+    }
+
+    async function refresh() {
+      try {
+        const [mResp, cResp] = await Promise.all([
+          fetch('/api/metrics'),
+          fetch('/api/cache-stats')
+        ]);
+        const metrics = await mResp.json();
+        const cache = await cResp.json();
+
+        if (!metrics.success || !cache.success) return;
+
+        document.getElementById('lastRefresh').textContent = new Date().toLocaleTimeString();
+        render(metrics.data, cache.data);
+      } catch(e) {
+        console.error('Dashboard fetch error:', e);
+      }
+    }
+
+    function render(metricsData, cacheData) {
+      const rows = metricsData.rows || [];
+      const summary = metricsData.summary || '';
+
+      // Group by module
+      const byModule = {};
+      rows.forEach(r => {
+        if (!byModule[r.module]) byModule[r.module] = [];
+        byModule[r.module].push(r);
+      });
+
+      let html = '';
+
+      // ---- Summary KPI Card ----
+      const allCalls = rows.reduce((s,r) => s + r.total_calls, 0);
+      const allSuccess = rows.reduce((s,r) => s + r.total_calls * r.success_rate, 0);
+      const overallSuccess = allCalls > 0 ? allSuccess / allCalls : 1;
+      const pathDist = {};
+      rows.forEach(r => { pathDist[r.path] = (pathDist[r.path]||0) + r.total_calls; });
+      const topPath = Object.entries(pathDist).sort((a,b) => b[1]-a[1])[0];
+
+      // Cache hit rate
+      const cacheHits = rows.filter(r => r.count > 0 && r.p50_ms === 0).length;
+      const cacheHitRate = allCalls > 0 ? cacheHits / allCalls : 0;
+
+      html += `<div class="card full-width">
+        <h2>Global Overview</h2>
+        <div class="metric-row">
+          <div class="metric-box">
+            <div class="val">${allCalls}</div>
+            <div class="lbl">Total Calls</div>
+          </div>
+          <div class="metric-box">
+            <div class="val ${valClass(overallSuccess, GOOD_SUCCESS, 0.90)}">${(overallSuccess*100).toFixed(1)}%</div>
+            <div class="lbl">Success Rate</div>
+          </div>
+          <div class="metric-box">
+            <div class="val">${topPath ? topPath[0] : '--'}</div>
+            <div class="lbl">Top Path</div>
+          </div>
+          <div class="metric-box">
+            <div class="val ${valClass(cacheHitRate, GOOD_CACHE, 0.10)}">${(cacheHitRate*100).toFixed(1)}%</div>
+            <div class="lbl">Cache Hit Rate</div>
+          </div>
+        </div>
+        <div class="bar-wrap" style="margin-top:12px; height:16px; display:flex; border-radius:6px; overflow:hidden;">
+          ${Object.entries(pathDist).map(([p,c]) =>
+            `<div class="bar-fill ${p}" style="width:${(c/allCalls*100).toFixed(1)}%; flex:none;" title="${p}: ${c} (${(c/allCalls*100).toFixed(1)}%)"></div>`
+          ).join('')}
+        </div>
+        <div class="legend">
+          ${Object.entries(pathDist).map(([p,c]) =>
+            `<span><span class="legend-dot" style="background:var(--${p==='direct'?'green':p==='fast'?'accent':p==='agent'?'purple':'muted'})"></span>${p}: ${c} (${(c/allCalls*100).toFixed(1)}%)</span>`
+          ).join('')}
+        </div>
+        <div class="target-line">
+          Targets: direct P50&lt;3s P95&lt;6s | fast P50&lt;10s P95&lt;18s | agent P50&lt;25s P95&lt;35s | success &gt;95% | cache hit &gt;20%
+        </div>
+      </div>`;
+
+      // ---- Per-Module Cards ----
+      const moduleNames = { chat: 'Chat', create: 'Content Creation', analyze: 'Video Analysis' };
+      for (const [mod, modRows] of Object.entries(byModule)) {
+        html += `<div class="card">
+          <h2>${moduleNames[mod] || mod} — Latency</h2>
+          <table>
+            <thead><tr><th>Path</th><th>N</th><th>P50</th><th>P95</th><th>Succ%</th></tr></thead>
+            <tbody>`;
+        modRows.forEach(r => {
+          const p50ok = r.p50_ms <= (GOOD_P50[r.path] || 99999);
+          const p95ok = r.p95_ms <= (GOOD_P95[r.path] || 99999);
+          const succOk = r.success_rate >= GOOD_SUCCESS;
+          const cls = (p50ok && p95ok && succOk) ? '' : 'error-row';
+          html += `<tr class="${cls}">
+            <td><span class="path-tag ${r.path}">${r.path}</span></td>
+            <td>${r.count}</td>
+            <td style="color:${p50ok?'var(--green)':'var(--red)'}">${r.p50_ms === 0 ? 'cache' : (r.p50_ms/1000).toFixed(1)+'s'}</td>
+            <td style="color:${p95ok?'var(--green)':'var(--red)'}">${(r.p95_ms/1000).toFixed(1)}s</td>
+            <td style="color:${succOk?'var(--green)':'var(--red)'}">${(r.success_rate*100).toFixed(1)}%</td>
+          </tr>`;
+        });
+        html += `</tbody></table></div>`;
+      }
+
+      // ---- Cache Card ----
+      html += `<div class="card">
+        <h2>Cache Stats</h2>
+        <table>
+          <thead><tr><th>Store</th><th>Active</th><th>Expired</th><th>Max</th><th>Hit Rate</th></tr></thead>
+          <tbody>`;
+      for (const [name, stats] of Object.entries(cacheData)) {
+        const total = stats.active + stats.expired;
+        const hitRate = rows.filter(r => r.path === 'fast' && r.p50_ms === 0).length / Math.max(1, rows.reduce((s,r)=>s+r.total_calls,0));
+        html += `<tr>
+          <td>${name}</td>
+          <td>${stats.active}</td>
+          <td>${stats.expired}</td>
+          <td>${stats.max_size}</td>
+          <td>${(hitRate*100).toFixed(1)}%</td>
+        </tr>`;
+      }
+      html += `</tbody></table></div>`;
+
+      // ---- Error Card ----
+      const errors = {};
+      rows.forEach(r => {
+        if (r.error_types) {
+          for (const [etype, count] of Object.entries(r.error_types)) {
+            errors[`${r.module}:${r.path}:${etype}`] = (errors[`${r.module}:${r.path}:${etype}`]||0) + count;
+          }
+        }
+      });
+      if (Object.keys(errors).length > 0) {
+        html += `<div class="card">
+          <h2>Error Breakdown</h2>
+          <table>
+            <thead><tr><th>Module:Path</th><th>Error Type</th><th>Count</th></tr></thead>
+            <tbody>`;
+        for (const [key, count] of Object.entries(errors)) {
+          const [mod, path, etype] = key.split(':');
+          html += `<tr class="error-row">
+            <td>${mod}:<span class="path-tag ${path}">${path}</span></td>
+            <td>${etype}</td>
+            <td>${count}</td>
+          </tr>`;
+        }
+        html += `</tbody></table></div>`;
+      }
+
+      document.getElementById('dashboardGrid').innerHTML = html;
+    }
+
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

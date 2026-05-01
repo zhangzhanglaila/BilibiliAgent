@@ -685,20 +685,35 @@
    - 纯代码预抓“同方向爆款” `peer_samples`
    - 这一步直接走 B 站公开 HTTP 接口，不走 Chroma
    - 先做一次很短的等待窗口；如果样本还没回来，主链路会先进入 `run_llm_module_analyze()` 做 retrieval 和分析
-9. 进入 `run_llm_module_analyze()`
-10. `run_structured()` 在严格约束下先调用 `retrieval`
-11. `retrieval` 走本地知识库检索
-    - `KNOWLEDGE_BASE.retrieve(...)`
-    - 过滤条件是 `static_hot_case + knowledge_base`
-12. 如果 retrieval 样本明显不足，模型才允许继续调 `web_search`
-13. 工具调用完成后，模型直接输出 `final`
-14. `finalize_module_analyze_result()` 做统一后处理：
+9. 进入 `run_llm_module_analyze()`，采用**双轨架构**：
+
+   **轨道一（优先）：快速路径** `run_llm_module_analyze_fast()`
+   - 预计算 retrieval 结果（`video_analyze_retrieval_tool_handler`）
+   - 构建包含 resolved + market_snapshot + retrieval 的完整 prompt
+   - 单次 `llm.invoke_json()` 调用，不走 ReAct 循环
+   - 正常耗时 ~10-15 秒
+
+   **轨道二（降级）：ReAct Fallback**
+   - 当快速路径失败且错误可恢复时，降级到 `agent.run_structured()`
+   - `run_structured()` 在严格约束下先调用 `retrieval`
+   - `retrieval` 走本地知识库检索
+     - `KNOWLEDGE_BASE.retrieve(...)`
+     - 过滤条件是 `static_hot_case + knowledge_base`
+   - 如果 retrieval 样本明显不足，模型才允许继续调 `web_search`
+   - 工具调用完成后，模型直接输出 `final`
+
+   **降级决策逻辑**（`should_skip_same_provider_fallback`）：
+   - 529 服务过载：直接报错，**不重试，不降级**
+   - 520/502/503 等网关错误：跳过 ReAct fallback
+   - 超时/rate_limit：降级到 ReAct 重试
+
+10. `finalize_module_analyze_result()` 做统一后处理：
     - 统一 `performance / optimize_result / analysis`
     - 合并 `peer_samples + retrieval` 为 `reference_videos`
     - `analysis.benchmark_analysis.benchmark_videos` 只保留后端核验通过的真实参考视频
     - 如果真实 `reference_videos` 为空，直接返回空数组和显式提示，不允许回退使用 LLM 编造的 `benchmark_videos`
-15. 任务线程把 `stage / percent / message / resolved / result` 持续写入任务状态，SSE 按增量推送到前端
-16. 前端渲染：
+11. 任务线程把 `stage / percent / message / resolved / result` 持续写入任务状态，SSE 按增量推送到前端
+12. 前端渲染：
     - 当前视频基础信息
     - 表现判断
     - 下一批题材建议
@@ -706,7 +721,7 @@
     - 可直接使用的新文案
     - “建议直接对标的参考视频”
 
-**工具规则**
+**工具规则**（仅 ReAct Fallback 路径生效）
 
 - `allowed_tools=[“retrieval”, “web_search”]`
 - `required_tools=[“retrieval”]`

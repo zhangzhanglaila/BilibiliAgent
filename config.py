@@ -78,6 +78,7 @@ class AppConfig:
     langsmith_project: str = os.getenv("LANGSMITH_PROJECT", os.getenv("LANGCHAIN_PROJECT", "bilibili-hot-rag"))
     langsmith_endpoint: str = os.getenv("LANGSMITH_ENDPOINT", os.getenv("LANGCHAIN_ENDPOINT", "")).strip()
     langchain_callbacks_background: bool = env_bool("LANGCHAIN_CALLBACKS_BACKGROUND", True)
+    llm_streaming: bool = env_bool("LLM_STREAMING", True)
     llm_timeout_seconds: int = int(os.getenv("LLM_TIMEOUT_SECONDS", "75"))
     llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "2"))
     llm_retry_backoff_seconds: float = float(os.getenv("LLM_RETRY_BACKOFF_SECONDS", "1.6"))

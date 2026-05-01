@@ -1,0 +1,1 @@
+invalid type: string "生活\", \"benchmark_lane_label\": \"生活\", \"benchmark_terms\": [\"搞笑研究所\", \"高能\", \"vlog\", \"沙雕\", \"挑战\", \"干干\"], \"benchmark_queries\": [\"高能 vlog\", \"搞笑研究所 高能 vlog\", \"搞笑研究所 高能\", \"干！\"]}, \"market_snapshot\": {\"partition\": \"life\", \"partition_label\": \"生活\", \"source_count\": 0, \"hot_board

@@ -335,20 +335,17 @@ class LLMWorkspaceAgent:
         required_final_keys: Sequence[str],
     ) -> Dict[str, Any]:
         review_prompt = (
-            "你是结果质检器，需要判断下面这个 JSON 最终结果是否满足任务要求。\n"
-            "如果满足，pass 返回 true。\n"
-            "如果不满足，pass 返回 false，并直接给出 rewritten_final。\n"
-            "只返回 JSON：{pass:boolean, issues:string[], rewritten_final:object|null}\n\n"
-            f"任务名称：{task_name}\n"
-            f"任务目标：{task_goal}\n"
-            f"用户输入：{self._payload_text(user_payload)}\n"
+            "判断以下 JSON 结果是否满足任务要求。仅返回 JSON。\n\n"
+            f"任务：{task_name}\n"
+            f"目标：{task_goal}\n"
+            f"用户输入：{self._payload_text(user_payload)[:600]}\n"
             f"响应契约：{response_contract}\n"
             f"工具观察：{self._scratchpad_block(scratchpad)}\n"
-            f"候选最终结果：{self._payload_text(final)}"
+            f"候选结果：{self._payload_text(final)}"
         )
         try:
             review = self.llm.invoke_json_required(
-                "你是一个严格的 B 站创作结果审查与重写助手，只返回 JSON。",
+                "你是结果质检器，只返回 JSON。",
                 review_prompt,
             )
         except Exception:
@@ -420,7 +417,7 @@ class LLMWorkspaceAgent:
         max_steps: int | None = None,
         load_history: bool = True,
         save_memory: bool = True,
-        enable_reflection: bool = True,
+        enable_reflection: bool = False,
         system_prompt_override: str | None = None,
         strict_required_tool_order: bool = False,
         action_validator: Callable[[str, Dict[str, Any], List[Dict[str, Any]], List[str]], str] | None = None,
@@ -455,12 +452,9 @@ class LLMWorkspaceAgent:
                 required_tools_guidance += "优先调用 retrieval 查询本地知识库，再调用 video_briefing 解析视频详情。"
 
         default_system_prompt = (
-            "你是 B 站创作工作台的 LLM Agent 中枢。\n"
-            "你必须采用 ReAct 范式：先基于用户输入和已有 observation 思考，再决定是否调用工具，最后输出结构化 JSON。\n"
-            "所有判断都由你自主完成，不使用硬编码阈值，不依赖固定规则链。\n"
-            "检索优先但不强制：当本地知识库可能包含历史经验、沉淀资料、案例或已知结构化信息时，优先考虑 retrieval。\n"
-            "如果问题明显依赖最新公开信息，或 retrieval 返回的信息不足、不匹配、已过期，再调用 web_search。\n"
-            "如果要使用 web_search，你需要自己生成最优搜索关键词再发起调用。\n"
+            "你是 B 站创作工作台 LLM Agent。\n"
+            "先思考再决定工具调用，最后输出 JSON。\n"
+            "优先 retrieval 查本地知识库，不足再 web_search。自行生成最优搜索词。\n"
         )
         system_prompt = (
             (system_prompt_override.strip() if isinstance(system_prompt_override, str) and system_prompt_override.strip() else default_system_prompt)

@@ -7,6 +7,7 @@ import subprocess
 import time
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4 as _uuid4
 
 import requests
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -40,6 +41,16 @@ def classify_llm_error(exc: Exception) -> str:
         return exc.category
 
     text = _error_text(exc).lower()
+    if "[fail_fast:" in text:
+        m = re.search(r'\[fail_fast:(\d+)\]', text)
+        if m:
+            code = m.group(1)
+            if code == "500":
+                return "server_error"
+            if code == "503":
+                return "service_unavailable"
+            if code == "529":
+                return "service_overloaded"
     if "billing_service_error" in text or "billing service temporarily unavailable" in text:
         return "billing_service_unavailable"
     if "winerror 10013" in text or "unable to connect to the remote server" in text:
@@ -48,6 +59,8 @@ def classify_llm_error(exc: Exception) -> str:
         return "service_unavailable"
     if "overloaded_error" in text or "529" in text:
         return "service_overloaded"
+    if "500" in text or "server_error" in text or "internal server error" in text:
+        return "server_error"
     if "502" in text or "bad gateway" in text or "520" in text:
         return "bad_gateway"
     if "504" in text or "gateway timeout" in text:
@@ -68,8 +81,6 @@ def is_retryable_llm_error(exc: Exception) -> bool:
     return classify_llm_error(exc) in {
         "billing_service_unavailable",
         "connection_blocked",
-        "service_unavailable",
-        "bad_gateway",
         "gateway_timeout",
         "timeout",
         "rate_limit",
@@ -81,6 +92,7 @@ def should_skip_same_provider_fallback(exc: Exception) -> bool:
     return classify_llm_error(exc) in {
         "billing_service_unavailable",
         "service_unavailable",
+        "server_error",
         "bad_gateway",
         "gateway_timeout",
         "auth",
@@ -101,6 +113,8 @@ def format_llm_error(exc: Exception) -> str:
         return "当前运行进程的网络连接被系统或环境拦截，LLM 请求没能真正发出去。请检查本机代理、防火墙，或 Python 进程的出网权限。"
     if category == "service_unavailable":
         return "上游 LLM 服务暂时不可用（503）。请稍后重试。"
+    if category == "server_error":
+        return "上游 LLM 服务内部错误（500）。请稍后重试或切换模型。"
     if category in {"bad_gateway", "gateway_timeout"}:
         return "上游 LLM 网关暂时异常（502/504）。请稍后重试。"
     if category == "timeout":
@@ -149,26 +163,13 @@ class LLMClient:
         self.retry_backoff_seconds = float(
             retry_backoff_seconds if retry_backoff_seconds is not None else CONFIG.llm_retry_backoff_seconds
         )
-        self.enabled = bool(self.api_key and (ChatOpenAI or self.base_url))
+        # 统一走 urllib HTTP 直连，不经过 ChatOpenAI（避免 httpx/requests 被 Windows 系统代理拦截）
+        self.enabled = bool(self.api_key and self.base_url)
         self.model = None
-        if self.enabled and ChatOpenAI:
-            chat_openai_kwargs: dict[str, Any] = {
-                "model": self.model_name,
-                "api_key": self.api_key,
-                "base_url": self.base_url,
-                "temperature": 0.7,
-                "timeout": self.timeout_seconds,
-                "max_retries": 0,
-            }
-            if self.reasoning_effort:
-                chat_openai_kwargs["reasoning_effort"] = self.reasoning_effort
-            if self.disable_response_storage:
-                chat_openai_kwargs["store"] = False
-            self.model = ChatOpenAI(**chat_openai_kwargs)
 
     # 判断当前客户端是否具备可用的模型实例。
     def available(self) -> bool:
-        return self.enabled and self.model is not None
+        return self.enabled
 
     # 在真正调用模型前强制检查可用性，缺配置时直接报清晰错误。
     def require_available(self) -> None:
@@ -197,11 +198,10 @@ class LLMClient:
             payload["reasoning_effort"] = self.reasoning_effort
         if self.disable_response_storage:
             payload["store"] = False
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
 
+        request_id = _uuid4().hex[:8]
+        print(f"[LLM][{request_id}] start model={self.model_name} endpoint={endpoint}")
+        t0 = time.time()
         with trace_block(
             "llm_client.http_fallback",
             run_type="llm",
@@ -215,27 +215,40 @@ class LLMClient:
                 "base_url": self.base_url,
                 "reasoning_effort": self.reasoning_effort,
                 "disable_response_storage": self.disable_response_storage,
+                "request_id": request_id,
             },
             tags=["llm", "http_fallback"],
         ) as run:
             try:
-                response = requests.post(
+                import urllib.request as _ur
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                req = _ur.Request(
                     endpoint,
-                    headers=headers,
-                    json=payload,
-                    timeout=self.timeout_seconds,
+                    data=body,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json; charset=utf-8",
+                    },
+                    method="POST",
                 )
-            except requests.RequestException as exc:
+                with _ur.urlopen(req, timeout=self.timeout_seconds) as resp:
+                    status = resp.status
+                    raw = resp.read().decode("utf-8")
+            except Exception as exc:
                 message = str(exc)
+                print(f"[LLM][{request_id}] FAIL elapsed={time.time() - t0:.2f}s error={message[:120]}")
                 if "WinError 10013" in message:
                     return self._invoke_via_powershell_http(endpoint, payload)
                 raise RuntimeError(message) from exc
 
-            if response.status_code >= 400:
-                raise RuntimeError(response.text.strip() or f"HTTP {response.status_code}")
+            if status >= 400:
+                body = raw.strip() or f"HTTP {status}"
+                if status in (500, 503, 529):
+                    raise RuntimeError(f"[fail_fast:{status}] {body}")
+                raise RuntimeError(body)
 
             try:
-                data = response.json()
+                data = json.loads(raw)
             except Exception as exc:
                 raise RuntimeError("LLM HTTP fallback returned invalid JSON") from exc
 
@@ -252,6 +265,7 @@ class LLMClient:
                 ).strip()
             if not isinstance(content, str) or not content.strip():
                 raise RuntimeError("LLM HTTP fallback returned empty content")
+            print(f"[LLM][{request_id}] done elapsed={time.time() - t0:.2f}s content_len={len(content)}")
             end_trace(run, {"content_preview": content[:500]})
             return SimpleNamespace(content=content)
 
@@ -367,13 +381,9 @@ class LLMClient:
 
         raise ValueError("LLM response does not contain valid JSON")
 
-    # 发送一次消息请求，并在这里统一处理重试和错误包装。
+    # 发起 LLM 请求，统一走 urllib HTTP 直连，不再经 ChatOpenAI。
     def _invoke_messages(self, system_prompt: str, user_prompt: str):
         self.require_available()
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
         attempts = max(1, self.max_retry_count + 1)
         last_error: LLMInvocationError | None = None
 
@@ -396,21 +406,10 @@ class LLMClient:
         ) as run:
             for attempt in range(1, attempts + 1):
                 try:
-                    if self.model is not None:
-                        result = self.model.invoke(messages)
-                    else:
-                        result = self._invoke_via_http(system_prompt, user_prompt)
+                    result = self._invoke_via_http(system_prompt, user_prompt)
                     end_trace(run, {"attempts": attempt, "content_preview": self._coerce_result_text(result)[:500]})
                     return result
                 except Exception as exc:
-                    if self._http_fallback_available() and self.model is not None:
-                        try:
-                            result = self._invoke_via_http(system_prompt, user_prompt)
-                            end_trace(run, {"attempts": attempt, "content_preview": self._coerce_result_text(result)[:500]})
-                            return result
-                        except Exception as http_exc:
-                            exc = http_exc
-                            # fallback 失败，不要在这里 return，继续重试
                     category = classify_llm_error(exc)
                     wrapped = LLMInvocationError(
                         format_llm_error(exc),
@@ -421,8 +420,6 @@ class LLMClient:
                     last_error = wrapped
                     if attempt >= attempts or not wrapped.transient:
                         raise wrapped
-                    # 指数退避：1.6s × 2^(attempt-1)，兼顾重试成功率和避免上游过载。
-                    # attempt=1 -> 1.6s, attempt=2 -> 3.2s, attempt=3 -> 6.4s
                     time.sleep(self.retry_backoff_seconds * (2 ** (attempt - 1)))
 
         raise last_error or LLMInvocationError("LLM 调用失败")
@@ -470,3 +467,23 @@ class LLMClient:
         self.require_available()
         result = self._invoke_messages(system_prompt, user_prompt)
         return self._coerce_result_text(result)
+
+    # 带 fallback 的安全调用：先尝试正常参数，失败后用更保守参数重试一次。
+    def invoke_json_with_fallback(
+        self, system_prompt: str, user_prompt: str, fallback: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Try JSON call with standard params, fall back to conservative params on failure."""
+        if not self.available():
+            return fallback
+        try:
+            return self.invoke_json_required(
+                system_prompt,
+                user_prompt + "\n\nReturn JSON only. Do not add explanation outside the JSON payload.",
+            )
+        except Exception:
+            pass
+        # Conservative fallback: lower temperature, shorter prompt
+        try:
+            return self.invoke_json(system_prompt, user_prompt[:3000], fallback)
+        except Exception:
+            return fallback

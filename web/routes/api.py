@@ -7,6 +7,8 @@ from pathlib import Path
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
 from observability import export_recent_traces_to_file, flush_traces
+import metrics as _perf
+import cache as _cache
 
 from web.core.shared import (
     CONFIG,
@@ -264,79 +266,91 @@ def api_module_create():
         return jsonify({"success": False, "error": "请至少输入领域、方向、想法中的一项"}), 400
 
     if runtime_llm_enabled():
-        try:
-            result = run_llm_module_create(data)
-            flush_traces()
-            export_recent_traces_to_file(module_type="module_create", trace_name_contains="web.run_llm_module_create")
-            return jsonify({"success": True, "data": result})
-        except Exception as exc:
-            flush_traces()
-            export_recent_traces_to_file(module_type="module_create", trace_name_contains="web.run_llm_module_create")
-            message = f"LLM Agent 生成失败：{format_llm_error(exc)}"
-            return (
-                jsonify(
-                    {
-                        "success": False,
-                        "error": message,
-                        "data": build_llm_runtime_reconfigure_data(message),
-                    }
-                ),
-                llm_error_http_status(exc),
-            )
+        with _perf.TimedBlock("create", "unknown") as block:
+            try:
+                result = run_llm_module_create(data)
+                block.path = result.get("_route_path") or result.get("mode", "unknown")
+                if "llm_fast_path" in str(result.get("agent_trace", [])):
+                    block.path = "fast"
+                elif "llm_agent" in str(result.get("mode", "")):
+                    block.path = "agent"
+                flush_traces()
+                export_recent_traces_to_file(module_type="module_create", trace_name_contains="web.run_llm_module_create")
+                return jsonify({"success": True, "data": result})
+            except Exception as exc:
+                flush_traces()
+                export_recent_traces_to_file(module_type="module_create", trace_name_contains="web.run_llm_module_create")
+                message = f"LLM Agent 生成失败：{format_llm_error(exc)}"
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": message,
+                            "data": build_llm_runtime_reconfigure_data(message),
+                        }
+                    ),
+                    llm_error_http_status(exc),
+                )
 
-    seed_topic = build_seed_topic(field_name, direction, idea)
-    partition_name = CONFIG.normalize_partition((data.get("partition") or "knowledge").strip() or "knowledge")
-    style = (data.get("style") or "干货").strip() or "干货"
+    with _perf.TimedBlock("create", "rules") as block:
+        seed_topic = build_seed_topic(field_name, direction, idea)
+        partition_name = CONFIG.normalize_partition((data.get("partition") or "knowledge").strip() or "knowledge")
+        style = (data.get("style") or "干货").strip() or "干货"
 
-    raw_topic_result = run_topic(
-        partition_name=partition_name,
-        up_ids=None,
-        seed_topic=seed_topic,
-    )
-    topic_result = build_creator_topic_result(
-        field_name=field_name,
-        direction=direction,
-        idea=idea,
-        partition_name=partition_name,
-        style=style,
-        base_topic_result=raw_topic_result,
-    )
-    chosen_topic = (topic_result.get("ideas") or [{}])[0].get("topic") or seed_topic
-    copy_result = to_plain_data(build_rule_copy_agent().run(topic=chosen_topic, style=style))
+        raw_topic_result = run_topic(
+            partition_name=partition_name,
+            up_ids=None,
+            seed_topic=seed_topic,
+        )
+        topic_result = build_creator_topic_result(
+            field_name=field_name,
+            direction=direction,
+            idea=idea,
+            partition_name=partition_name,
+            style=style,
+            base_topic_result=raw_topic_result,
+        )
+        chosen_topic = (topic_result.get("ideas") or [{}])[0].get("topic") or seed_topic
+        copy_result = to_plain_data(build_rule_copy_agent().run(topic=chosen_topic, style=style))
 
-    return jsonify(
-        {
-            "success": True,
-            "data": {
-                "seed_topic": seed_topic,
-                "normalized_profile": topic_result.get("normalized_profile", ""),
-                "partition": partition_name,
-                "style": style,
-                "topic_result": topic_result,
-                "copy_result": copy_result,
-                "chosen_topic": chosen_topic,
-            },
-        }
-    )
+        return jsonify(
+            {
+                "success": True,
+                "data": {
+                    "seed_topic": seed_topic,
+                    "normalized_profile": topic_result.get("normalized_profile", ""),
+                    "partition": partition_name,
+                    "style": style,
+                    "topic_result": topic_result,
+                    "copy_result": copy_result,
+                    "chosen_topic": chosen_topic,
+                },
+            }
+        )
 
 
 @api_bp.post("/api/module-analyze")
 def api_module_analyze():
     data = request.get_json(silent=True) or {}
-    try:
-        result = execute_module_analyze_request(data)
-        if runtime_llm_enabled():
-            flush_traces()
-            export_recent_traces_to_file(module_type="module_analyze", trace_name_contains="web.run_llm_module_analyze")
-        return jsonify({"success": True, "data": result})
-    except ModuleAnalyzeRequestError as exc:
-        return jsonify({"success": False, "error": exc.message, "data": exc.payload}), exc.status_code
-    except Exception as exc:
-        # LLM 失败时也导出 trace
-        if runtime_llm_enabled():
-            flush_traces()
-            export_recent_traces_to_file(module_type="module_analyze", trace_name_contains="web.run_llm_module_analyze")
-        return jsonify({"success": False, "error": f"视频分析失败：{exc}"}), 500
+    with _perf.TimedBlock("analyze", "unknown") as block:
+        try:
+            result = execute_module_analyze_request(data)
+            block.path = result.get("_route_path") or result.get("runtime_mode", "unknown")
+            if "llm_fast_path" in str(result.get("agent_trace", [])):
+                block.path = "fast"
+            elif "llm_agent" in str(result.get("mode", "")):
+                block.path = "agent"
+            if runtime_llm_enabled():
+                flush_traces()
+                export_recent_traces_to_file(module_type="module_analyze", trace_name_contains="web.run_llm_module_analyze")
+            return jsonify({"success": True, "data": result})
+        except ModuleAnalyzeRequestError as exc:
+            return jsonify({"success": False, "error": exc.message, "data": exc.payload}), exc.status_code
+        except Exception as exc:
+            if runtime_llm_enabled():
+                flush_traces()
+                export_recent_traces_to_file(module_type="module_analyze", trace_name_contains="web.run_llm_module_analyze")
+            return jsonify({"success": False, "error": f"视频分析失败：{exc}"}), 500
 
 
 @api_bp.post("/api/module-analyze/start")
@@ -404,8 +418,17 @@ def api_chat():
     if not message:
         return jsonify({"success": False, "error": "请输入对话内容"}), 400
 
+    t0 = time.time()
     try:
-        result = run_llm_chat(data)
+        with _perf.TimedBlock("chat", "unknown") as block:
+            result = run_llm_chat(data)
+            block.path = result.get("_route_path", "unknown")
+            if "agent_trace" in result and "llm_direct_chat" in str(result.get("agent_trace", [])):
+                block.path = "direct"
+            elif "llm_fast_path" in str(result.get("agent_trace", [])):
+                block.path = "fast"
+            elif "llm_agent" in str(result.get("mode", "")):
+                block.path = "agent"
         flush_traces()
         export_recent_traces_to_file(module_type="workspace_chat", trace_name_contains="web.run_llm_chat")
         return jsonify({"success": True, "data": result})
@@ -498,3 +521,33 @@ def api_pipeline():
         seed_topic=data.get("topic"),
     )
     return jsonify({"success": True, "data": result})
+
+
+@api_bp.route("/api/metrics")
+def api_metrics():
+    """Performance metrics dashboard — P50/P95 latency, path distribution, cache stats."""
+    fmt = request.args.get("format", "json")
+    rows = _perf.summary_table()
+    if fmt == "text":
+        return Response(_perf.summary_text(), mimetype="text/plain; charset=utf-8")
+    return jsonify({"success": True, "data": {"rows": rows, "summary": _perf.summary_text()}})
+
+
+@api_bp.route("/api/cache-stats")
+def api_cache_stats():
+    """Cache hit/miss statistics."""
+    return jsonify({"success": True, "data": {
+        "video": _cache.video_cache.stats(),
+        "creator": _cache.creator_cache.stats(),
+        "chat": _cache.chat_cache.stats(),
+    }})
+
+
+@api_bp.post("/api/metrics/reset")
+def api_metrics_reset():
+    """Reset performance metrics."""
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") != "yes":
+        return jsonify({"success": False, "error": "Send confirm=yes to reset"}), 400
+    _perf.reset()
+    return jsonify({"success": True, "message": "Metrics reset"})

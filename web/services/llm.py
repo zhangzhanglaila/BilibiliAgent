@@ -6,6 +6,8 @@ import threading
 import time
 
 from web.services.reference import *
+import metrics as _perf
+import cache as _cache
 from web.services.session_memory import (
     build_cache_identity,
     ensure_session_id,
@@ -54,6 +56,66 @@ def build_workspace_chat_system_prompt() -> str:
         "如果用户请求的是找视频、看内容、搜索推荐等消费类需求，优先调用 web_search 搜索相关视频或内容。\n"
         "如果工具超时、失败或无结果，直接跳过该工具，基于现有上下文继续回答，不要卡住。"
     )
+
+# 判断用户消息是否需要走 Agent + 工具调用路径。
+CHAT_AGENT_TRIGGER_KEYWORDS = (
+    "分析视频", "http", "bilibili.com", "BV", "av", "热点", "趋势", "排行榜",
+    "对标", "选题", "文案", "搜索", "检索", "知识库", "帮我查", "帮我找",
+    "历史对话", "回顾", "复盘", "之前聊",
+)
+
+
+def should_use_chat_agent(message: str) -> bool:
+    clean = (message or "").strip()
+    if not clean:
+        return False
+    return any(keyword in clean for keyword in CHAT_AGENT_TRIGGER_KEYWORDS)
+
+
+# 直接 LLM 对话（跳过 ReAct 循环），用于不涉及工具调用的简单问答。
+def run_llm_chat_direct(
+    message: str,
+    history: list,
+    creator_context: dict,
+    video_url: str,
+    session_id: str,
+    session_context_source: str,
+) -> dict:
+    llm = build_runtime_llm_client()
+    llm.require_available()
+
+    history_text = ""
+    if history:
+        recent = history[-6:]
+        history_text = "对话历史：\n" + "\n".join(
+            f"{'用户' if h.get('role') == 'user' else '助手'}: {str(h.get('content', ''))[:200]}"
+            for h in recent
+        )
+
+    creator_text = ""
+    if any(creator_context.values()):
+        creator_text = f"创作者信息：方向={creator_context.get('direction')}, 分区={creator_context.get('partition')}, 风格={creator_context.get('style')}"
+
+    sys = "你是 B 站创作工作台的智能助手。用中文直接、简洁地回答用户问题。"
+    usr = (
+        f"用户问题：{message}\n\n"
+        + (f"{history_text}\n\n" if history_text else "")
+        + (f"{creator_text}\n" if creator_text else "")
+        + (f"视频链接：{video_url}" if video_url else "")
+        + "\n\n请直接回答，不要返回 JSON。"
+    )
+    try:
+        reply = llm.invoke_text(sys, usr, fallback="抱歉，当前无法处理你的问题，请稍后重试。")
+    except Exception:
+        reply = "抱歉，当前无法处理你的问题，请稍后重试。"
+    return {
+        "reply": (reply or "").strip() or "抱歉，暂无回复。",
+        "suggested_next_actions": [],
+        "mode": "llm_agent",
+        "agent_trace": ["llm_direct_chat"],
+        "tool_observations": [],
+        "reference_links": [],
+    }
 
 # 将视频信息构建成 LLM 提示词使用的视频结构。
 def build_llm_video_payload(info: dict, bvid: str, url: str) -> dict:
@@ -491,6 +553,12 @@ def run_llm_module_analyze_fast(
     market_snapshot_future=None,
     progress_callback=None,
 ) -> dict:
+    # Cache check: skip if recently analyzed
+    cached_result = _cache.video_cache.get(_cache.video_cache_key((data.get("url") or "").strip()))
+    if cached_result:
+        _perf.record(module="analyze", path="fast", latency_ms=0.0, success=True, error_type="cache_hit")
+        return cached_result
+
     exports = app_exports()
     url = (data.get("url") or "").strip()
     preloaded = build_video_analyze_preloaded_context(resolved, url, market_snapshot)
@@ -554,7 +622,9 @@ def run_llm_module_analyze_fast(
 
     result.setdefault("agent_trace", ["llm_fast_path"])
     result.setdefault("tool_observations", [{"action": "precomputed_retrieval", "observation": retrieval_result}])
-    return exports.finalize_module_analyze_result(result, resolved, market_snapshot)
+    final_result = exports.finalize_module_analyze_result(result, resolved, market_snapshot)
+    _cache.video_cache.set(_cache.video_cache_key(url), final_result)
+    return final_result
 
 
 # 视频分析 Agent 的动作验证器，拦截不允许的工具调用。
@@ -710,6 +780,59 @@ def finalize_module_analyze_result(result: dict, resolved: dict, market_snapshot
 
 
 # 在 LLM Agent 模式下执行内容创作模块的完整生成流程。
+# 内容创作快速路径：预加载创作简报，单次 LLM 调用生成全部内容。
+@traceable(run_type="chain", name="web.run_llm_module_create_fast", tags=["web", "llm", "fast_path", "module_create"])
+def run_llm_module_create_fast(data: dict) -> dict:
+    field_name = (data.get("field") or "").strip()
+    direction = (data.get("direction") or "").strip()
+    idea = (data.get("idea") or "").strip()
+    partition_name = (data.get("partition") or "knowledge").strip() or "knowledge"
+    ck = _cache.creator_cache_key(field_name, direction, idea, partition_name)
+    cached = _cache.creator_cache.get(ck)
+    if cached:
+        _perf.record(module="create", path="fast", latency_ms=0.0, success=True, error_type="cache_hit")
+        return cached
+
+    llm = build_runtime_llm_client()
+    llm.require_available()
+    style = (data.get("style") or "干货").strip() or "干货"
+    briefing = compact_creator_briefing_for_llm(build_creator_briefing(field_name, direction, idea, partition_name))
+
+    sys = "你是 B 站内容创作助手，为创作者生成选题和可发布文案。只返回 JSON。"
+    usr = (
+        "返回一个 JSON 对象，字段包含：normalized_profile, seed_topic, partition, style, chosen_topic, topic_result, copy_result。\n\n"
+        f"用户输入：{json.dumps({'field': field_name, 'direction': direction, 'idea': idea, 'partition': partition_name, 'style': style}, ensure_ascii=False)}\n\n"
+        f"创作简报：{json.dumps(briefing, ensure_ascii=False)}\n\n"
+        "规则：\n"
+        "1. partition 和 style 复用当前输入。\n"
+        "2. topic_result.ideas 必须 3 个，每项含 topic/reason/video_type/keywords。topic 必须是具体新方向不要提问句。\n"
+        "3. copy_result 须含 topic/style/titles(3)/script(至少4段含section/duration/content)/description/tags/pinned_comment。\n"
+        "4. titles 必须是陈述/叙事型 B 站标题。\n"
+        "只返回 JSON。"
+    )
+    result = llm.invoke_json_with_fallback(sys, usr, fallback={
+        "normalized_profile": "内容创作",
+        "seed_topic": field_name or "通用创作方向",
+        "partition": partition_name,
+        "style": style,
+        "chosen_topic": "请重新输入创作方向",
+        "topic_result": {"ideas": []},
+        "copy_result": {},
+    })
+    if not isinstance(result, dict):
+        raise ValueError("内容创作 fast path 返回格式无效")
+    copy_topic = (
+        clean_copy_text(result.get("chosen_topic", ""))
+        or clean_copy_text(result.get("seed_topic", ""))
+        or build_seed_topic(field_name, direction, idea)
+    )
+    result["copy_result"] = normalize_copy_result_payload(result.get("copy_result"), copy_topic, style)
+    result.setdefault("runtime_mode", "llm_agent")
+    result.setdefault("agent_trace", ["creator_briefing", "llm_fast_path"])
+    _cache.creator_cache.set(ck, result)
+    return result
+
+
 @traceable(run_type="chain", name="web.run_llm_module_create", tags=["web", "llm", "rag", "module_create"])
 def run_llm_module_create(data: dict) -> dict:
     agent = app_exports().get_llm_workspace_agent()
@@ -725,6 +848,16 @@ def run_llm_module_create(data: dict) -> dict:
         "- topic_result: 对象，至少包含 ideas(长度 3 的数组)，每项包含 topic, reason, video_type, keywords；topic 必须是具体的新方向，不要提问句，不要把原题后面机械接“哪种切口/哪种表达/下一条拍什么”\n"
         "- copy_result: 对象，包含 topic, style, titles(3个), script(至少4段，含 section/duration/content), description, tags, pinned_comment\n"
     )
+    # 优先快速路径
+    try:
+        return run_llm_module_create_fast(data)
+    except Exception as fast_exc:
+        if should_skip_same_provider_fallback(fast_exc):
+            raise RuntimeError(
+                f"LLM 服务当前不可用：{format_llm_error(fast_exc)}"
+            ) from fast_exc
+
+    # 快速路径失败，降级到 ReAct 循环
     try:
         result = agent.run_structured(
         task_name="module_create",
@@ -935,30 +1068,43 @@ def run_llm_chat(data: dict) -> dict:
 
     response_contract = (
         "返回一个 JSON 对象，字段必须包含：\n"
-        "- reply: 字符串，直接回答用户问题；如果信息不足，要明确指出还缺什么\n"
-        "- suggested_next_actions: 字符串数组，可为空\n"
-        "- mode: 固定返回 llm_agent\n"
+        "- reply: 字符串，直接回复用户的中文自然语言，不返回 JSON 结构。\n"
+        "- suggested_next_actions: 字符串数组，建议下一步操作。\n"
+        "- mode: 字符串，标注执行模式，如 llm_agent。\n"
     )
-    allowed_tools = allowed_tools_for_scene("workspace_chat")
-    result = agent.run_structured(
-        task_name="workspace_chat",
-        task_goal="理解用户自然语言意图，自主决定是否调用工具来完成选题、视频分析、热点判断、文案建议等问题，并用中文直接回复。",
-        user_payload={
-            "message": message,
-            "history": history[-CONFIG.chat_session_history_limit :],
-            "creator_context": creator_context,
-            "video_url": video_url,
-            "session_id": session_id,
-            "session_context_source": session_context.get("source", ""),
-        },
-        response_contract=response_contract,
-        allowed_tools=allowed_tools,
-        required_final_keys=["reply", "suggested_next_actions", "mode"],
-        load_history=False,
-        save_memory=False,
-        system_prompt_override=build_workspace_chat_system_prompt(),
-        action_validator=build_workspace_chat_action_validator(message),
-    )
+
+    # 快速路径：简单对话直接 LLM 回复，跳过 ReAct 循环
+    if not should_use_chat_agent(message) and not video_url:
+        result = run_llm_chat_direct(
+            message=message,
+            history=history,
+            creator_context=creator_context,
+            video_url=video_url,
+            session_id=session_id,
+            session_context_source=session_context.get("source", ""),
+        )
+    else:
+        allowed_tools = allowed_tools_for_scene("workspace_chat")
+        result = agent.run_structured(
+            task_name="workspace_chat",
+            task_goal="理解用户自然语言意图，自主决定是否调用工具来完成选题、视频分析、热点判断、文案建议等问题，并用中文直接回复。",
+            user_payload={
+                "message": message,
+                "history": history[-CONFIG.chat_session_history_limit :],
+                "creator_context": creator_context,
+                "video_url": video_url,
+                "session_id": session_id,
+                "session_context_source": session_context.get("source", ""),
+            },
+            response_contract=response_contract,
+            allowed_tools=allowed_tools,
+            required_final_keys=["reply", "suggested_next_actions", "mode"],
+            load_history=False,
+            save_memory=False,
+                enable_reflection=False,
+            system_prompt_override=build_workspace_chat_system_prompt(),
+            action_validator=build_workspace_chat_action_validator(message),
+        )
     chat_query_text = " ".join(
         value
         for value in [

@@ -79,8 +79,10 @@ class SearchTool:
             "include_raw_content": False,  # 不包含原始内容
         }
         try:
-            # 发送POST请求到Tavily搜索API
-            response = requests.post(
+            # 发送POST请求到Tavily搜索API（绕过系统代理）
+            session = requests.Session()
+            session.trust_env = False
+            response = session.post(
                 "https://api.tavily.com/search",
                 json=payload,
                 timeout=self.timeout_seconds,

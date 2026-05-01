@@ -2247,7 +2247,7 @@ function renderChatSessionsPopup(sessions) {
   if (!sessions || sessions.length === 0) {
     popup.innerHTML = '<div class="chat-sessions-popup__empty">暂无历史会话</div>';
   } else {
-    // 最新会话显示在最下方
+    // 最新会话在列表最下方：API 返回最新→最旧，reverse 后 DOM 为最旧→最新，flex-end 使最新显示在底部
     const sorted = [...sessions].reverse();
     popup.innerHTML = sorted.map(s => `
       <div class="chat-sessions-popup__item" data-session-id="${s.session_id}">
@@ -2276,6 +2276,10 @@ function renderChatSessionsPopup(sessions) {
   const shell = document.querySelector('.assistant-input-shell');
   if (shell) {
     shell.appendChild(popup);
+    // 最新会话在底部，DOM 渲染后滚动到底部
+    requestAnimationFrame(() => {
+      popup.scrollTop = popup.scrollHeight;
+    });
     // 点击外部关闭
     setTimeout(() => {
       document.addEventListener('click', hideChatSessionsPopupOnClickOutside, { once: true });
@@ -2321,7 +2325,14 @@ async function switchToChatSession(sessionId) {
     } catch (_) {}
     writeSessionJson(CHAT_SESSION_HISTORY_STORAGE_KEY, state.chatHistory);
     renderAssistant();
-    scrollAssistantToLastUserMessage();
+    // 最新用户问题置顶（可视区域顶部），回答在下面，往上滑看更早消息
+    const box = $('#assistantResult');
+    if (box) {
+      // 找到最后一个 user 消息，在 DOM 中它位于最新消息之后
+      const rows = box.querySelectorAll('.chat-row--user');
+      const lastUser = rows[rows.length - 1];
+      if (lastUser) lastUser.scrollIntoView({ block: 'start', behavior: 'instant' });
+    }
     showToast('已切换到历史会话', '', 'success');
   } catch (err) {
     showToast('加载会话失败', err.message, 'error');
@@ -2789,39 +2800,21 @@ function updateAssistantMessageContent(messageItem) {
 }
 
 // 切换历史会话后，定位到最后一个用户问题（置顶）
-function scrollAssistantToLastUserMessage() {
+function scrollAssistantToBottom() {
+  // 自然顺序：最新消息在 DOM 底部，滚动到底部即最新消息可见
   const box = $('#assistantResult');
   if (!box) return;
-  // 找到最后一个 user 消息的 index
-  let lastUserIndex = -1;
-  for (let i = state.chatHistory.length - 1; i >= 0; i--) {
-    if (state.chatHistory[i].role === 'user') {
-      lastUserIndex = i;
-      break;
-    }
-  }
-  if (lastUserIndex < 0) return;
-  // 等 DOM 完全渲染后再计算滚动位置
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      const row = box.querySelector(`[data-chat-item="${lastUserIndex}"]`);
-      if (!row) return;
-      box.scrollTop = 0; // 先置顶
-      row.scrollIntoView({ block: 'start', behavior: 'instant' }); // 再把目标元素滚动到顶部
-    });
-  });
+  box.scrollTop = box.scrollHeight;
 }
 
 function positionAssistantMessageAtTop(messageItem) {
-  if (!messageItem) return;
+  // 自然顺序渲染：旧消息在上，新消息在下。发消息后滚动到新消息位置。
   const box = $('#assistantResult');
   if (!box) return;
   const index = state.chatHistory.findIndex(item => item === messageItem);
   if (index < 0) return;
   const row = box.querySelector(`[data-chat-item="${index}"]`);
-  if (!row) return;
-  const targetTop = Math.max(row.offsetTop - 8, 0);
-  box.scrollTop = Math.min(targetTop, Math.max(box.scrollHeight - box.clientHeight, 0));
+  if (row) row.scrollIntoView({ block: 'end', behavior: 'instant' });
 }
 
 // 用当前聊天状态重新渲染助手区域，并绑定动态按钮。
@@ -2929,6 +2922,7 @@ async function typeAssistantReply(messageItem) {
   state.chatTyping = false;
   updateAssistantMessageContent(messageItem);
   updateAssistantButton();
+  scrollAssistantToBottom();
 }
 
 // 以带进度条的方式执行内容创作请求并展示结果。
